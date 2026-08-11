@@ -3,6 +3,7 @@ import { AppProvider, useApp } from "./context/AppContext";
 import { BookSwitcher } from "./components/BookSwitcher";
 import { ChatView } from "./components/ChatView";
 import { Dashboard } from "./components/Dashboard";
+import { LoginGate } from "./components/LoginGate";
 import { SearchView } from "./components/SearchView";
 import { Settings } from "./components/Settings";
 import "./App.css";
@@ -10,11 +11,15 @@ import "./App.css";
 type Tab = "chat" | "dashboard" | "search" | "settings";
 
 function Shell() {
-  const { loading } = useApp();
+  const { loading, googleUser, skippedLogin } = useApp();
   const [tab, setTab] = useState<Tab>("chat");
 
   if (loading) {
     return <div className="loading-screen">กำลังโหลด...</div>;
+  }
+
+  if (!googleUser && !skippedLogin) {
+    return <LoginGate />;
   }
 
   return (

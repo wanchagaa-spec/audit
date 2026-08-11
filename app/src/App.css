@@ -36,6 +36,41 @@ body {
   height: 100dvh;
 }
 
+.login-gate {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  background: var(--surface);
+}
+
+.login-gate h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  text-align: center;
+}
+
+.login-gate > .muted {
+  text-align: center;
+  margin-bottom: 0.5rem;
+}
+
+.primary-button {
+  padding: 0.7rem;
+  border-radius: 10px;
+  border: none;
+  background: var(--primary);
+  color: white;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.primary-button:disabled {
+  opacity: 0.4;
+}
+
 .app-shell {
   display: flex;
   flex-direction: column;
