@@ -1,5 +1,5 @@
 import type { Category, EntryType } from "../types";
-import { extractAmount, matchCategory, parseMessage } from "./parser";
+import { detectType, extractAmount, matchCategory, parseMessage } from "./parser";
 
 export type PendingClarification =
   | { kind: "amount"; type: EntryType; categoryId?: string; note: string }
@@ -19,8 +19,16 @@ export interface ChatEngineResult {
   quickReplyCategories?: Category[];
 }
 
-function isPureNumericReply(text: string): boolean {
-  return /^\s*\d{1,3}(,\d{3})*(\.\d+)?\s*(บาท)?\s*$/.test(text.trim());
+const GREETINGS = new Set([
+  "สวัสดี", "สวัสดีครับ", "สวัสดีค่ะ", "หวัดดี", "หวัดดีครับ", "หวัดดีค่ะ",
+  "ดีครับ", "ดีค่ะ", "hello", "hi", "hey", "เริ่ม", "start", "วิธีใช้", "help", "ช่วยด้วย",
+]);
+
+const HELP_MESSAGE =
+  "สวัสดีค่ะ พิมพ์รายการที่เกิดขึ้นได้เลย เช่น \"ซื้อกาแฟ 60\" หรือ \"เงินเดือนเข้า 25000\" ฉันจะช่วยจดให้อัตโนมัติ";
+
+function isGreeting(text: string): boolean {
+  return GREETINGS.has(text.trim().toLowerCase());
 }
 
 function formatAmount(n: number): string {
@@ -68,20 +76,19 @@ export function handleUserMessage(
   }
 
   if (pending.kind === "amount") {
-    if (isPureNumericReply(text) || extractAmount(text) !== null) {
-      const amount = extractAmount(text);
-      if (amount !== null) {
-        const combinedNote = `${pending.note} ${text}`.trim();
-        const categoryId =
-          pending.categoryId ?? matchCategory(combinedNote, categories, pending.type)?.id;
-        if (!categoryId) {
-          return askCategory(amount, pending.type, pending.note, categories);
-        }
-        return okResult(
-          { amount, type: pending.type, categoryId, note: pending.note },
-          categories
-        );
+    const amount = extractAmount(text);
+    if (amount !== null) {
+      // Re-detect type from the combined context instead of trusting the
+      // guess from the first (possibly amount-less, ambiguous) message —
+      // e.g. "สวัสดี" alone defaults to expense, but "สวัสดี" + "เงินเข้า
+      // 16000" should resolve as income.
+      const combinedNote = `${pending.note} ${text}`.trim();
+      const type = detectType(combinedNote);
+      const category = matchCategory(combinedNote, categories, type);
+      if (!category) {
+        return askCategory(amount, type, pending.note, categories);
       }
+      return okResult({ amount, type, categoryId: category.id, note: pending.note }, categories);
     }
     // Reply didn't look like an amount answer — treat as a brand new message.
     return handleFreshMessage(text, categories);
@@ -89,28 +96,33 @@ export function handleUserMessage(
 
   // pending.kind === "category"
   const trimmed = text.trim();
-  const exact = categories.find(
-    (c) => c.type === pending.type && c.name.trim() === trimmed
-  );
-  const byKeyword = exact ?? matchCategory(text, categories, pending.type);
+  const found =
+    categories.find((c) => c.type === pending.type && c.name.trim() === trimmed) ??
+    matchCategory(text, categories, pending.type) ??
+    // The reply might reveal this was actually the other type all along
+    // (e.g. answering "เงินเดือน" to a question asked under "expense") —
+    // check by exact name across all categories, then by keyword under the
+    // opposite type, before giving up.
+    categories.find((c) => c.name.trim() === trimmed) ??
+    matchCategory(text, categories, pending.type === "income" ? "expense" : "income");
 
-  if (byKeyword) {
+  if (found) {
     return okResult(
-      {
-        amount: pending.amount,
-        type: pending.type,
-        categoryId: byKeyword.id,
-        note: pending.note,
-      },
+      { amount: pending.amount, type: found.type, categoryId: found.id, note: pending.note },
       categories
     );
   }
 
-  // Doesn't match any category — treat as a brand new message instead.
-  return handleFreshMessage(text, categories);
+  // Doesn't match any category — try the reply combined with what's already
+  // known (note + amount) as a brand new message, so progress isn't lost.
+  return handleFreshMessage(`${pending.note} ${pending.amount} ${text}`.trim(), categories);
 }
 
 function handleFreshMessage(text: string, categories: Category[]): ChatEngineResult {
+  if (isGreeting(text)) {
+    return { botMessage: HELP_MESSAGE, pending: null };
+  }
+
   const result = parseMessage(text, categories);
   if (result.status === "ok") {
     return okResult(
