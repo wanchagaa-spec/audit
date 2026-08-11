@@ -71,15 +71,14 @@ export async function appendTransaction(
   });
 }
 
-export async function readTransactionsForMonth(
+export async function readAllTransactions(
   accessToken: string,
-  spreadsheetId: string,
-  month: string
+  spreadsheetId: string
 ): Promise<TransactionRow[]> {
   const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Transactions!A2:J100000`);
   const rows: string[][] = data.values ?? [];
   return rows
-    .filter((r) => r[0] && r[1]?.startsWith(month))
+    .filter((r) => r[0])
     .map((r) => ({
       id: r[0],
       date: r[1],
@@ -91,5 +90,34 @@ export async function readTransactionsForMonth(
       addedBy: r[7] ?? "",
       addedByName: r[8] ?? "",
       createdAt: r[9] ?? "",
+    }));
+}
+
+export async function readTransactionsForMonth(
+  accessToken: string,
+  spreadsheetId: string,
+  month: string
+): Promise<TransactionRow[]> {
+  const all = await readAllTransactions(accessToken, spreadsheetId);
+  return all.filter((r) => r.date?.startsWith(month));
+}
+
+export interface BudgetRow {
+  id: string;
+  categoryId: string;
+  month: string;
+  limitAmount: number;
+}
+
+export async function readBudgets(accessToken: string, spreadsheetId: string): Promise<BudgetRow[]> {
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A2:D10000`);
+  const rows: string[][] = data.values ?? [];
+  return rows
+    .filter((r) => r[0])
+    .map((r) => ({
+      id: r[0],
+      categoryId: r[1],
+      month: r[2],
+      limitAmount: Number(r[3]),
     }));
 }
