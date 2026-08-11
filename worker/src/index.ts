@@ -5,7 +5,7 @@ import { isTextMessageEvent, replyToLine, verifyLineSignature, type LineWebhookB
 import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
 import { getAccountLink, getPending, setAccountLink, setPending } from "./state.ts";
 import { signState, verifyState } from "./signedState.ts";
-import { buildMonthlySummaryText, isSummaryCommand } from "./commands.ts";
+import { matchCommand } from "./commands.ts";
 
 export interface Env {
   ACCOUNTS: KVNamespace;
@@ -106,9 +106,10 @@ export async function handleTextMessage(
     return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
   }
 
-  if (isSummaryCommand(text)) {
+  const reportHandler = await matchCommand(text);
+  if (reportHandler) {
     return withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-      buildMonthlySummaryText(accessToken, link.spreadsheetId)
+      reportHandler(accessToken, link.spreadsheetId)
     );
   }
 

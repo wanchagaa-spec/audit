@@ -20,6 +20,7 @@ class FakeKV {
 }
 
 const sheetRows = []; // simulates the Transactions tab
+const budgetRows = []; // simulates the Budgets tab
 const replies = []; // captures what would have been sent back to LINE
 
 const realFetch = fetch;
@@ -44,6 +45,9 @@ globalThis.fetch = async (url, init) => {
   }
   if (u.includes("Transactions!A2:J100000")) {
     return new Response(JSON.stringify({ values: sheetRows }), { status: 200 });
+  }
+  if (u.includes("Budgets!A2:D10000")) {
+    return new Response(JSON.stringify({ values: budgetRows }), { status: 200 });
   }
   if (u.includes("api.line.me/v2/bot/message/reply")) {
     const body = JSON.parse(init.body);
@@ -116,6 +120,49 @@ check("second row written to the sheet", sheetRows.length === 2 && sheetRows[1][
 // 5. Monthly summary command reads back what was written.
 const summaryReply = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
 check("summary mentions total expense", summaryReply.includes("180"));
+
+// 6. More transactions to exercise the report commands with real spread:
+// food (100 total, 2 entries), shopping (120, 1 entry), income (5000).
+await handleTextMessage(env, lineUserId, "ข้าว 40", origin);
+await handleTextMessage(env, lineUserId, "เงินเดือนเข้า 5000", origin);
+
+const todayReply = await handleTextMessage(env, lineUserId, "วันนี้ใช้ไปเท่าไหร่", origin);
+check("today's summary totals all three expenses (220)", todayReply.includes("220"));
+
+const incomeReply = await handleTextMessage(env, lineUserId, "รายรับเดือนนี้เท่าไหร่", origin);
+check("income-this-month reports 5000", incomeReply.includes("5,000"));
+
+const balanceReply = await handleTextMessage(env, lineUserId, "เหลือเงินเท่าไหร่", origin);
+check("balance is income minus expense (4,780)", balanceReply.includes("4,780"));
+
+const topCategoryReply = await handleTextMessage(env, lineUserId, "หมวดไหนใช้เงินเยอะที่สุด", origin);
+check("top category by spend is shopping (120 > 100)", topCategoryReply.includes("ช้อปปิ้ง"));
+
+const frequentReply = await handleTextMessage(env, lineUserId, "ซื้ออะไรบ่อยที่สุด", origin);
+check("most frequent category is food (2 entries)", frequentReply.includes("อาหาร"));
+
+const avgReply = await handleTextMessage(env, lineUserId, "เฉลี่ยวันละเท่าไหร่", origin);
+check("daily average mentions the 220 total", avgReply.includes("220"));
+
+const currentMonth = new Date().toISOString().slice(0, 7);
+budgetRows.push(["b1", "food", currentMonth, "50"]);
+const budgetReply = await handleTextMessage(env, lineUserId, "งบเหลือเท่าไหร่", origin);
+check("over-budget category is flagged", budgetReply.includes("เกินงบแล้ว"));
+
+const searchReply = await handleTextMessage(env, lineUserId, "ค้นหาข้าว", origin);
+check("search finds the matching transaction", searchReply.includes("40"));
+
+const recentReply = await handleTextMessage(env, lineUserId, "รายการล่าสุด", origin);
+check("recent transactions list is returned", recentReply.includes("5 รายการล่าสุด"));
+
+const helpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
+check("help lists available commands", helpReply.includes("คำสั่งที่ใช้ได้ตอนนี้"));
+
+const weekReply = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
+check("week summary doesn't error", weekReply.includes("รายรับ"));
+
+const lastMonthReply = await handleTextMessage(env, lineUserId, "สรุปเดือนที่แล้ว", origin);
+check("last month summary doesn't error", lastMonthReply.length > 0);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

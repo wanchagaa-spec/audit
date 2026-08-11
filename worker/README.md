@@ -107,8 +107,21 @@ the id straight from the webhook event instead, which is always in the right sco
 
 Add the Official Account as a friend in LINE. First message should prompt you to tap a
 link to connect your Google account. After signing in, you'll see a "เชื่อมบัญชีสำเร็จ"
-page — close it and go back to the chat. From then on, just type things like
-"ซื้อกาแฟ 60" or "สรุปเดือนนี้".
+page — close it and go back to the chat. From then on, just log things like
+"ซื้อกาแฟ 60", or ask it questions — see `src/commands.ts` for the full matcher list
+(each with several accepted phrasings), summarized by texting "วิธีใช้":
+
+- สรุปวันนี้ / สรุปสัปดาห์นี้ / สรุปเดือนนี้ / สรุปเดือนที่แล้ว
+- เหลือเงินเท่าไหร่ (all-time cumulative balance) / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่
+- วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด (by count) / เฉลี่ยใช้เงินต่อวันเท่าไหร่
+- งบเหลือเท่าไหร่ (reads the Budgets tab, set from the web app's Settings)
+- ค้นหา &lt;คำ&gt; / รายการล่าสุด
+- วิธีใช้ (lists all of the above)
+
+All of these are plain Google Sheets reads/aggregations over data already in the
+spreadsheet — no external AI involved, so they stay within the free-forever design (see
+PLAN.md section 14 for the tradeoff notes on adding an AI fallback for messages none of
+these cover).
 
 ## Local development
 
