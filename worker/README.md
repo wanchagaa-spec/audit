@@ -24,15 +24,9 @@ layout**, so a spreadsheet stays compatible whichever interface you log from.
 
 ### 2. Cloudflare account
 
-1. Sign up at https://dash.cloudflare.com if you don't have an account.
-2. From this `worker/` directory, log in and create the KV namespace:
-
-   ```bash
-   npx wrangler login
-   npx wrangler kv namespace create ACCOUNTS
-   ```
-
-   Paste the returned `id` into `wrangler.toml` under `[[kv_namespaces]]`.
+Sign up at https://dash.cloudflare.com (no credit card needed for the Workers/KV free tier).
+Then create an API Token: **My Profile → API Tokens → Create Token → use the "Edit
+Cloudflare Workers" template → Create Token**. Copy it once (shown only that one time).
 
 ### 3. Reuse the same Google OAuth client as the web app — plus a Client Secret
 
@@ -44,23 +38,52 @@ must never reach a browser.
 1. In the same Google Cloud project as before, open the OAuth client you already created
    (APIs & Services → Credentials).
 2. Add an **Authorized redirect URI**: `https://<your-worker-subdomain>.workers.dev/oauth/callback`
-   (you'll know the exact subdomain after the first `wrangler deploy`; redeploy isn't
-   needed to add this — just update it in Google Cloud Console once you know the URL).
+   (you'll know the exact subdomain after the first deploy; redeploy isn't needed to add
+   this — just update it in Google Cloud Console once you know the URL).
 3. Copy the **Client secret** shown on that same page.
 
-### 4. Set secrets and deploy
+### 4. Deploy — no terminal needed, everything runs on GitHub
+
+Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
+
+1. Add these as **repository secrets** (Settings → Secrets and variables → Actions →
+   New repository secret) — `VITE_GOOGLE_CLIENT_ID` already exists from the web app setup,
+   reused automatically:
+
+   | Secret name | Value |
+   |---|---|
+   | `CLOUDFLARE_API_TOKEN` | the token from step 2 |
+   | `LINE_CHANNEL_SECRET` | from step 1 |
+   | `LINE_CHANNEL_ACCESS_TOKEN` | from step 1 |
+   | `GOOGLE_CLIENT_SECRET` | from step 3 |
+   | `STATE_SIGNING_SECRET` | any long random string you make up |
+
+2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
+   **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
+   paste it into `worker/wrangler.toml` under `[[kv_namespaces]]` (edit directly on
+   github.com — pencil icon on the file — then commit).
+3. Go to **Actions** → **"Deploy LINE bot Worker"** → **Run workflow**. Once it succeeds,
+   open the run's log to find your Worker's URL, e.g.
+   `https://expense-tracker-line-bot.<you>.workers.dev`.
+
+After this first deploy, pushing changes under `worker/` to `main` redeploys automatically.
+
+<details>
+<summary>Prefer running it from your own computer instead?</summary>
 
 ```bash
+cd worker
 npm install
+npx wrangler login
+npx wrangler kv namespace create ACCOUNTS   # paste the id into wrangler.toml
 npx wrangler secret put LINE_CHANNEL_SECRET
 npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
 npx wrangler secret put GOOGLE_CLIENT_ID          # same value as VITE_GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
-npx wrangler secret put STATE_SIGNING_SECRET      # any long random string you make up
+npx wrangler secret put STATE_SIGNING_SECRET
 npx wrangler deploy
 ```
-
-This prints your Worker's URL, e.g. `https://expense-tracker-line-bot.<you>.workers.dev`.
+</details>
 
 ### 5. Point LINE's webhook at your Worker
 
@@ -73,8 +96,9 @@ secrets are set) and turn **Use webhook** on.
 1. In LINE Developers Console → your channel → **LIFF** tab → **Add**.
 2. Endpoint URL: `https://<your-worker>.workers.dev/liff`
 3. Size: Full, Scope: `profile`.
-4. Copy the generated **LIFF ID** and set it in `wrangler.toml` under `[vars] LIFF_ID`,
-   then `npx wrangler deploy` again.
+4. Copy the generated **LIFF ID**, edit it into `worker/wrangler.toml` under
+   `[vars] LIFF_ID` directly on github.com, commit — this triggers a redeploy
+   automatically (or re-run the "Deploy LINE bot Worker" workflow manually).
 
 ## Try it
 
