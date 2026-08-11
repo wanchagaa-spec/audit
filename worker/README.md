@@ -18,8 +18,8 @@ layout**, so a spreadsheet stays compatible whichever interface you log from.
    - Issue and copy a **Channel access token (long-lived)** → this is `LINE_CHANNEL_ACCESS_TOKEN`
    - Turn **off** "Auto-reply messages" and "Greeting messages" (so only our webhook responds)
 3. Under **Response settings** (in the LINE Official Account Manager, not the Developers
-   Console): set response mode to **Bot only** — this disables the human-readable chat
-   inbox, so nobody but the webhook code ever sees raw messages (see PLAN.md 14.4).
+   Console): turn the **"Chat"** feature off — this disables the human-readable chat inbox,
+   so nobody but the webhook code ever sees raw messages (see PLAN.md 14.4).
 4. You'll set the actual webhook URL after deploying the Worker (step 4 below).
 
 ### 2. Cloudflare account
@@ -41,6 +41,10 @@ must never reach a browser.
    (you'll know the exact subdomain after the first deploy; redeploy isn't needed to add
    this — just update it in Google Cloud Console once you know the URL).
 3. Copy the **Client secret** shown on that same page.
+4. Under **OAuth consent screen → Test users**, add every Google account that will use the
+   bot (up to 100) — while the app is unverified/"Testing", only listed accounts can
+   complete sign-in. See PLAN.md for the tradeoff against submitting the app for Google
+   verification instead.
 
 ### 4. Deploy — no terminal needed, everything runs on GitHub
 
@@ -91,20 +95,20 @@ Back in LINE Developers Console → Messaging API tab → **Webhook URL**:
 `https://<your-worker>.workers.dev/webhook`, then click **Verify** (should succeed once
 secrets are set) and turn **Use webhook** on.
 
-### 6. Create the LIFF app (for the one-time account-linking step)
-
-1. In LINE Developers Console → your channel → **LIFF** tab → **Add**.
-2. Endpoint URL: `https://<your-worker>.workers.dev/liff`
-3. Size: Full, Scope: `profile`.
-4. Copy the generated **LIFF ID**, edit it into `worker/wrangler.toml` under
-   `[vars] LIFF_ID` directly on github.com, commit — this triggers a redeploy
-   automatically (or re-run the "Deploy LINE bot Worker" workflow manually).
+That's it — no LIFF app or LINE Login channel needed. The link the bot sends for
+account-linking goes straight to Google's OAuth screen; LINE opens it in its in-app
+browser like any other link. (An earlier version of this bot tried using LIFF's
+`getProfile()` to identify the LINE user before linking, but LIFF user IDs are scoped to
+the *LIFF's own channel* — not the Messaging API channel that the webhook and future
+messages use — so linked accounts never matched later messages. The current design signs
+the id straight from the webhook event instead, which is always in the right scope.)
 
 ## Try it
 
 Add the Official Account as a friend in LINE. First message should prompt you to tap a
-link to connect your Google account (opens inside LINE via LIFF, no separate browser).
-After that, just type things like "ซื้อกาแฟ 60" or "สรุปเดือนนี้".
+link to connect your Google account. After signing in, you'll see a "เชื่อมบัญชีสำเร็จ"
+page — close it and go back to the chat. From then on, just type things like
+"ซื้อกาแฟ 60" or "สรุปเดือนนี้".
 
 ## Local development
 
@@ -112,14 +116,16 @@ After that, just type things like "ซื้อกาแฟ 60" or "สรุป
 cp .dev.vars.example .dev.vars   # fill in real or test values
 npm run dev                      # wrangler dev, local KV emulation
 npm run typecheck
-node --experimental-strip-types scripts/... # see scripts/test-flow.mjs for a logic smoke test:
-npx tsx scripts/test-flow.mjs
+npx tsx scripts/test-flow.mjs    # logic smoke test, see below
 ```
 
 `scripts/test-flow.mjs` exercises the real linking/parsing/clarification/summary code
 paths against a fake in-memory KV and a mocked `fetch` standing in for Google/LINE (this
 environment has no real LINE or Google credentials to test against end-to-end) — run it
-after changing `src/index.ts`, `commands.ts`, or `state.ts` to catch regressions.
+after changing `src/index.ts`, `commands.ts`, or `state.ts` to catch regressions. It
+specifically checks that the signed `state` param on the generated Google auth link
+decodes back to the same LINE user id the webhook event carried, which is the exact bug
+class the LIFF removal above fixed.
 
 ## Known limitations (documented honestly, not blockers)
 

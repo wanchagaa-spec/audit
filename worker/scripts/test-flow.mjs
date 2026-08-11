@@ -56,12 +56,14 @@ globalThis.fetch = async (url, init) => {
 
 const { handleTextMessage } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
+const { verifyState } = await import("../src/signedState.ts");
 
 const kv = new FakeKV();
 const env = {
   ACCOUNTS: kv,
   GOOGLE_CLIENT_ID: "test-client-id",
   GOOGLE_CLIENT_SECRET: "test-client-secret",
+  STATE_SIGNING_SECRET: "test-state-secret",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -78,9 +80,17 @@ function check(label, cond) {
   }
 }
 
-// 1. Unlinked user gets prompted to link.
+// 1. Unlinked user gets prompted to link, with a Google OAuth URL whose
+// signed `state` decodes back to the exact same lineUserId that this
+// webhook event carried — this is the regression test for the bug where
+// the linked id came from a different LINE channel (LIFF) than the one
+// webhook events use, so lookups never matched.
 const unlinkedReply = await handleTextMessage(env, lineUserId, "ซื้อกาแฟ 60", origin);
-check("unlinked user is told to link", unlinkedReply.includes("/liff"));
+check("unlinked user is told to link", unlinkedReply.includes("accounts.google.com/o/oauth2/v2/auth"));
+const authorizeUrl = unlinkedReply.split("\n").pop();
+const state = new URL(authorizeUrl).searchParams.get("state");
+const decodedUserId = await verifyState(state, env.STATE_SIGNING_SECRET);
+check("state param round-trips to the webhook's own lineUserId", decodedUserId === lineUserId);
 
 // 2. Link the account (simulating a completed OAuth flow).
 await setAccountLink(kv, lineUserId, {

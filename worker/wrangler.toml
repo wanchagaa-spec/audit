@@ -9,13 +9,9 @@ compatibility_flags = ["nodejs_compat"]
 binding = "ACCOUNTS"
 id = "18630d0859b24d9591cd9025ab557cfe"
 
-[vars]
-# LIFF app id from LINE Developers Console (LIFF tab), endpoint URL = https://<your-worker>.workers.dev/liff
-LIFF_ID = "2011073282-BVEXygy2"
-
 # Secrets (never put real values here — set them with `wrangler secret put <NAME>`):
 #   LINE_CHANNEL_SECRET       - from LINE Developers Console > Messaging API channel
 #   LINE_CHANNEL_ACCESS_TOKEN - long-lived channel access token
 #   GOOGLE_CLIENT_ID          - same OAuth client used by the web app
 #   GOOGLE_CLIENT_SECRET      - from the same OAuth client (Web application type)
-#   STATE_SIGNING_SECRET      - any random string, used to sign the LIFF->OAuth state param
+#   STATE_SIGNING_SECRET      - any random string, used to sign the OAuth state param
