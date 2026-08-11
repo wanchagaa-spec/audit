@@ -21,29 +21,41 @@
 | แผนภาพสรุปรายเดือน | หน้า Dashboard แยกต่างหาก: pie chart ตามหมวดหมู่, bar chart เทียบเดือน, line trend เงินคงเหลือ |
 | งบประมาณ + แจ้งเตือน | ตั้งงบต่อหมวดหมู่/เดือน ถ้าใกล้เกินงบ ระบบส่งข้อความเตือนในแชท |
 | ค้นหา/กรองย้อนหลัง | ค้นตามคำ หมวดหมู่ ช่วงวันที่ |
-| Export ข้อมูล | ส่งออกเป็น CSV/Excel รายเดือน |
+| Export ข้อมูล | ข้อมูลอยู่ใน Google Sheets ของผู้ใช้เองอยู่แล้ว เปิด/แชร์/ export จาก Sheets ได้ทันที |
 
-## 3. เทคโนโลยีที่แนะนำ
+## 3. เทคโนโลยี — ยึดแนวทาง "ฟรีตลอดไป" (ไม่มีเซิร์ฟเวอร์/ฐานข้อมูลของตัวเอง)
 
-- **Frontend**: React Native (Expo) ถ้าต้องการแอปมือถือจริง หรือ Next.js + PWA ถ้าต้องการเริ่มจากเว็บก่อนแล้วค่อยห่อเป็นแอป (ใช้โค้ดร่วมกันได้มากกว่า)
-- **Backend/DB**: Supabase (Postgres + Auth + Realtime) — ลดงานเขียน backend เอง, มี Auth และ sync ข้ามอุปกรณ์พร้อมใช้
-- **การตีความข้อความ (parsing)**:
-  - เริ่มจาก rule-based: regex ดึงตัวเลข + dictionary คำ→หมวดหมู่ (เร็ว ไม่ต้องพึ่ง API ภายนอก)
-  - เฟสถัดไปอัปเกรดเป็น LLM (เช่น Claude API) เพื่อแยกหมวดหมู่/เจตนาได้แม่นยำขึ้น โดยเฉพาะประโยคที่พิมพ์อิสระ
-- **กราฟ**: Recharts (เว็บ) หรือ Victory Native / react-native-svg-charts (มือถือ)
-- **Local-first**: เก็บ cache ด้วย SQLite (มือถือ) หรือ IndexedDB (เว็บ) เพื่อให้ใช้งานได้แม้ออฟไลน์ แล้ว sync ขึ้น backend ทีหลัง
+ตัดสินใจแล้วว่าจะไม่ใช้บริการ free-tier ของสตาร์ทอัพ (เช่น Supabase/Firebase) ที่อาจ
+เปลี่ยนนโยบายหรือมีค่าใช้จ่ายในอนาคต แต่ใช้เฉพาะบริการที่เป็น "ของฟรีถาวร" ของ Google
+และ hosting เว็บสถิตฟรี ทำให้ทั้งระบบไม่มีต้นทุนรายเดือน/รายปีเลย
 
-## 4. โครงสร้างข้อมูล (Data Model)
+| ส่วน | ใช้ | เหตุผล |
+|---|---|---|
+| ที่เก็บข้อมูล | **Google Sheets** — สร้างสำเนาชีตในไดรฟ์ของผู้ใช้แต่ละคนเอง | อยู่ในโควตา 15GB ฟรีของ Google Drive ทุกคนอยู่แล้ว ไม่ใช่ trial ของบริษัทที่สาม |
+| Login | **Google Sign-In (OAuth 2.0)** scope `drive.file` (เข้าถึงเฉพาะไฟล์ที่แอปสร้างเอง) | ฟรี ไม่ต้องขอ verification ยุ่งยากเพราะ scope แคบ |
+| ตัวแอป | **PWA** (เว็บแอปที่กด "เพิ่มลงหน้าจอโฮม" ได้เหมือนแอปจริง) แทนแอป native | ไม่ต้องเสียค่า Apple Developer ($99/ปี) หรือ Google Play ($25 ครั้งเดียว) |
+| Hosting | **GitHub Pages** หรือ **Cloudflare Pages** | โฮสต์เว็บสถิตฟรีถาวร ไม่มี usage limit ที่น่ากังวลสำหรับแอปส่วนตัว/ครอบครัว |
+| ตีความข้อความ | **Rule-based**: regex ดึงตัวเลข + dictionary คำ→หมวดหมู่ ทำงานฝั่ง client ล้วน ๆ | ไม่ต้องพึ่ง AI API ที่มีค่าใช้จ่ายต่อ request |
+| กราฟ | Chart.js หรือ Recharts (วาดจากข้อมูลที่ดึงมาจาก Sheets มาคำนวณฝั่ง client) | ไลบรารีฟรี รันในเบราว์เซอร์ ไม่มีค่าใช้จ่าย |
+
+ผลคือ **ไม่มีเซิร์ฟเวอร์ backend ของตัวเองเลย** ทุกอย่างรันในเบราว์เซอร์/PWA ของผู้ใช้
+แล้วเรียก Google Sheets API ตรง ๆ ด้วย token ที่ได้จาก Google Sign-In
+
+> ถ้าในอนาคตอยากได้ parsing ที่ฉลาดขึ้นด้วย LLM ให้ทำเป็นออปชันที่ผู้ใช้กรอก API key
+> ของตัวเอง (bring-your-own-key) เพื่อไม่ให้ตัวแอปหลักมีต้นทุนแฝง
+
+## 4. โครงสร้างข้อมูล (ใน Google Sheets ของผู้ใช้แต่ละคน)
+
+ตอน login ครั้งแรก แอปจะสร้างสเปรดชีตใหม่ในไดรฟ์ของผู้ใช้จาก template โดยมี 3 แท็บ:
 
 ```
-users            id, name, email, created_at
-categories       id, user_id, name, icon, type(income|expense)
-transactions     id, user_id, type(income|expense), amount,
-                 category_id, note, raw_text, occurred_at, created_at
-budgets          id, user_id, category_id, month, limit_amount
+Transactions   id, date, type(income|expense), amount, category, note, raw_text, created_at
+Categories     name, icon, type(income|expense)
+Budgets        category, month, limit_amount
 ```
 
-- `raw_text` เก็บข้อความต้นฉบับที่ผู้ใช้พิมพ์ไว้เสมอ เผื่อย้อนกลับไปแก้ผลการตีความ
+- `raw_text` เก็บข้อความต้นฉบับที่พิมพ์ไว้เสมอ เผื่อย้อนกลับไปแก้ผลการตีความ
+- ทุกแท็บอยู่ในไฟล์เดียวกัน ทำให้ backup/ย้าย/แชร์ทำได้จากไฟล์เดียว
 
 ## 5. UI/UX คร่าว ๆ
 
@@ -51,7 +63,8 @@ budgets          id, user_id, category_id, month, limit_amount
 - แถบบนสุด: ยอดคงเหลือเดือนนี้ + ปุ่ม "ดูสรุป/กราฟ"
 - พื้นที่แชท: bubble รายการ คั่นด้วย divider วันที่ ("วันนี้", "เมื่อวาน", "12 ส.ค.")
 - แต่ละ bubble รายจ่าย/รายรับ แสดงไอคอนหมวดหมู่ + จำนวนเงิน (สีแดง/เขียว) + แตะเพื่อแก้ไข
-- ช่องพิมพ์ด้านล่างสุด เหมือนแชททั่วไป พร้อมปุ่มไมโครโฟน (พูดแทนพิมพ์ได้ในเฟสหลัง)
+- ช่องพิมพ์ด้านล่างสุด เหมือนแชททั่วไป
+- ใช้งานแบบ **offline-first**: พิมพ์ได้แม้ไม่มีเน็ต เก็บ cache ไว้ใน IndexedDB ก่อน แล้ว sync ขึ้น Google Sheets อัตโนมัติเมื่อมีเน็ต
 
 **หน้าสรุป/แผนภาพ (Dashboard)**
 - Pie chart: สัดส่วนรายจ่ายตามหมวดหมู่ของเดือนนี้
@@ -61,26 +74,28 @@ budgets          id, user_id, category_id, month, limit_amount
 
 ## 6. Roadmap แบ่งเป็นเฟส
 
-**Phase 1 — MVP (ใช้งานได้จริงเบื้องต้น)**
-- หน้าจอแชทพื้นฐาน + parsing แบบ regex/keyword
-- บันทึกลง local storage (ยังไม่ต้องมี backend)
+**Phase 1 — MVP (ยังไม่ต่อ Sheets)**
+- หน้าจอ PWA แบบแชทพื้นฐาน + parsing แบบ regex/keyword
+- บันทึกลง IndexedDB ในเครื่องก่อน เพื่อทดสอบ UX การจดผ่านแชทให้ลื่นก่อน
 - สรุปยอดรวมรายวัน/รายเดือนแบบตัวเลขง่าย ๆ
 
-**Phase 2 — Backend + กราฟ**
-- เชื่อม Supabase (Auth + Database) ให้ sync ข้ามอุปกรณ์
+**Phase 2 — Google Sign-In + Google Sheets**
+- เชื่อม Google Sign-In และสร้างสเปรดชีตส่วนตัวอัตโนมัติในไดรฟ์ผู้ใช้ (จาก template)
+- Sync ข้อมูลจาก IndexedDB ขึ้น Sheets (และดึงกลับตอนเปิดเครื่องใหม่)
 - สร้างหน้า Dashboard พร้อมกราฟ pie/bar/line ตามข้อ 5
-- เพิ่มระบบหมวดหมู่ที่แก้ไข/เพิ่มเองได้
+- Deploy ขึ้น GitHub Pages / Cloudflare Pages
 
 **Phase 3 — ฉลาดขึ้น**
-- อัปเกรด parsing เป็น LLM เพื่อแยกหมวดหมู่/จำนวนเงินแม่นยำขึ้น
 - ระบบงบประมาณ + แจ้งเตือนผ่านข้อความบอตในแชท
-- Export CSV/Excel, ค้นหา/กรองย้อนหลัง
+- ค้นหา/กรองย้อนหลัง
+- (ออปชัน) ให้ผู้ใช้ใส่ API key ของตัวเองเพื่ออัปเกรด parsing เป็น LLM
 
 **Phase 4 — Polish**
-- รองรับหลายสกุลเงิน, แชร์รายงานสรุป, ปรับ UI/แอนิเมชัน, แจ้งเตือนแบบ push notification
+- รองรับหลายสกุลเงิน, ปรับ UI/แอนิเมชัน, ปรับปรุง prompt "เพิ่มลงหน้าจอโฮม" ให้เนียนขึ้น
+- ปรับปรุง conflict handling ตอน sync จากหลายอุปกรณ์
 
-## 7. สิ่งที่ต้องตัดสินใจก่อนเริ่มลงมือ
+## 7. สรุปการตัดสินใจ (ยืนยันแล้ว)
 
-1. แพลตฟอร์มเป้าหมาย: มือถือ (iOS/Android) อย่างเดียว, เว็บ, หรือทำ cross-platform ตั้งแต่ต้น
-2. Local-first (เก็บในเครื่องอย่างเดียวก่อน) หรือเริ่มต่อ backend ทันที
-3. งบ/เวลาที่มี — เพื่อกำหนดว่าจะทำถึง Phase ไหนก่อน
+1. **แพลตฟอร์ม**: มือถือ ผ่าน PWA (ไม่ทำแอป native เพื่อเลี่ยงค่าธรรมเนียม App Store/Play Store)
+2. **ที่เก็บข้อมูล**: Google Sheets ส่วนตัวของแต่ละผู้ใช้ (multi-user รองรับได้เพราะแยกไฟล์ตามคน) + cache local (IndexedDB) สำหรับ offline
+3. **งบประมาณ**: เน้นฟรีตลอดไป — ไม่ใช้บริการ backend/database แบบมีค่าใช้จ่ายหรือ free-tier ที่อาจหมดอายุ ใช้เฉพาะ Google Sheets/Sign-In (ฟรีถาวรของ Google) และ GitHub Pages/Cloudflare Pages (hosting ฟรีถาวร)
