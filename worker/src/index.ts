@@ -2,7 +2,6 @@ import { handleUserMessage } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import { isTextMessageEvent, replyToLine, verifyLineSignature, type LineWebhookBody } from "./line.ts";
-import { renderLiffPage, renderLinkedPage } from "./liffPage.ts";
 import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
 import { getAccountLink, getPending, setAccountLink, setPending } from "./state.ts";
 import { signState, verifyState } from "./signedState.ts";
@@ -15,28 +14,28 @@ export interface Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   STATE_SIGNING_SECRET: string;
-  LIFF_ID: string;
 }
 
 function html(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-async function handleLinkInit(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url);
-  const lineUserId = url.searchParams.get("lineUserId");
-  if (!lineUserId) return new Response("missing lineUserId", { status: 400 });
-
-  const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
-  const redirectUri = `${url.origin}/oauth/callback`;
-  const authorizeUrl = buildGoogleAuthorizeUrl({
-    clientId: env.GOOGLE_CLIENT_ID,
-    redirectUri,
-    state,
-  });
-  return new Response(JSON.stringify({ url: authorizeUrl }), {
-    headers: { "content-type": "application/json" },
-  });
+function renderLinkedPage(): string {
+  return `<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>เชื่อมบัญชีสำเร็จ</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 2rem 1.5rem; text-align: center; color: #1c1e21; }
+</style>
+</head>
+<body>
+  <h2>เชื่อมบัญชีสำเร็จ ✅</h2>
+  <p>ปิดหน้าต่างนี้แล้วกลับไปแชทกับบอทใน LINE ได้เลย</p>
+</body>
+</html>`;
 }
 
 async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
@@ -96,7 +95,15 @@ export async function handleTextMessage(
 ): Promise<string> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) {
-    return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${origin}/liff`;
+    // The state param embeds this exact webhook-scoped lineUserId, signed, so
+    // /oauth/callback links the account to the same id future messages use.
+    const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
+    const authorizeUrl = buildGoogleAuthorizeUrl({
+      clientId: env.GOOGLE_CLIENT_ID,
+      redirectUri: `${origin}/oauth/callback`,
+      state,
+    });
+    return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
   }
 
   if (isSummaryCommand(text)) {
@@ -161,8 +168,6 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/liff") return html(renderLiffPage(env.LIFF_ID));
-    if (url.pathname === "/link/init") return handleLinkInit(request, env);
     if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
     if (url.pathname === "/webhook" && request.method === "POST") return handleWebhook(request, env);
     if (url.pathname === "/health") return new Response("ok");
