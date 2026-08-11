@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 # then paste the returned id below.
 [[kv_namespaces]]
 binding = "ACCOUNTS"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "18630d0859b24d9591cd9025ab557cfe"
 
 [vars]
 # LIFF app id from LINE Developers Console (LIFF tab), endpoint URL = https://<your-worker>.workers.dev/liff
