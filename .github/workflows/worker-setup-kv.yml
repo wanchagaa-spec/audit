@@ -1,0 +1,25 @@
+name: One-time - Create Worker KV namespace
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-kv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+      - name: Create KV namespace
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "Copy the 'id' value below into worker/wrangler.toml, then delete/disable this workflow."
+          npx wrangler kv namespace create ACCOUNTS

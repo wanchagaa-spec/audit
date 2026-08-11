@@ -1,0 +1,21 @@
+name = "expense-tracker-line-bot"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Create with: npx wrangler kv namespace create ACCOUNTS
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "ACCOUNTS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# LIFF app id from LINE Developers Console (LIFF tab), endpoint URL = https://<your-worker>.workers.dev/liff
+LIFF_ID = "REPLACE_WITH_YOUR_LIFF_ID"
+
+# Secrets (never put real values here — set them with `wrangler secret put <NAME>`):
+#   LINE_CHANNEL_SECRET       - from LINE Developers Console > Messaging API channel
+#   LINE_CHANNEL_ACCESS_TOKEN - long-lived channel access token
+#   GOOGLE_CLIENT_ID          - same OAuth client used by the web app
+#   GOOGLE_CLIENT_SECRET      - from the same OAuth client (Web application type)
+#   STATE_SIGNING_SECRET      - any random string, used to sign the LIFF->OAuth state param
