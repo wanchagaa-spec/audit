@@ -33,7 +33,9 @@ function loadGisScript(): Promise<void> {
 }
 
 function decodeIdToken(idToken: string): GoogleUser {
-  const payload = JSON.parse(atob(idToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+  const base64 = idToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const payload = JSON.parse(new TextDecoder("utf-8").decode(bytes));
   return { id: payload.sub, email: payload.email, name: payload.name ?? payload.email };
 }
 

@@ -44,6 +44,7 @@ interface AppContextValue {
   currentUser: CurrentUser;
   googleUser: GoogleUser | null;
   googleConfigured: boolean;
+  skippedLogin: boolean;
   syncing: string | null;
   syncError: string | null;
   pending: PendingClarification | null;
@@ -57,6 +58,7 @@ interface AppContextValue {
   removeTransaction: (id: string) => Promise<void>;
   setReminder: (enabled: boolean, time: string) => Promise<void>;
   signIn: () => Promise<void>;
+  continueAsGuest: () => void;
   syncCurrentBook: () => Promise<void>;
   inviteToCurrentBook: (email: string) => Promise<void>;
   joinSharedBook: () => Promise<void>;
@@ -65,6 +67,18 @@ interface AppContextValue {
 const AppContext = createContext<AppContextValue | null>(null);
 
 const LOCAL_USER: CurrentUser = { id: "me", name: "ฉัน" };
+
+const GOOGLE_USER_STORAGE_KEY = "expense-tracker:google-user";
+const SKIP_LOGIN_STORAGE_KEY = "expense-tracker:continue-as-guest";
+
+function loadStoredGoogleUser(): GoogleUser | null {
+  try {
+    const raw = localStorage.getItem(GOOGLE_USER_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as GoogleUser) : null;
+  } catch {
+    return null;
+  }
+}
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
@@ -77,7 +91,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [pending, setPending] = useState<PendingClarification | null>(null);
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [reminderTime, setReminderTimeState] = useState("20:00");
-  const [googleUser, setGoogleUser] = useState<GoogleUser | null>(null);
+  const [googleUser, setGoogleUser] = useState<GoogleUser | null>(() => loadStoredGoogleUser());
+  const [skippedLogin, setSkippedLogin] = useState<boolean>(
+    () => localStorage.getItem(SKIP_LOGIN_STORAGE_KEY) === "1"
+  );
   const [syncing, setSyncing] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
 
@@ -244,9 +261,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       const user = await signInWithGoogle();
       setGoogleUser(user);
+      localStorage.setItem(GOOGLE_USER_STORAGE_KEY, JSON.stringify(user));
+      setSkippedLogin(false);
+      localStorage.removeItem(SKIP_LOGIN_STORAGE_KEY);
     } catch (err) {
       setSyncError((err as Error).message);
     }
+  }, []);
+
+  const continueAsGuest = useCallback(() => {
+    setSkippedLogin(true);
+    localStorage.setItem(SKIP_LOGIN_STORAGE_KEY, "1");
   }, []);
 
   const syncCurrentBook = useCallback(async () => {
@@ -342,6 +367,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       currentUser,
       googleUser,
       googleConfigured: isGoogleConfigured(),
+      skippedLogin,
       syncing,
       syncError,
       pending,
@@ -355,6 +381,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       removeTransaction,
       setReminder,
       signIn,
+      continueAsGuest,
       syncCurrentBook,
       inviteToCurrentBook,
       joinSharedBook,
@@ -370,6 +397,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       messages,
       currentUser,
       googleUser,
+      skippedLogin,
       syncing,
       syncError,
       pending,
@@ -383,6 +411,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       removeTransaction,
       setReminder,
       signIn,
+      continueAsGuest,
       syncCurrentBook,
       inviteToCurrentBook,
       joinSharedBook,
