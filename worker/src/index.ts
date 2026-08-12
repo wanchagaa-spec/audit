@@ -534,7 +534,20 @@ async function resolveMediaBatchContext(
 ): Promise<{ refreshToken: string; trip: ActiveTrip } | null> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) {
-    await replyOrPush(events[0], await buildUnlinkedPrompt(env, lineUserId, origin), env.LINE_CHANNEL_ACCESS_TOKEN);
+    // .catch here (and on every other replyOrPush call in this file's media
+    // handling) is deliberate: replyOrPush itself throws if BOTH the reply
+    // and its push fallback fail. Left unguarded, that exception escapes
+    // through an unawaited-for-errors Promise.all in handleWebhook and
+    // crashes the *entire* invocation — silencing not just this batch but
+    // every other event (text messages, other senders' batches) in the same
+    // webhook call too. A real report matched this exactly: one batch got no
+    // reply at all while an unrelated batch in a different webhook call
+    // succeeded normally.
+    await replyOrPush(
+      events[0],
+      await buildUnlinkedPrompt(env, lineUserId, origin),
+      env.LINE_CHANNEL_ACCESS_TOKEN
+    ).catch(() => undefined);
     return null;
   }
   const trip = await getActiveTrip(env.ACCOUNTS, lineUserId);
@@ -543,7 +556,7 @@ async function resolveMediaBatchContext(
       events[0],
       'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูป/คลิปตามมาได้เลย',
       env.LINE_CHANNEL_ACCESS_TOKEN
-    );
+    ).catch(() => undefined);
     return null;
   }
   return { refreshToken: link.refreshToken, trip };
@@ -562,38 +575,54 @@ async function handleImmediateMediaBatch(
   origin: string,
   tokenCache: TokenCache
 ): Promise<void> {
-  const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
-  if (!ctx) return;
-  const { refreshToken, trip } = ctx;
+  try {
+    const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
+    if (!ctx) return;
+    const { refreshToken, trip } = ctx;
 
-  let succeeded = 0;
-  let failed = 0;
-  await processWithConcurrencyLimit(events, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
-    try {
-      await withFreshAccessToken(
-        env,
-        refreshToken,
-        (accessToken) =>
-          uploadTripMedia(
-            env,
-            accessToken,
-            trip.folderId,
-            event.message.id,
-            event.timestamp,
-            isImageMessageEvent(event) ? "image" : "video"
-          ),
-        tokenCache
-      );
-      succeeded++;
-    } catch (err) {
-      console.error("immediate media batch upload failed", event.message.id, err);
-      failed++;
-    }
-  });
+    let succeeded = 0;
+    let failed = 0;
+    await processWithConcurrencyLimit(events, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
+      try {
+        await withFreshAccessToken(
+          env,
+          refreshToken,
+          (accessToken) =>
+            uploadTripMedia(
+              env,
+              accessToken,
+              trip.folderId,
+              event.message.id,
+              event.timestamp,
+              isImageMessageEvent(event) ? "image" : "video"
+            ),
+          tokenCache
+        );
+        succeeded++;
+      } catch (err) {
+        console.error("immediate media batch upload failed", event.message.id, err);
+        failed++;
+      }
+    });
 
-  const parts = [`📸 เก็บ ${succeeded} ไฟล์เข้าทริป "${trip.name}" แล้ว`];
-  if (failed > 0) parts.push(`(อีก ${failed} ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`);
-  await replyOrPush(events[0], parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN);
+    const parts = [`📸 เก็บ ${succeeded} ไฟล์เข้าทริป "${trip.name}" แล้ว`];
+    if (failed > 0) parts.push(`(อีก ${failed} ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`);
+    await replyOrPush(events[0], parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN);
+  } catch (err) {
+    // Nothing above should be able to throw uncaught, but this is the last
+    // line of defense: without it, a failure here (most likely replyOrPush
+    // itself, if both the reply and its push fallback fail) would escape
+    // uncaught through handleWebhook's Promise.all and crash the whole
+    // invocation — silencing every other event in the same webhook call,
+    // not just this batch. Best-effort only; if this also fails there's
+    // genuinely nothing more that can be done for this specific attempt.
+    console.error("handleImmediateMediaBatch failed", err);
+    await replyOrPush(
+      events[0],
+      "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองส่งรูป/คลิปใหม่อีกครั้งนะ",
+      env.LINE_CHANNEL_ACCESS_TOKEN
+    ).catch(() => undefined);
+  }
 }
 
 async function handleQueuedMediaBatch(
@@ -602,28 +631,40 @@ async function handleQueuedMediaBatch(
   events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
   origin: string
 ): Promise<void> {
-  const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
-  if (!ctx) return;
-  const { trip } = ctx;
+  try {
+    const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
+    if (!ctx) return;
+    const { trip } = ctx;
 
-  const jobs: QueuedUpload[] = events.map((event) => ({
-    lineUserId,
-    kind: isImageMessageEvent(event) ? "image" : "video",
-    messageId: event.message.id,
-    timestampMs: event.timestamp,
-    tripFolderId: trip.folderId,
-    tripName: trip.name,
-  }));
-  await enqueueUploads(env.ACCOUNTS, jobs);
+    const jobs: QueuedUpload[] = events.map((event) => ({
+      lineUserId,
+      kind: isImageMessageEvent(event) ? "image" : "video",
+      messageId: event.message.id,
+      timestampMs: event.timestamp,
+      tripFolderId: trip.folderId,
+      tripName: trip.name,
+    }));
+    await enqueueUploads(env.ACCOUNTS, jobs);
 
-  // Only one reply for the whole batch — the other events' reply tokens are
-  // simply left unused (LINE tokens that never get used just expire quietly
-  // on their own; there's no cost to skipping them).
-  await replyOrPush(
-    events[0],
-    `📥 รับไว้ ${events.length} ไฟล์แล้ว กำลังทยอยอัปโหลดเข้าทริป "${trip.name}" อยู่นะ จะแจ้งเมื่อเสร็จ`,
-    env.LINE_CHANNEL_ACCESS_TOKEN
-  );
+    // Only one reply for the whole batch — the other events' reply tokens
+    // are simply left unused (LINE tokens that never get used just expire
+    // quietly on their own; there's no cost to skipping them).
+    await replyOrPush(
+      events[0],
+      `📥 รับไว้ ${events.length} ไฟล์แล้ว กำลังทยอยอัปโหลดเข้าทริป "${trip.name}" อยู่นะ จะแจ้งเมื่อเสร็จ`,
+      env.LINE_CHANNEL_ACCESS_TOKEN
+    );
+  } catch (err) {
+    // See the matching catch in handleImmediateMediaBatch for why this
+    // exists — same reasoning applies here (enqueueUploads or the final
+    // replyOrPush failing must not crash the whole webhook invocation).
+    console.error("handleQueuedMediaBatch failed", err);
+    await replyOrPush(
+      events[0],
+      "ขอโทษด้วย เกิดข้อผิดพลาดตอนรับไฟล์ ลองส่งรูป/คลิปใหม่อีกครั้งนะ",
+      env.LINE_CHANNEL_ACCESS_TOKEN
+    ).catch(() => undefined);
+  }
 }
 
 export async function handleWebhook(request: Request, env: Env): Promise<Response> {
@@ -659,13 +700,20 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
       eventsByUser.set(event.source.userId, forUser);
     }
     const handleBatch = mediaEvents.length >= IMMEDIATE_MEDIA_BATCH_LIMIT ? handleQueuedMediaBatch : null;
-    await Promise.all(
+    // allSettled, not all: both batch handlers already catch everything
+    // internally (see their own try/catch), but this is defense in depth —
+    // one sender's batch throwing must never take down every other sender's
+    // batch (or the rest of handleWebhook below) in the same webhook call.
+    const results = await Promise.allSettled(
       [...eventsByUser.entries()].map(([lineUserId, events]) =>
         handleBatch
           ? handleBatch(env, lineUserId, events, origin)
           : handleImmediateMediaBatch(env, lineUserId, events, origin, tokenCache)
       )
     );
+    for (const result of results) {
+      if (result.status === "rejected") console.error("media batch handling failed unexpectedly", result.reason);
+    }
   }
 
   // Everything else (text, unsupported message types) is processed
