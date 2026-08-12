@@ -206,11 +206,14 @@ Drive multipart metadata, and only then start uploading — doubling the total w
 fully, then upload fully) and risking the Worker's memory limit for a big enough file. A real
 report matched this exactly: a 19-second clip uploaded fine, a same-batch ~1-minute clip that
 had already finished sending in LINE never got a bot reply at all. `uploadFileToFolder` in
-`src/drive.ts` now streams the file straight from the LINE response into the Drive request
-(`res.body` piped directly into `fetch`'s `body`, Drive's `uploadType=media` simple upload)
-instead of buffering it, with a small follow-up `PATCH` to set the filename and move it into
-the trip folder (simple upload has no room for metadata, so the file otherwise lands unnamed
-in the account's root).
+`src/drive.ts` now streams the file straight from the LINE response into Drive's **resumable
+upload** protocol (`uploadType=resumable`) instead of buffering it: an init request carries the
+metadata (filename + trip folder) up front and returns a session URL, then the raw bytes stream
+straight into that session (`res.body` piped directly into `fetch`'s `body`). Deliberately not
+Drive's simpler `uploadType=media` — Google documents that one for files under ~5MB, the
+opposite of the case this exists for — and since metadata is set at session-init rather than in
+a follow-up call, a failed content upload leaves nothing behind in Drive at all, instead of an
+orphaned, unnamed file sitting in the account's root.
 
 ### Calendar (PLAN.md 15.3)
 

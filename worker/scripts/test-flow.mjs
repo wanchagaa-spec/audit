@@ -26,6 +26,7 @@ const pushes = []; // captures push messages (the reply-token-expired fallback)
 
 const driveFolders = []; // simulates Drive folders: {id, name, parentId}
 const driveUploads = []; // simulates uploaded files: {id, folderId}
+const resumableSessions = new Map(); // uploadId -> {name, parentId} set at session-init time
 let driveIdSeq = 0;
 function nextDriveId(prefix) {
   driveIdSeq += 1;
@@ -40,6 +41,8 @@ let simulateCalendarApiDisabled = false;
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
+
+let simulateResumablePutFailure = false; // one-shot: fails the next resumable upload's content step
 
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
@@ -110,7 +113,10 @@ globalThis.fetch = async (url, init = {}) => {
     const payload = isBig ? new Uint8Array(2 * 1024 * 1024).fill(7) : new Uint8Array([1, 2, 3, 4]);
     return new Response(payload.buffer, {
       status: 200,
-      headers: { "content-type": isVideo ? "video/mp4" : "image/jpeg" },
+      headers: {
+        "content-type": isVideo ? "video/mp4" : "image/jpeg",
+        "content-length": String(payload.byteLength),
+      },
     });
   }
   if (u.startsWith("https://www.googleapis.com/drive/v3/files")) {
@@ -130,29 +136,37 @@ globalThis.fetch = async (url, init = {}) => {
       driveFolders.push({ id, name: body.name, parentId: body.parents?.[0] ?? "root" });
       return new Response(JSON.stringify({ id }), { status: 200 });
     }
-    if (init.method === "PATCH") {
-      // The follow-up call after a streamed simple upload: sets the real
-      // filename and moves the file out of the default root parent.
-      const id = parsed.pathname.split("/").pop();
-      const body = JSON.parse(init.body);
-      const upload = driveUploads.find((f) => f.id === id);
-      if (upload) {
-        upload.name = body.name;
-        const addParents = parsed.searchParams.get("addParents");
-        if (addParents) upload.parentId = addParents;
-      }
-      return new Response(JSON.stringify({ id }), { status: 200 });
-    }
   }
-  if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files")) {
-    // Simple/media upload: no metadata in the body, just the raw bytes
-    // (streamed straight from the LINE content mock's response body). Name
-    // and parent folder get filled in by the PATCH branch above. Reading the
-    // stream's full size here proves the streaming path doesn't drop or
-    // truncate bytes along the way.
-    const id = nextDriveId("file");
+  if (
+    u.startsWith("https://www.googleapis.com/upload/drive/v3/files") &&
+    new URL(u).searchParams.get("uploadType") === "resumable" &&
+    (!init.method || init.method === "POST")
+  ) {
+    // Resumable upload, step 1: the metadata (name + parent folder) is set
+    // here, at session-init time, not in a follow-up call — mirrors the real
+    // API, where nothing is actually created in Drive until step 2 succeeds.
+    const body = JSON.parse(init.body);
+    const uploadId = nextDriveId("session");
+    resumableSessions.set(uploadId, { name: body.name, parentId: body.parents?.[0] });
+    return new Response(null, {
+      status: 200,
+      headers: { Location: `https://www.googleapis.com/upload/drive/v3/files?upload_id=${uploadId}` },
+    });
+  }
+  if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files") && new URL(u).searchParams.get("upload_id")) {
+    if (simulateResumablePutFailure) {
+      simulateResumablePutFailure = false;
+      return new Response(JSON.stringify({ error: "simulated content upload failure" }), { status: 500 });
+    }
+    // Resumable upload, step 2: the actual bytes, streamed straight from the
+    // LINE content mock's response body. Reading the stream's full size here
+    // proves the streaming path doesn't drop or truncate bytes along the way.
+    const uploadId = new URL(u).searchParams.get("upload_id");
+    const session = resumableSessions.get(uploadId);
     const uploadedBytes = init.body ? await new Response(init.body).arrayBuffer() : new ArrayBuffer(0);
-    driveUploads.push({ id, name: undefined, parentId: undefined, size: uploadedBytes.byteLength });
+    const id = nextDriveId("file");
+    driveUploads.push({ id, name: session?.name, parentId: session?.parentId, size: uploadedBytes.byteLength });
+    resumableSessions.delete(uploadId);
     return new Response(JSON.stringify({ id }), { status: 200 });
   }
   if (u.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
@@ -468,6 +482,23 @@ check(
   "the large clip's full byte size made it through the streaming upload intact",
   driveUploads.at(-1).size === 2 * 1024 * 1024
 );
+
+// Regression test for a review finding on the streaming-upload PR: resumable
+// upload's metadata (name + parent folder) is set at session-init time, and
+// nothing is actually created in Drive until the content upload (step 2)
+// itself succeeds — unlike the earlier simple-upload-then-rename approach,
+// where a failed rename/move step left an orphaned, unnamed file sitting in
+// Drive's root forever. A failure here must leave no trace in Drive at all.
+const uploadsBeforeFailedPut = driveUploads.length;
+simulateResumablePutFailure = true;
+let failedUploadThrew = false;
+try {
+  await handleVideoMessage(env, lineUserId, "vid-willfail", Date.now(), origin);
+} catch {
+  failedUploadThrew = true;
+}
+check("a failed Drive content upload surfaces as an error, not a false success", failedUploadThrew);
+check("a failed content upload leaves no orphaned file behind in Drive", driveUploads.length === uploadsBeforeFailedPut);
 
 // A batch of many photos+videos sent together (bundled into one webhook
 // call, as LINE can do for a multi-select send) must not blow through

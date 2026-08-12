@@ -133,7 +133,7 @@ export function isUnsupportedMessageEvent(
 export async function fetchLineMediaContent(
   messageId: string,
   channelAccessToken: string
-): Promise<{ body: ReadableStream<Uint8Array>; contentType: string }> {
+): Promise<{ body: ReadableStream<Uint8Array>; contentType: string; contentLength: number | null }> {
   const res = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
     headers: { Authorization: `Bearer ${channelAccessToken}` },
   });
@@ -144,7 +144,9 @@ export async function fetchLineMediaContent(
     throw new Error("LINE content API returned an empty body");
   }
   const contentType = res.headers.get("content-type") ?? "application/octet-stream";
-  return { body: res.body, contentType };
+  const contentLengthHeader = res.headers.get("content-length");
+  const contentLength = contentLengthHeader ? Number(contentLengthHeader) : null;
+  return { body: res.body, contentType, contentLength };
 }
 
 export async function replyToLine(
