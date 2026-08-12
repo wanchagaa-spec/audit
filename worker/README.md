@@ -262,7 +262,7 @@ instead of one reply per file. This was originally just a requested UX improveme
 identical confirmation messages for every photo in a send is noisy), but it turned out to matter
 for correctness too: a reply is itself an outbound subrequest, so the immediate path's real
 per-file cost is fetch-from-LINE + upload-to-Drive + **reply** = 3, not 2. `IMMEDIATE_MEDIA_BATCH_LIMIT`
-(20) was originally calibrated only against the 2-subrequest figure, meaning even a batch that
+(15) was originally calibrated only against the 2-subrequest figure, meaning even a batch that
 correctly stayed *under* the queueing threshold could still quietly exceed the ~50-subrequest
 budget once the per-file reply was counted properly — a real report of a batch that looked "fine"
 by the queueing math still lost files. Collapsing replies to one per batch brings the immediate
@@ -276,6 +276,31 @@ seconds instead of one large one. Each call is evaluated against `IMMEDIATE_MEDI
 independently, which is safe (each is its own invocation with its own budget) but means the
 confirmation messages for one "single" send can arrive as a few separate batches rather than
 exactly one.
+
+Cloudflare's own request metrics (Workers dashboard → Metrics → Subrequests, broken down by host)
+showed a real, if small, background failure rate for the Drive upload request even after all of
+the above — a handful of 4xx responses out of dozens of otherwise-successful requests over a day
+of testing, ordinary transient flakiness rather than a design flaw. `uploadTripMedia` (the shared
+upload function used by all three upload call sites) now retries once (`MAX_UPLOAD_ATTEMPTS = 2`)
+before giving up, re-fetching from LINE fresh on the retry rather than reusing the first attempt's
+stream (a `ReadableStream` can only be read once). `IMMEDIATE_MEDIA_BATCH_LIMIT` and
+`DRAIN_BATCH_SIZE` both come down to 10, sized for the *worst case* rather than the happy path: a
+retried file costs 4 subrequests instead of 2, and if failures are correlated (e.g. Drive has a
+brief outage or rate-limits a burst of requests — exactly the scenario the retry exists to ride
+out) most or all files in one batch could need a retry at once. Even fully pessimistically — every
+single file retrying — 10 files stays clear of the ~50-subrequest ceiling; sizing this against just
+"a handful of retries" would have reintroduced the same silent-file-drop failure at a different
+threshold. A file that still fails after its retry is reported in the batch's summary message
+(`(อีก N ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`) so there's always a clear next step instead
+of a silently incomplete album.
+
+One more accepted tradeoff worth knowing: the retry doesn't check whether a "failed" attempt
+actually created the file in Drive before the error surfaced (e.g. the create succeeded but
+reading the response body afterward threw) — in that rare case, retrying uploads a second copy
+rather than detecting the first attempt actually succeeded. A duplicate file is a strictly better
+outcome than the one this retry replaces (the photo never arriving at all), and checking for an
+existing file first would cost another Drive subrequest per file that isn't worth spending to
+guard against an edge case this narrow.
 
 ### Calendar (PLAN.md 15.3)
 
