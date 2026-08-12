@@ -148,6 +148,9 @@ there, just log things like "ซื้อกาแฟ 60", or ask it questions:
 - วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด (by count) / เฉลี่ยใช้เงินต่อวันเท่าไหร่
 - งบเหลือเท่าไหร่ (reads the Budgets tab, set from the web app's Settings)
 - ค้นหา &lt;คำ&gt; / รายการล่าสุด
+- ลบรายการล่าสุด (or ยกเลิกรายการล่าสุด) — undoes the most recent transaction, with a confirm
+  step first (`src/transactionCommands.ts`). Checked ahead of the report commands above so
+  it doesn't get swallowed by "รายการล่าสุด" matching as a substring.
 - วิธีใช้ (lists everything above plus trip/calendar/diary commands, grouped by feature)
 
 All of these are plain Google Sheets reads/aggregations over data already in the
@@ -157,12 +160,12 @@ these cover).
 
 ### Trip photo albums (PLAN.md 15.2)
 
-Send photos to the bot and they're organized into Google Drive automatically, grouped by
-trip and day:
+Send photos or video clips to the bot and they're organized into Google Drive automatically,
+grouped by trip and day:
 
-- `เริ่มทริป <ชื่อ>` — e.g. "เริ่มทริป ทะเล" — starts a trip session. Every photo you send
-  after this uploads automatically into that trip's Drive folder, in a subfolder for the
-  day it was sent (`จดบัญชี - อัลบั้มทริป/ทะเล/1-1-2569/`, ...), no captioning needed.
+- `เริ่มทริป <ชื่อ>` — e.g. "เริ่มทริป ทะเล" — starts a trip session. Every photo or video clip
+  you send after this uploads automatically into that trip's Drive folder, in a subfolder for
+  the day it was sent (`จดบัญชี - อัลบั้มทริป/ทะเล/1-1-2569/`, ...), no captioning needed.
 - `ทริปตอนนี้` — checks whether a trip is still open (in case you forgot to close one).
 - `จบทริป` — closes the current trip. Sending a photo with no trip open gets rejected with
   a reminder to start one first, rather than uploading somewhere generic.

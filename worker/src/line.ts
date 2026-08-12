@@ -14,8 +14,18 @@ export interface LineImageMessageEvent {
   timestamp: number;
 }
 
+export interface LineVideoMessageEvent {
+  type: "message";
+  message: { type: "video"; id: string };
+  source: { type: "user"; userId: string };
+  replyToken: string;
+  timestamp: number;
+}
+
 export interface LineWebhookBody {
-  events: Array<LineMessageEvent | LineImageMessageEvent | { type: string; [key: string]: unknown }>;
+  events: Array<
+    LineMessageEvent | LineImageMessageEvent | LineVideoMessageEvent | { type: string; [key: string]: unknown }
+  >;
 }
 
 function toBase64(bytes: ArrayBuffer): string {
@@ -71,7 +81,20 @@ export function isImageMessageEvent(
   );
 }
 
-export async function fetchLineImageContent(
+export function isVideoMessageEvent(
+  event: LineWebhookBody["events"][number]
+): event is LineVideoMessageEvent {
+  return (
+    event.type === "message" &&
+    "message" in event &&
+    (event as LineVideoMessageEvent).message?.type === "video" &&
+    (event as LineVideoMessageEvent).source?.type === "user"
+  );
+}
+
+/** Fetches the raw bytes for any LINE message content — image, video, or
+ * audio all use this same content API, keyed only by messageId. */
+export async function fetchLineMediaContent(
   messageId: string,
   channelAccessToken: string
 ): Promise<{ bytes: ArrayBuffer; contentType: string }> {
@@ -81,7 +104,7 @@ export async function fetchLineImageContent(
   if (!res.ok) {
     throw new Error(`LINE content API error (${res.status}): ${await res.text()}`);
   }
-  const contentType = res.headers.get("content-type") ?? "image/jpeg";
+  const contentType = res.headers.get("content-type") ?? "application/octet-stream";
   const bytes = await res.arrayBuffer();
   return { bytes, contentType };
 }

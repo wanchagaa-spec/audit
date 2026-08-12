@@ -79,7 +79,7 @@ export async function getOrCreateAlbumRoot(accessToken: string): Promise<string>
   return created.id;
 }
 
-export async function uploadImageToFolder(
+export async function uploadFileToFolder(
   accessToken: string,
   folderId: string,
   filename: string,

@@ -102,6 +102,45 @@ export async function readTransactionsForMonth(
   return all.filter((r) => r.date?.startsWith(month));
 }
 
+/**
+ * Deletes the most recently *created* transaction (by createdAt, matching
+ * "รายการล่าสุด"'s own sort order) and returns the row that was removed, or
+ * null if there's nothing to delete. Used by the "ลบรายการล่าสุด" /
+ * "ยกเลิกรายการล่าสุด" undo command.
+ */
+export async function deleteMostRecentTransaction(
+  accessToken: string,
+  spreadsheetId: string
+): Promise<TransactionRow | null> {
+  const all = await readAllTransactions(accessToken, spreadsheetId);
+  if (all.length === 0) return null;
+
+  const mostRecent = [...all].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const rowIndex = all.findIndex((r) => r.id === mostRecent.id); // index within the A2:... data range
+
+  const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties`);
+  const sheet = (meta.sheets ?? []).find((s: any) => s.properties.title === "Transactions");
+  const sheetId = sheet?.properties?.sheetId;
+  if (sheetId === undefined) throw new Error("Transactions sheet not found");
+
+  // +1 because data starts at row index 1 (0-based) — row 0 is the header.
+  const startIndex = rowIndex + 1;
+  await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({
+      requests: [
+        {
+          deleteDimension: {
+            range: { sheetId, dimension: "ROWS", startIndex, endIndex: startIndex + 1 },
+          },
+        },
+      ],
+    }),
+  });
+
+  return mostRecent;
+}
+
 export interface BudgetRow {
   id: string;
   categoryId: string;

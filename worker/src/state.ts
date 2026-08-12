@@ -71,7 +71,8 @@ export type PendingConfirmation =
   | { kind: "calendarCreate"; title: string; dateKey: string; time: string }
   | { kind: "calendarDelete"; eventId: string; title: string; dateKey: string; time: string }
   | { kind: "calendarEdit"; eventId: string; title: string; dateKey: string; time: string }
-  | { kind: "diaryCreate"; category: string; text: string };
+  | { kind: "diaryCreate"; category: string; text: string }
+  | { kind: "transactionDeleteLast" };
 
 export async function getPendingConfirmation(
   kv: KVNamespace,

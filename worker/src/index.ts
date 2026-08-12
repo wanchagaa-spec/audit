@@ -5,12 +5,13 @@ import { matchCalendarCommand } from "./calendarCommands.ts";
 import { matchCommand } from "./commands.ts";
 import { resolveConfirmation } from "./confirmations.ts";
 import { matchDiaryCommand } from "./diaryCommands.ts";
-import { findOrCreateFolderCached, uploadImageToFolder } from "./drive.ts";
+import { findOrCreateFolderCached, uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import {
-  fetchLineImageContent,
+  fetchLineMediaContent,
   isImageMessageEvent,
   isTextMessageEvent,
+  isVideoMessageEvent,
   replyToLine,
   verifyLineSignature,
   type LineWebhookBody,
@@ -27,6 +28,7 @@ import {
   type ActionCtx,
 } from "./state.ts";
 import { bangkokDateFolderName } from "./thaiDate.ts";
+import { matchTransactionCommand } from "./transactionCommands.ts";
 import { matchTripCommand } from "./tripCommands.ts";
 
 export interface Env {
@@ -42,7 +44,7 @@ const WELCOME_MESSAGE = [
   "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 4 เรื่องหลักๆ:",
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
-  "📸 เก็บรูปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป/วันที่",
+  "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป/วันที่",
   "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
   "",
@@ -197,6 +199,18 @@ export async function handleTextMessage(
     if (diaryHandler) {
       return await withFreshAccessToken(env, link.refreshToken, (accessToken) => diaryHandler(actionCtx(accessToken)));
     }
+
+    // Checked before reportHandler below: "ลบรายการล่าสุด"/"ยกเลิกรายการล่าสุด"
+    // contain "รายการล่าสุด" as a substring, which commands.ts's report
+    // matcher would otherwise catch first (includesAny is substring-based),
+    // showing the recent-transactions list instead of actually deleting
+    // anything — this is the exact bug a user hit.
+    const transactionHandler = await matchTransactionCommand(text);
+    if (transactionHandler) {
+      return await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+        transactionHandler(actionCtx(accessToken))
+      );
+    }
   } catch (err) {
     if (err instanceof CalendarApiDisabledError) {
       return CALENDAR_API_DISABLED_MESSAGE;
@@ -250,23 +264,30 @@ export async function handleTextMessage(
   return result.botMessage;
 }
 
-export async function handleImageMessage(
+function extensionForContentType(contentType: string, kind: "image" | "video"): string {
+  if (kind === "video") return contentType.includes("quicktime") ? "mov" : "mp4";
+  return contentType.includes("png") ? "png" : "jpg";
+}
+
+async function handleTripMediaMessage(
   env: Env,
   lineUserId: string,
   messageId: string,
   timestampMs: number,
-  origin: string
+  origin: string,
+  kind: "image" | "video"
 ): Promise<string> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
 
   const trip = await getActiveTrip(env.ACCOUNTS, lineUserId);
   if (!trip) {
-    return 'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูปตามมาได้เลย';
+    const noun = kind === "video" ? "คลิป" : "รูป";
+    return `ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่ง${noun}ตามมาได้เลย`;
   }
 
   return withFreshAccessToken(env, link.refreshToken, async (accessToken) => {
-    const { bytes, contentType } = await fetchLineImageContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+    const { bytes, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
     const dateFolder = bangkokDateFolderName(timestampMs);
     const dayFolderCacheKey = `dayfolder:${lineUserId}:${trip.folderId}:${dateFolder}`;
     const dayFolderId = await findOrCreateFolderCached(
@@ -276,10 +297,32 @@ export async function handleImageMessage(
       dateFolder,
       trip.folderId
     );
-    const ext = contentType.includes("png") ? "png" : "jpg";
-    await uploadImageToFolder(accessToken, dayFolderId, `${messageId}.${ext}`, bytes, contentType);
-    return `📸 เก็บรูปในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
+    const ext = extensionForContentType(contentType, kind);
+    await uploadFileToFolder(accessToken, dayFolderId, `${messageId}.${ext}`, bytes, contentType);
+    const emoji = kind === "video" ? "🎬" : "📸";
+    const noun = kind === "video" ? "คลิป" : "รูป";
+    return `${emoji} เก็บ${noun}ในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
   });
+}
+
+export async function handleImageMessage(
+  env: Env,
+  lineUserId: string,
+  messageId: string,
+  timestampMs: number,
+  origin: string
+): Promise<string> {
+  return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "image");
+}
+
+export async function handleVideoMessage(
+  env: Env,
+  lineUserId: string,
+  messageId: string,
+  timestampMs: number,
+  origin: string
+): Promise<string> {
+  return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "video");
 }
 
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
@@ -305,9 +348,18 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
           origin
         );
         await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      } else if (isVideoMessageEvent(event)) {
+        const reply = await handleVideoMessage(
+          env,
+          event.source.userId,
+          event.message.id,
+          event.timestamp,
+          origin
+        );
+        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
       }
     } catch (err) {
-      if (isTextMessageEvent(event) || isImageMessageEvent(event)) {
+      if (isTextMessageEvent(event) || isImageMessageEvent(event) || isVideoMessageEvent(event)) {
         await replyToLine(
           event.replyToken,
           "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
