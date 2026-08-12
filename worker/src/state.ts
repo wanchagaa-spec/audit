@@ -95,10 +95,11 @@ export async function setPendingConfirmation(
   await kv.put(key, JSON.stringify(pending), { expirationTtl: PENDING_TTL_SECONDS });
 }
 
-/** Shared context passed to trip/calendar/diary command handlers. */
+/** Shared context passed to trip/calendar/diary/AI command handlers. */
 export interface ActionCtx {
   accessToken: string;
   kv: KVNamespace;
   lineUserId: string;
   spreadsheetId: string;
+  geminiApiKey: string;
 }
