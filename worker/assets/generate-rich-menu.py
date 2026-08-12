@@ -12,7 +12,9 @@ the PNG alone doesn't push anything anywhere by itself.
 
 Uses Noto Sans Thai (bundled in this folder, SIL Open Font License — see
 fonts/OFL.txt) since Thai script needs a font that actually covers it; the
-default Pillow font doesn't.
+default Pillow font doesn't. Icons are drawn with plain shapes (no icon
+library available in this environment) to match a white-badge-on-color-tile
+style.
 """
 
 from pathlib import Path
@@ -26,24 +28,104 @@ FONT_DIR = HERE / "fonts"
 # standard "full" size and divides evenly into a 3x2 button grid.
 WIDTH, HEIGHT = 2500, 1686
 COLS, ROWS = 3, 2
-GUTTER = 10
+
+PAGE_BG = (240, 247, 242)  # soft off-white, faint green tint
+FRAME_BORDER = (22, 163, 74)  # same green as the tiles
+TILE_GREEN = (22, 163, 74)
+TILE_GREEN_ALT = (16, 145, 65)  # subtle shade so adjacent tiles read distinctly
+TEXT_WHITE = (255, 255, 255)
+ICON_STROKE = 16
+
+FRAME_MARGIN = 28
+FRAME_RADIUS = 56
+GUTTER = 16
+TILE_RADIUS = 30
 
 # Column/row boundaries chosen to split evenly and sum exactly to WIDTH/HEIGHT
 # (2500 isn't divisible by 3, so the middle/right columns are 1px narrower).
 COL_X = [0, 834, 1667, 2500]
 ROW_Y = [0, 843, 1686]
 
-# title: shown big and bold. sub: small caption underneath, for orientation.
-# color: button background. These MUST correspond 1:1 (same order) with the
-# tap-area actions in worker/scripts/setup-rich-menu.mjs — this file only
-# draws the picture, that script wires taps to the actual bot commands.
+
+def icon_help(draw, cx, cy, r, color, font):
+    text = "?"
+    bbox = draw.textbbox((0, 0), text, font=font)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text((cx - w / 2 - bbox[0], cy - h / 2 - bbox[1]), text, font=font, fill=color)
+
+
+def icon_money(draw, cx, cy, r, color):
+    bar_w = r * 0.32
+    gap = r * 0.16
+    heights = [r * 0.7, r * 1.15, r * 1.5]
+    xs = [cx - 1.5 * bar_w - gap, cx - 0.5 * bar_w, cx + 0.5 * bar_w + gap]
+    base_y = cy + r * 0.75
+    for x, h in zip(xs, heights):
+        draw.rounded_rectangle([x, base_y - h, x + bar_w, base_y], radius=bar_w * 0.3, fill=color)
+
+
+def icon_clock(draw, cx, cy, r, stroke, color):
+    rad = r * 0.85
+    draw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], outline=color, width=stroke)
+    draw.line([cx, cy, cx, cy - rad * 0.55], fill=color, width=stroke)
+    draw.line([cx, cy, cx + rad * 0.42, cy + rad * 0.12], fill=color, width=stroke)
+    draw.ellipse([cx - stroke * 0.7, cy - stroke * 0.7, cx + stroke * 0.7, cy + stroke * 0.7], fill=color)
+
+
+def icon_camera(draw, cx, cy, r, stroke, color):
+    body_w, body_h = r * 1.7, r * 1.1
+    x0, y0 = cx - body_w / 2, cy - body_h / 2 + r * 0.18
+    draw.rounded_rectangle(
+        [x0, y0, x0 + body_w, y0 + body_h], radius=body_h * 0.2, outline=color, width=stroke
+    )
+    bump_w, bump_h = body_w * 0.32, body_h * 0.32
+    bx0 = cx - bump_w / 2
+    by0 = y0 - bump_h * 0.7
+    draw.rounded_rectangle(
+        [bx0, by0, bx0 + bump_w, by0 + bump_h + stroke], radius=6, outline=color, width=stroke
+    )
+    lens_r = body_h * 0.3
+    draw.ellipse(
+        [cx - lens_r, y0 + body_h / 2 - lens_r, cx + lens_r, y0 + body_h / 2 + lens_r],
+        outline=color,
+        width=stroke,
+    )
+
+
+def icon_calendar(draw, cx, cy, r, stroke, color):
+    w, h = r * 1.6, r * 1.5
+    x0, y0 = cx - w / 2, cy - h / 2 + r * 0.1
+    draw.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=h * 0.14, outline=color, width=stroke)
+    header_h = h * 0.3
+    draw.line([x0, y0 + header_h, x0 + w, y0 + header_h], fill=color, width=stroke)
+    ring_y0, ring_y1 = y0 - h * 0.1, y0 + header_h * 0.55
+    draw.line([x0 + w * 0.28, ring_y0, x0 + w * 0.28, ring_y1], fill=color, width=stroke)
+    draw.line([x0 + w * 0.72, ring_y0, x0 + w * 0.72, ring_y1], fill=color, width=stroke)
+    for gy in range(2):
+        for gx in range(3):
+            px = x0 + w * (0.22 + gx * 0.28)
+            py = y0 + header_h + h * (0.22 + gy * 0.28)
+            dr = stroke * 0.6
+            draw.ellipse([px - dr, py - dr, px + dr, py + dr], fill=color)
+
+
+def icon_diary(draw, cx, cy, r, stroke, color):
+    w, h = r * 1.4, r * 1.7
+    x0, y0 = cx - w / 2, cy - h / 2
+    draw.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=w * 0.14, outline=color, width=stroke)
+    draw.line([x0 + w * 0.26, y0, x0 + w * 0.26, y0 + h], fill=color, width=max(2, stroke - 4))
+    for i in range(3):
+        ly = y0 + h * (0.32 + i * 0.22)
+        draw.line([x0 + w * 0.42, ly, x0 + w * 0.86, ly], fill=color, width=max(2, stroke - 6))
+
+
 BUTTONS = [
-    {"title": "วิธีใช้", "sub": "HELP", "color": (79, 70, 229)},
-    {"title": "สรุปเดือนนี้", "sub": "MONEY SUMMARY", "color": (5, 150, 105)},
-    {"title": "รายการล่าสุด", "sub": "RECENT", "color": (217, 119, 6)},
-    {"title": "ทริปตอนนี้", "sub": "TRIP STATUS", "color": (219, 39, 119)},
-    {"title": "นัดวันนี้", "sub": "TODAY'S EVENTS", "color": (2, 132, 199)},
-    {"title": "ไดอารี่เดือนนี้", "sub": "DIARY", "color": (124, 58, 237)},
+    {"title": "วิธีใช้", "sub": "HELP", "icon": "help"},
+    {"title": "สรุปเดือนนี้", "sub": "MONEY SUMMARY", "icon": "money"},
+    {"title": "รายการล่าสุด", "sub": "RECENT", "icon": "clock"},
+    {"title": "ทริปตอนนี้", "sub": "TRIP STATUS", "icon": "camera"},
+    {"title": "นัดวันนี้", "sub": "TODAY'S EVENTS", "icon": "calendar"},
+    {"title": "ไดอารี่เดือนนี้", "sub": "DIARY", "icon": "diary"},
 ]
 
 
@@ -53,23 +135,68 @@ def center_text(draw, cx, cy, text, font, fill):
     draw.text((cx - w / 2 - bbox[0], cy - h / 2 - bbox[1]), text, font=font, fill=fill)
 
 
-def main():
-    bold = ImageFont.truetype(str(FONT_DIR / "NotoSansThai-Bold.ttf"), 92)
-    regular = ImageFont.truetype(str(FONT_DIR / "NotoSansThai-Regular.ttf"), 46)
+def draw_icon(draw, kind, cx, cy, r, help_font):
+    # Icons sit on the white circular badge, so they're drawn in the tile's
+    # green (not white-on-white).
+    color = TILE_GREEN
+    if kind == "help":
+        icon_help(draw, cx, cy, r, color, help_font)
+    elif kind == "money":
+        icon_money(draw, cx, cy, r, color)
+    elif kind == "clock":
+        icon_clock(draw, cx, cy, r, ICON_STROKE, color)
+    elif kind == "camera":
+        icon_camera(draw, cx, cy, r, ICON_STROKE, color)
+    elif kind == "calendar":
+        icon_calendar(draw, cx, cy, r, ICON_STROKE, color)
+    elif kind == "diary":
+        icon_diary(draw, cx, cy, r, ICON_STROKE, color)
 
-    image = Image.new("RGB", (WIDTH, HEIGHT), (24, 24, 27))
+
+def main():
+    bold = ImageFont.truetype(str(FONT_DIR / "NotoSansThai-Bold.ttf"), 78)
+    regular = ImageFont.truetype(str(FONT_DIR / "NotoSansThai-Regular.ttf"), 40)
+    icon_font = ImageFont.truetype(str(FONT_DIR / "NotoSansThai-Bold.ttf"), 150)
+
+    image = Image.new("RGB", (WIDTH, HEIGHT), PAGE_BG)
     draw = ImageDraw.Draw(image)
+
+    # Outer card frame, like the reference screenshot's rounded border.
+    draw.rounded_rectangle(
+        [FRAME_MARGIN, FRAME_MARGIN, WIDTH - FRAME_MARGIN, HEIGHT - FRAME_MARGIN],
+        radius=FRAME_RADIUS,
+        outline=FRAME_BORDER,
+        width=10,
+    )
+
+    inner_pad = FRAME_MARGIN + 26
+    grid_w = WIDTH - inner_pad * 2
+    grid_h = HEIGHT - inner_pad * 2
+    col_x = [inner_pad + grid_w * c / COLS for c in range(COLS + 1)]
+    row_y = [inner_pad + grid_h * r / ROWS for r in range(ROWS + 1)]
 
     for i, btn in enumerate(BUTTONS):
         row, col = divmod(i, COLS)
-        x0, x1 = COL_X[col], COL_X[col + 1]
-        y0, y1 = ROW_Y[row], ROW_Y[row + 1]
+        x0, x1 = col_x[col], col_x[col + 1]
+        y0, y1 = row_y[row], row_y[row + 1]
+        tile_color = TILE_GREEN if (row + col) % 2 == 0 else TILE_GREEN_ALT
         draw.rounded_rectangle(
-            [x0 + GUTTER, y0 + GUTTER, x1 - GUTTER, y1 - GUTTER], radius=36, fill=btn["color"]
+            [x0 + GUTTER / 2, y0 + GUTTER / 2, x1 - GUTTER / 2, y1 - GUTTER / 2],
+            radius=TILE_RADIUS,
+            fill=tile_color,
         )
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        center_text(draw, cx, cy - 30, btn["title"], bold, (255, 255, 255))
-        center_text(draw, cx, cy + 70, btn["sub"], regular, (255, 255, 255))
+
+        cx = (x0 + x1) / 2
+        tile_h = y1 - y0
+        badge_cy = y0 + tile_h * 0.36
+        badge_r = tile_h * 0.22
+        draw.ellipse(
+            [cx - badge_r, badge_cy - badge_r, cx + badge_r, badge_cy + badge_r], fill=(255, 255, 255)
+        )
+        draw_icon(draw, btn["icon"], cx, badge_cy, badge_r * 0.62, icon_font)
+
+        center_text(draw, cx, y0 + tile_h * 0.68, btn["title"], bold, TEXT_WHITE)
+        center_text(draw, cx, y0 + tile_h * 0.84, btn["sub"], regular, TEXT_WHITE)
 
     out_path = HERE / "rich-menu.png"
     image.save(out_path, "PNG", optimize=True)
