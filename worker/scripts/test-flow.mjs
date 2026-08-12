@@ -54,6 +54,7 @@ let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV ca
 const diaryRows = []; // simulates the Diary tab
 
 let simulateDriveUploadFailureCount = 0; // decremented each time; while > 0, fails the next Drive media upload request(s)
+let simulatePushFailureToo = false; // one-shot: fails the next push too (pair with an "expired" replyToken to simulate total messaging failure)
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
@@ -115,6 +116,10 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response("{}", { status: 200 });
   }
   if (u.includes("api.line.me/v2/bot/message/push")) {
+    if (simulatePushFailureToo) {
+      simulatePushFailureToo = false;
+      return new Response(JSON.stringify({ message: "simulated push failure" }), { status: 500 });
+    }
     const body = JSON.parse(init.body);
     pushes.push({ to: body.to, text: body.messages[0].text });
     return new Response("{}", { status: 200 });
@@ -621,6 +626,52 @@ check(
 check(
   `Drive uploads stayed bounded (never more than 5 in flight at once) across all ${moderateBatchSize} photos`,
   maxConcurrentDriveUploadRequests <= 5
+);
+
+// Regression test for a bug found while investigating a real report: one
+// batch's final combined reply could fail completely (the reply itself AND
+// its push fallback both failing) — replyOrPush throws in that case, and
+// several call sites weren't guarded against it, so the exception used to
+// escape all the way up through handleWebhook's Promise.all, crashing the
+// *entire* invocation. That silenced not just the one failed batch but
+// every other event in the same webhook call too — matching a real report
+// where one photo batch got zero message while an unrelated one succeeded.
+// This sends one image event whose reply token is "expired" (so the reply
+// fails) together with a one-shot simulated push failure (so the fallback
+// also fails), in the SAME webhook call as an unrelated text message, and
+// confirms the text message still gets its normal reply.
+const totalFailureImageEvent = {
+  type: "message",
+  message: { type: "image", id: "totalfail-img-1" },
+  source: { type: "user", userId: lineUserId },
+  replyToken: "reply-totalfail-expired",
+  timestamp: Date.now(),
+};
+const totalFailureTextEvent = {
+  type: "message",
+  message: { type: "text", text: "สวัสดีค่ะ" },
+  source: { type: "user", userId: lineUserId },
+  replyToken: "reply-totalfail-text-ok",
+  timestamp: Date.now(),
+};
+const totalFailureRawBody = JSON.stringify({ events: [totalFailureImageEvent, totalFailureTextEvent] });
+const totalFailureSignature = await signLineBody(totalFailureRawBody, env.LINE_CHANNEL_SECRET);
+const totalFailureRequest = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": totalFailureSignature },
+  body: totalFailureRawBody,
+});
+simulatePushFailureToo = true;
+const repliesBeforeTotalFailure = replies.length;
+const totalFailureResponse = await handleWebhook(totalFailureRequest, env);
+check(
+  "handleWebhook still returns ok even when a batch's reply AND push both fail",
+  totalFailureResponse.status === 200
+);
+check(
+  "an unrelated text event in the same webhook call still gets its normal reply",
+  replies.length > repliesBeforeTotalFailure &&
+    replies.slice(repliesBeforeTotalFailure).some((r) => r.includes("4 เรื่องหลักๆ"))
 );
 
 // Regression test for a real report: even after cutting Drive requests back

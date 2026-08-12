@@ -302,6 +302,23 @@ outcome than the one this retry replaces (the photo never arriving at all), and 
 existing file first would cost another Drive subrequest per file that isn't worth spending to
 guard against an edge case this narrow.
 
+One more real bug turned up while chasing a report where one photo batch got *zero* message —
+not even the generic "something went wrong" apology — while an unrelated batch in a different
+webhook call succeeded normally. `replyOrPush` throws if **both** the reply and its push fallback
+fail, and that exception wasn't guarded at every call site: the final combined reply in
+`handleImmediateMediaBatch`/`handleQueuedMediaBatch`, and the two prompts in
+`resolveMediaBatchContext` ("not linked" / "no active trip"), could all throw uncaught. Left
+unguarded, that exception escaped through an unawaited-for-errors `Promise.all` in `handleWebhook`
+and crashed the *entire* invocation — silencing not just the one failed batch but every other
+event in the same webhook call too (other senders' batches, unrelated text messages). Every
+`replyOrPush` call in the media-handling path now has a `.catch(() => undefined)` safety net (or,
+for the two batch-handler functions, a top-level try/catch that makes one best-effort recovery
+attempt first), and `handleWebhook`'s dispatch to per-sender batch handlers uses
+`Promise.allSettled` instead of `Promise.all` as defense in depth. None of this can *guarantee* a
+message gets through if LINE's API is genuinely unreachable for both calls — but it guarantees
+that failure stays contained to the one batch it happened to, instead of taking the rest of the
+webhook call down with it.
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never
