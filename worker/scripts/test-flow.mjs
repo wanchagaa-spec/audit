@@ -43,6 +43,8 @@ const diaryRows = []; // simulates the Diary tab
 
 let simulateDriveUploadFailure = false; // one-shot: fails the next Drive media upload request
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
+let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
+let maxConcurrentDriveUploadRequests = 0;
 
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
@@ -139,41 +141,52 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files")) {
     driveUploadRequestCount++;
-    if (simulateDriveUploadFailure) {
-      simulateDriveUploadFailure = false;
-      return new Response(JSON.stringify({ error: "simulated content upload failure" }), { status: 500 });
-    }
-    // Single-request streamed multipart upload: metadata + binary content in
-    // one body, assembled as a stream (see concatStreams in drive.ts) rather
-    // than a fully-buffered Blob. Decoded as latin1 here (not the default
-    // UTF-8), which maps each byte to one code point 1:1 — the only way to
-    // losslessly round-trip arbitrary binary content back out of a JS string
-    // so the byte-count regression check below stays accurate.
-    const contentType = init.headers?.["Content-Type"] ?? "";
-    const boundary = contentType.match(/boundary=(.+)$/)?.[1];
-    const bodyBuffer = init.body ? Buffer.from(await new Response(init.body).arrayBuffer()) : Buffer.alloc(0);
-    const text = bodyBuffer.toString("latin1");
-    const marker = `--${boundary}`;
-    let name;
-    let parentId;
-    let payloadSize = 0;
+    activeDriveUploadRequests++;
+    maxConcurrentDriveUploadRequests = Math.max(maxConcurrentDriveUploadRequests, activeDriveUploadRequests);
     try {
-      const metaPart = text.split(marker)[1];
-      const metaJson = metaPart.split("\r\n\r\n")[1].split("\r\n--")[0];
-      const meta = JSON.parse(metaJson);
-      name = meta.name;
-      parentId = meta.parents?.[0];
+      if (simulateDriveUploadFailure) {
+        simulateDriveUploadFailure = false;
+        return new Response(JSON.stringify({ error: "simulated content upload failure" }), { status: 500 });
+      }
+      // Single-request streamed multipart upload: metadata + binary content
+      // in one body, assembled as a stream (see concatStreams in drive.ts)
+      // rather than a fully-buffered Blob. Decoded as latin1 here (not the
+      // default UTF-8), which maps each byte to one code point 1:1 — the
+      // only way to losslessly round-trip arbitrary binary content back out
+      // of a JS string so the byte-count regression check below stays
+      // accurate.
+      const contentType = init.headers?.["Content-Type"] ?? "";
+      const boundary = contentType.match(/boundary=(.+)$/)?.[1];
+      const bodyBuffer = init.body ? Buffer.from(await new Response(init.body).arrayBuffer()) : Buffer.alloc(0);
+      const text = bodyBuffer.toString("latin1");
+      const marker = `--${boundary}`;
+      let name;
+      let parentId;
+      let payloadSize = 0;
+      try {
+        const metaPart = text.split(marker)[1];
+        const metaJson = metaPart.split("\r\n\r\n")[1].split("\r\n--")[0];
+        const meta = JSON.parse(metaJson);
+        name = meta.name;
+        parentId = meta.parents?.[0];
 
-      const secondBoundaryIndex = text.indexOf(marker, text.indexOf(marker) + marker.length);
-      const contentHeaderEnd = text.indexOf("\r\n\r\n", secondBoundaryIndex) + 4;
-      const closingBoundaryIndex = text.lastIndexOf(`\r\n--${boundary}--`);
-      payloadSize = closingBoundaryIndex - contentHeaderEnd;
-    } catch {
-      // best-effort parse for the test mock only
+        const secondBoundaryIndex = text.indexOf(marker, text.indexOf(marker) + marker.length);
+        const contentHeaderEnd = text.indexOf("\r\n\r\n", secondBoundaryIndex) + 4;
+        const closingBoundaryIndex = text.lastIndexOf(`\r\n--${boundary}--`);
+        payloadSize = closingBoundaryIndex - contentHeaderEnd;
+      } catch {
+        // best-effort parse for the test mock only
+      }
+      // A small artificial delay widens the window during which concurrent
+      // calls actually overlap, so maxConcurrentDriveUploadRequests reflects
+      // real overlap instead of near-instant mock responses hiding it.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const id = nextDriveId("file");
+      driveUploads.push({ id, name, parentId, size: payloadSize });
+      return new Response(JSON.stringify({ id }), { status: 200 });
+    } finally {
+      activeDriveUploadRequests--;
     }
-    const id = nextDriveId("file");
-    driveUploads.push({ id, name, parentId, size: payloadSize });
-    return new Response(JSON.stringify({ id }), { status: 200 });
   }
   if (u.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
     if (simulateInsufficientCalendarScope) return new Response("forbidden", { status: 403 });
@@ -540,7 +553,7 @@ check(
 // entry point (concurrent processing, real signature verification) with 40
 // photos in one call — bigger than the real report — to exercise this
 // directly rather than just trusting the request-count math.
-const bigBatchSize = 40;
+const bigBatchSize = 50;
 const bigBatchEvents = Array.from({ length: bigBatchSize }, (_, i) => ({
   type: "message",
   message: { type: "image", id: `bigbatch-${i}` },
@@ -570,6 +583,19 @@ check(
 check(
   "each file cost exactly one Drive upload subrequest, not two",
   driveUploadRequestCount === driveUploadRequestsBeforeBigBatch + bigBatchSize
+);
+// Regression test for a real report: even after cutting Drive requests back
+// to one per file, sending 50 photos in one batch still left 1 silently
+// missing with no error reply — some platform-level ceiling on simultaneous
+// subrequests for one webhook call, most likely, since even the fallback
+// error reply is itself a subrequest that can be lost the same way. Fixed
+// by bounding how many events handleWebhook processes concurrently instead
+// of firing the whole batch's subrequests at once (see
+// WEBHOOK_EVENT_CONCURRENCY in src/index.ts). This confirms that bound is
+// actually in effect, not just that the batch happens to still work.
+check(
+  `Drive uploads stayed bounded (never more than 5 in flight at once) across all ${bigBatchSize} photos`,
+  maxConcurrentDriveUploadRequests <= 5
 );
 
 const switchPromptReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
