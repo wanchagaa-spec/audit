@@ -667,14 +667,27 @@ async function handleQueuedMediaBatch(
   }
 }
 
-export async function handleWebhook(request: Request, env: Env): Promise<Response> {
+// Reads and signature-verifies the raw request body, returning the parsed
+// events or null if the signature didn't check out. Shared by handleWebhook
+// (which processes events synchronously — used directly by tests, and by
+// the fast-ack path below after backgrounding the real work) and the
+// fast-ack path itself, so both stay in sync on how a request is validated.
+async function verifyAndParseWebhookBody(request: Request, env: Env): Promise<LineWebhookBody | null> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-line-signature");
   const valid = await verifyLineSignature(rawBody, signature, env.LINE_CHANNEL_SECRET);
-  if (!valid) return new Response("invalid signature", { status: 401 });
+  if (!valid) return null;
+  return JSON.parse(rawBody) as LineWebhookBody;
+}
 
-  const body = JSON.parse(rawBody) as LineWebhookBody;
-  const origin = new URL(request.url).origin;
+// All the real work for one webhook call: uploading media, sending replies,
+// everything. Split out from handleWebhook so the production fetch handler
+// can run it via ctx.waitUntil() *after* already responding to LINE — see
+// the comment on the fetch handler's /webhook branch for why that matters.
+// handleWebhook below still awaits this directly (tests call handleWebhook
+// and expect it to have fully finished before checking results), so nothing
+// about the synchronous, fully-awaited behavior tests rely on has changed.
+async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: string): Promise<void> {
   // Shared across every event in this one webhook call — see the
   // TokenCache comment on withFreshAccessToken for why.
   const tokenCache: TokenCache = new Map();
@@ -752,7 +765,18 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
       console.error("webhook handling failed", err);
     }
   });
+}
 
+// Fully synchronous: verifies, processes every event, and only then returns
+// "ok". Kept for tests, which need to await full completion before checking
+// results (e.g. driveUploads.length right after `await handleWebhook(...)`).
+// Production traffic goes through the fetch handler's fast-ack path instead
+// — see its comment for why the two need to differ.
+export async function handleWebhook(request: Request, env: Env): Promise<Response> {
+  const body = await verifyAndParseWebhookBody(request, env);
+  if (!body) return new Response("invalid signature", { status: 401 });
+  const origin = new URL(request.url).origin;
+  await processWebhookEvents(body, env, origin);
   return new Response("ok");
 }
 
@@ -813,11 +837,29 @@ export async function drainUploadQueue(env: Env): Promise<void> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
-    if (url.pathname === "/webhook" && request.method === "POST") return handleWebhook(request, env);
+    if (url.pathname === "/webhook" && request.method === "POST") {
+      const body = await verifyAndParseWebhookBody(request, env);
+      if (!body) return new Response("invalid signature", { status: 401 });
+      // Acknowledge LINE's webhook delivery immediately instead of making it
+      // wait for the real processing (fetching media, uploading to Drive,
+      // sending replies) to finish. LINE — like most webhook senders — has
+      // its own timeout on how long it'll wait for a response; Cloudflare's
+      // own request logs confirmed a real invocation was cut short with
+      // outcome "canceled" after LINE gave up and disconnected only ~2
+      // seconds in, well under any CPU or subrequest limit this codebase had
+      // been tuning against. Every earlier fix made the processing itself
+      // more reliable, but none of them made the response come back fast
+      // enough to avoid the disconnect in the first place. ctx.waitUntil
+      // keeps processWebhookEvents running in the background after this
+      // response has already gone out, so LINE never has a reason to hang up
+      // on us mid-request again.
+      ctx.waitUntil(processWebhookEvents(body, env, url.origin));
+      return new Response("ok");
+    }
     if (url.pathname === "/health") return new Response("ok");
 
     return new Response("not found", { status: 404 });

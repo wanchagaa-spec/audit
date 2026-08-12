@@ -31,6 +31,23 @@ class FakeKV {
   }
 }
 
+// Minimal stand-in for Cloudflare's real ExecutionContext, just enough to
+// test the fetch handler's ctx.waitUntil(...) fast-ack behavior: collects
+// backgrounded promises so a test can explicitly wait for them after
+// checking that the response itself didn't wait.
+class FakeExecutionContext {
+  constructor() {
+    this.waitUntilPromises = [];
+  }
+  waitUntil(promise) {
+    this.waitUntilPromises.push(promise);
+  }
+  async drain() {
+    await Promise.all(this.waitUntilPromises);
+    this.waitUntilPromises = [];
+  }
+}
+
 const sheetRows = []; // simulates the Transactions tab
 const budgetRows = []; // simulates the Budgets tab
 const replies = []; // captures what would have been sent back to LINE
@@ -277,9 +294,14 @@ globalThis.fetch = async (url, init = {}) => {
   throw new Error(`unexpected fetch to ${u}`);
 };
 
-const { handleTextMessage, handleImageMessage, handleVideoMessage, handleWebhook, drainUploadQueue } = await import(
-  "../src/index.ts"
-);
+const {
+  handleTextMessage,
+  handleImageMessage,
+  handleVideoMessage,
+  handleWebhook,
+  drainUploadQueue,
+  default: worker,
+} = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
 const { bangkokDateKey, addDaysToDateKey } = await import("../src/thaiDate.ts");
@@ -674,6 +696,47 @@ check(
     replies.slice(repliesBeforeTotalFailure).some((r) => r.includes("4 เรื่องหลักๆ"))
 );
 
+// Regression test for a real report backed by Cloudflare's own request logs:
+// a webhook invocation was cut short with outcome "canceled" only ~2 seconds
+// in — LINE gave up waiting for a response and disconnected while the
+// Worker was still uploading/replying, well under any CPU or subrequest
+// limit. The fix moves the actual event processing into ctx.waitUntil() so
+// the real `fetch` handler (not handleWebhook, which stays fully
+// synchronous for tests) responds to LINE immediately. This exercises the
+// real default-exported fetch handler with a FakeExecutionContext and
+// checks the response comes back before any upload has happened, then
+// drains the backgrounded work and confirms it actually completes.
+const fastAckImageEvent = {
+  type: "message",
+  message: { type: "image", id: "fastack-img-1" },
+  source: { type: "user", userId: lineUserId },
+  replyToken: "reply-fastack-1",
+  timestamp: Date.now(),
+};
+const fastAckRawBody = JSON.stringify({ events: [fastAckImageEvent] });
+const fastAckSignature = await signLineBody(fastAckRawBody, env.LINE_CHANNEL_SECRET);
+const fastAckRequest = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": fastAckSignature },
+  body: fastAckRawBody,
+});
+const fastAckCtx = new FakeExecutionContext();
+const uploadsBeforeFastAck = driveUploads.length;
+const repliesBeforeFastAck = replies.length;
+const fastAckResponse = await worker.fetch(fastAckRequest, env, fastAckCtx);
+check("the fetch handler responds ok right away", fastAckResponse.status === 200);
+check(
+  "the response comes back before the upload has actually happened",
+  driveUploads.length === uploadsBeforeFastAck && replies.length === repliesBeforeFastAck
+);
+await fastAckCtx.drain();
+check(
+  "draining the backgrounded work actually uploads the file and sends the reply",
+  driveUploads.length === uploadsBeforeFastAck + 1 &&
+    replies.length === repliesBeforeFastAck + 1 &&
+    replies.at(-1).includes('ทริป "ทะเล"')
+);
+
 // Regression test for a real report: even after cutting Drive requests back
 // to one per file and bounding webhook concurrency, sending 50 photos in one
 // batch still left up to 4 silently missing with no error reply. A single
@@ -850,6 +913,28 @@ const wrongSignatureRequest = new Request("http://localhost:8787/webhook", {
 });
 const wrongSignatureResponse = await handleWebhook(wrongSignatureRequest, env);
 check("an invalid LINE signature is still rejected", wrongSignatureResponse.status === 401);
+
+// Regression test for a review finding on the fast-ack PR: the invalid-
+// signature check above only exercised handleWebhook directly, not the
+// production fetch handler real LINE traffic actually hits — a future edit
+// to the fetch handler's /webhook branch (e.g. reordering the signature
+// check relative to ctx.waitUntil) could silently break 401-on-bad-signature
+// for real requests without any test catching it.
+const wrongSignatureRequestForFetch = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": "not-a-real-signature" },
+  body: rawWebhookBody,
+});
+const fetchCtxForBadSignature = new FakeExecutionContext();
+const wrongSignatureFetchResponse = await worker.fetch(wrongSignatureRequestForFetch, env, fetchCtxForBadSignature);
+check(
+  "the real fetch handler also rejects an invalid signature with 401, not just handleWebhook",
+  wrongSignatureFetchResponse.status === 401
+);
+check(
+  "no background work gets scheduled for a request that fails signature verification",
+  fetchCtxForBadSignature.waitUntilPromises.length === 0
+);
 
 // 8. Calendar (PLAN.md 15.3): format hint, confirm-before-create, decline,
 // list by day, search-based edit/delete, and the insufficient-scope re-link.
