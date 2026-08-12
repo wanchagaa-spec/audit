@@ -53,7 +53,7 @@ let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
 
-let simulateDriveUploadFailure = false; // one-shot: fails the next Drive media upload request
+let simulateDriveUploadFailureCount = 0; // decremented each time; while > 0, fails the next Drive media upload request(s)
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
@@ -156,8 +156,8 @@ globalThis.fetch = async (url, init = {}) => {
     activeDriveUploadRequests++;
     maxConcurrentDriveUploadRequests = Math.max(maxConcurrentDriveUploadRequests, activeDriveUploadRequests);
     try {
-      if (simulateDriveUploadFailure) {
-        simulateDriveUploadFailure = false;
+      if (simulateDriveUploadFailureCount > 0) {
+        simulateDriveUploadFailureCount--;
         return new Response(JSON.stringify({ error: "simulated content upload failure" }), { status: 500 });
       }
       // Single-request streamed multipart upload: metadata + binary content
@@ -519,17 +519,33 @@ check(
 // multipart request carries metadata (name + parent folder) and content
 // together in one atomic request, so a failure never leaves an orphaned,
 // unnamed file sitting in Drive's root — nothing is created at all unless
-// the whole request succeeds.
+// the whole request succeeds. Failing every attempt (MAX_UPLOAD_ATTEMPTS) so
+// the retry below doesn't mask this into a false pass.
 const uploadsBeforeFailedPut = driveUploads.length;
-simulateDriveUploadFailure = true;
+simulateDriveUploadFailureCount = 2;
 let failedUploadThrew = false;
 try {
   await handleVideoMessage(env, lineUserId, "vid-willfail", Date.now(), origin);
 } catch {
   failedUploadThrew = true;
 }
-check("a failed Drive content upload surfaces as an error, not a false success", failedUploadThrew);
+check("a failed Drive content upload (all attempts exhausted) surfaces as an error", failedUploadThrew);
 check("a failed content upload leaves no orphaned file behind in Drive", driveUploads.length === uploadsBeforeFailedPut);
+
+// Regression test for a real report: Cloudflare's own metrics showed a real,
+// if small, background failure rate for the Drive upload request over a day
+// of production use — ordinary transient flakiness. uploadTripMedia now
+// retries once (MAX_UPLOAD_ATTEMPTS) before giving up, re-fetching from LINE
+// fresh each attempt (a ReadableStream can only be read once, so the first
+// attempt's stream can't just be reused). This fails only the first attempt,
+// so the upload should still succeed on the retry.
+const uploadsBeforeRetrySuccess = driveUploads.length;
+simulateDriveUploadFailureCount = 1;
+const retrySuccessReply = await handleVideoMessage(env, lineUserId, "vid-retry-ok", Date.now(), origin);
+check(
+  "a Drive upload that fails once still succeeds after one retry",
+  retrySuccessReply.includes('ทริป "ทะเล"') && driveUploads.length === uploadsBeforeRetrySuccess + 1
+);
 
 // A batch of many photos+videos sent together (bundled into one webhook
 // call, as LINE can do for a multi-select send) must not blow through
@@ -569,7 +585,7 @@ check(
 // a per-file subrequest that IMMEDIATE_MEDIA_BATCH_LIMIT's original
 // calibration had missed, letting even a "moderate" immediate batch quietly
 // exceed the same budget the queueing threshold exists to protect.
-const moderateBatchSize = 15;
+const moderateBatchSize = 10;
 const moderateBatchEvents = Array.from({ length: moderateBatchSize }, (_, i) => ({
   type: "message",
   message: { type: "image", id: `modbatch-${i}` },
@@ -651,25 +667,25 @@ check(
 const queuedAfterLargeBatch = await countQueuedForUser(env.ACCOUNTS, lineUserId);
 check(`all ${largeBatchSize} photos were queued for background upload`, queuedAfterLargeBatch === largeBatchSize);
 
-// First drain: DRAIN_BATCH_SIZE (20) of the 45 queued photos should upload,
-// leaving 25 still queued, with a push summary mentioning both counts.
+// First drain: DRAIN_BATCH_SIZE (15) of the 45 queued photos should upload,
+// leaving 30 still queued, with a push summary mentioning both counts.
 const pushesBeforeFirstDrain = pushes.length;
 await drainUploadQueue(env);
-check("the first drain uploads exactly one batch's worth (20) of photos", driveUploads.length === uploadsBeforeLargeBatch + 20);
+check("the first drain uploads exactly one batch's worth (15) of photos", driveUploads.length === uploadsBeforeLargeBatch + 15);
 check(
   "the first drain sends a push summary mentioning what's left",
   pushes.length === pushesBeforeFirstDrain + 1 &&
-    pushes.at(-1).text.includes("20 ไฟล์") &&
-    pushes.at(-1).text.includes("เหลืออีก 25 ไฟล์")
+    pushes.at(-1).text.includes("15 ไฟล์") &&
+    pushes.at(-1).text.includes("เหลืออีก 30 ไฟล์")
 );
-check("25 photos remain queued after the first drain", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 25);
+check("30 photos remain queued after the first drain", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 30);
 
-// Second drain: another 20 of the remaining 25.
+// Second drain: another 15 of the remaining 30.
 await drainUploadQueue(env);
-check("the second drain uploads another 20 photos", driveUploads.length === uploadsBeforeLargeBatch + 40);
-check("5 photos remain queued after the second drain", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 5);
+check("the second drain uploads another 15 photos", driveUploads.length === uploadsBeforeLargeBatch + 30);
+check("15 photos remain queued after the second drain", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 15);
 
-// Third drain: the last 5 — queue empties, and the summary says so instead
+// Third drain: the last 15 — queue empties, and the summary says so instead
 // of mentioning a remaining count.
 await drainUploadQueue(env);
 check(

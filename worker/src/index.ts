@@ -325,12 +325,22 @@ function extensionForContentType(contentType: string, kind: "image" | "video"): 
   return contentType.includes("png") ? "png" : "jpg";
 }
 
+// Cloudflare's own metrics showed a real, if small, background failure rate
+// for the Drive upload request (a handful of 4xx responses out of dozens of
+// otherwise-successful requests over a day of testing) — ordinary transient
+// flakiness, not a design flaw, but worth not giving up on immediately. Each
+// attempt re-fetches from LINE rather than reusing bytes from a failed
+// attempt, since a ReadableStream can only be read once — a partially
+// consumed stream from a failed upload can't be retried directly.
+const MAX_UPLOAD_ATTEMPTS = 2;
+
 // The actual upload work, assuming the caller has already resolved the
 // account link and destination folder — factored out so the three places
 // that need it (a single immediate upload, a same-webhook-call media batch,
-// and the queue drain) don't each duplicate the fetch + upload logic. Takes
-// a bare folderId rather than a full ActiveTrip since that's all it needs —
-// the queue drain only has a snapshotted folderId/tripName, not a live trip.
+// and the queue drain) don't each duplicate the fetch + upload logic, and so
+// all three get the same retry behavior for free. Takes a bare folderId
+// rather than a full ActiveTrip since that's all it needs — the queue drain
+// only has a snapshotted folderId/tripName, not a live trip.
 async function uploadTripMedia(
   env: Env,
   accessToken: string,
@@ -339,23 +349,33 @@ async function uploadTripMedia(
   timestampMs: number,
   kind: "image" | "video"
 ): Promise<void> {
-  const { body, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
-  const timestamp = new Date(timestampMs);
-  const ext = extensionForContentType(contentType, kind);
-  // Uploads straight into the trip folder (created once, up front, when
-  // the trip started) with a zero-padded date baked into the filename
-  // (so files still sort chronologically), instead of finding-or-
-  // creating a per-day subfolder on every single upload. That per-day
-  // lookup used to run for every photo/video, which (a) had an
-  // unavoidable race — Drive's find-then-create isn't atomic, so
-  // several files sent in the same LINE multi-select burst could each
-  // miss the search and create duplicate day folders, splitting the
-  // trip's files across them — and (b) burned 3-4 extra subrequests per
-  // file, which could exceed Cloudflare's per-request subrequest budget
-  // when someone sent many photos/clips at once, silently dropping
-  // whichever ones ran out of budget. A flat folder needs neither.
-  const filename = `${bangkokDateKey(timestamp)}_${messageId}.${ext}`;
-  await uploadFileToFolder(accessToken, tripFolderId, filename, body, contentType);
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
+    try {
+      const { body, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+      const timestamp = new Date(timestampMs);
+      const ext = extensionForContentType(contentType, kind);
+      // Uploads straight into the trip folder (created once, up front, when
+      // the trip started) with a zero-padded date baked into the filename
+      // (so files still sort chronologically), instead of finding-or-
+      // creating a per-day subfolder on every single upload. That per-day
+      // lookup used to run for every photo/video, which (a) had an
+      // unavoidable race — Drive's find-then-create isn't atomic, so
+      // several files sent in the same LINE multi-select burst could each
+      // miss the search and create duplicate day folders, splitting the
+      // trip's files across them — and (b) burned 3-4 extra subrequests per
+      // file, which could exceed Cloudflare's per-request subrequest budget
+      // when someone sent many photos/clips at once, silently dropping
+      // whichever ones ran out of budget. A flat folder needs neither.
+      const filename = `${bangkokDateKey(timestamp)}_${messageId}.${ext}`;
+      await uploadFileToFolder(accessToken, tripFolderId, filename, body, contentType);
+      return;
+    } catch (err) {
+      lastErr = err;
+      console.error(`uploadTripMedia attempt ${attempt}/${MAX_UPLOAD_ATTEMPTS} failed for ${messageId}`, err);
+    }
+  }
+  throw lastErr;
 }
 
 async function handleTripMediaMessage(
@@ -472,16 +492,22 @@ async function processWithConcurrencyLimit<T>(
 // size gets through eventually instead of losing files. Below this, media
 // still uploads immediately, just as one combined reply per webhook call
 // (handleImmediateMediaBatch below) instead of one per file — collapsing N
-// replies into 1 is what makes the per-file cost 2 instead of 3, which is
-// what actually keeps a batch just under this limit safely under the ~50
-// external-subrequest budget a single invocation gets (2 × 20 + a couple of
-// housekeeping requests ≈ low 40s, comfortably clear of the ceiling).
-const IMMEDIATE_MEDIA_BATCH_LIMIT = 20;
+// replies into 1 is what makes the per-file cost 2 instead of 3.
+//
+// Set below the ~50-external-subrequest ceiling with real headroom, not
+// right up against it: MAX_UPLOAD_ATTEMPTS means a file that fails once
+// costs double (a fresh LINE fetch + Drive upload on retry), and Cloudflare's
+// own metrics showed a small but real background failure rate in practice.
+// Happy path (no retries) is 2 × 15 + a couple of housekeeping requests ≈
+// low 30s; even if a handful of files in the batch need a retry, this stays
+// well clear of the ceiling instead of being one bad file away from it.
+const IMMEDIATE_MEDIA_BATCH_LIMIT = 15;
 
-// Kept comfortably under the ~50 external-subrequest budget a single
-// invocation gets: each queued item needs up to 2 (fetch from LINE, upload
-// to Drive), leaving headroom for the summary push message(s) at the end.
-const DRAIN_BATCH_SIZE = 20;
+// Same headroom reasoning as IMMEDIATE_MEDIA_BATCH_LIMIT above: kept below
+// the ~50 external-subrequest budget with room for MAX_UPLOAD_ATTEMPTS
+// retries on whichever files hit a transient failure, not just the happy-path
+// count.
+const DRAIN_BATCH_SIZE = 15;
 
 // Shared by both media-batch paths below: resolves the account link and
 // active trip once per sender instead of once per file, replying with the

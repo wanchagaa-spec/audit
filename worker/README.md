@@ -262,7 +262,7 @@ instead of one reply per file. This was originally just a requested UX improveme
 identical confirmation messages for every photo in a send is noisy), but it turned out to matter
 for correctness too: a reply is itself an outbound subrequest, so the immediate path's real
 per-file cost is fetch-from-LINE + upload-to-Drive + **reply** = 3, not 2. `IMMEDIATE_MEDIA_BATCH_LIMIT`
-(20) was originally calibrated only against the 2-subrequest figure, meaning even a batch that
+(15) was originally calibrated only against the 2-subrequest figure, meaning even a batch that
 correctly stayed *under* the queueing threshold could still quietly exceed the ~50-subrequest
 budget once the per-file reply was counted properly — a real report of a batch that looked "fine"
 by the queueing math still lost files. Collapsing replies to one per batch brings the immediate
@@ -276,6 +276,19 @@ seconds instead of one large one. Each call is evaluated against `IMMEDIATE_MEDI
 independently, which is safe (each is its own invocation with its own budget) but means the
 confirmation messages for one "single" send can arrive as a few separate batches rather than
 exactly one.
+
+Cloudflare's own request metrics (Workers dashboard → Metrics → Subrequests, broken down by host)
+showed a real, if small, background failure rate for the Drive upload request even after all of
+the above — a handful of 4xx responses out of dozens of otherwise-successful requests over a day
+of testing, ordinary transient flakiness rather than a design flaw. `uploadTripMedia` (the shared
+upload function used by all three upload call sites) now retries once (`MAX_UPLOAD_ATTEMPTS = 2`)
+before giving up, re-fetching from LINE fresh on the retry rather than reusing the first attempt's
+stream (a `ReadableStream` can only be read once). `IMMEDIATE_MEDIA_BATCH_LIMIT` and
+`DRAIN_BATCH_SIZE` were both brought down from 20 to 15 to leave headroom for the extra subrequests
+a retried file costs, rather than sizing batches right up against the ~50-subrequest ceiling with
+nothing to spare. A file that still fails after its retry is reported in the batch's summary
+message (`(อีก N ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`) so there's always a clear next step
+instead of a silently incomplete album.
 
 ### Calendar (PLAN.md 15.3)
 
