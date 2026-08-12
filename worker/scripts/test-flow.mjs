@@ -562,7 +562,13 @@ check(
 // IMMEDIATE_MEDIA_BATCH_LIMIT (20), so it still uploads immediately through
 // the real handleWebhook entry point (concurrent processing, real signature
 // verification) — the queued/drained path for bigger batches is exercised
-// separately below.
+// separately below. Also covers a later fix: immediate batches get one
+// combined reply for the whole batch, not one per file — a real user asked
+// for this (instead of a stream of separate confirmations), and it also
+// turned out to matter for the subrequest math: a reply per file was itself
+// a per-file subrequest that IMMEDIATE_MEDIA_BATCH_LIMIT's original
+// calibration had missed, letting even a "moderate" immediate batch quietly
+// exceed the same budget the queueing threshold exists to protect.
 const moderateBatchSize = 15;
 const moderateBatchEvents = Array.from({ length: moderateBatchSize }, (_, i) => ({
   type: "message",
@@ -587,8 +593,10 @@ check(
   driveUploads.length === uploadsBeforeModerateBatch + moderateBatchSize
 );
 check(
-  `all ${moderateBatchSize} photos got a confirmation reply — none silently dropped`,
-  replies.length === repliesBeforeModerateBatch + moderateBatchSize
+  `all ${moderateBatchSize} photos get exactly one combined confirmation reply, not one per file`,
+  replies.length === repliesBeforeModerateBatch + 1 &&
+    replies.at(-1).includes(`${moderateBatchSize} ไฟล์`) &&
+    replies.at(-1).includes('ทริป "ทะเล"')
 );
 check(
   "each file cost exactly one Drive upload subrequest, not two",
@@ -716,21 +724,23 @@ check("image after ending the trip asks to start one again", imageAfterEndReply.
 // event's full round trip — and a failed reply retried the same expired
 // token in the catch block, swallowing that failure too. This exercises the
 // real handleWebhook entry point (signature verification included) with a
-// batch that mixes a normal event, one whose reply token has "expired", and
-// one of an unsupported message type (LINE can send "file" for some clips).
+// batch that mixes two image events (combined into one reply, using the
+// first event's token — which "expires" here, to prove the combined reply
+// itself still falls back to push) and one of an unsupported message type
+// (LINE can send "file" for some clips), which gets its own direct reply.
 const webhookEvents = [
   {
     type: "message",
     message: { type: "image", id: "batch2-ok" },
     source: { type: "user", userId: lineUserId },
-    replyToken: "reply-ok-1",
+    replyToken: "reply-expired-1",
     timestamp: Date.now(),
   },
   {
     type: "message",
     message: { type: "image", id: "batch2-expired" },
     source: { type: "user", userId: lineUserId },
-    replyToken: "reply-expired-2",
+    replyToken: "reply-ok-2",
     timestamp: Date.now(),
   },
   {
@@ -753,19 +763,14 @@ const pushesBefore = pushes.length;
 const webhookResponse = await handleWebhook(webhookRequest, env);
 check("webhook call returns ok even with a mixed/failing batch", webhookResponse.status === 200);
 check(
-  "the normal-token events got a direct reply, not silence",
-  replies.length === repliesBefore + 2 &&
-    replies.slice(repliesBefore).every((r) => r.includes("ยังไม่ได้เริ่มทริปอยู่เลย") || r.includes("ยังไม่รองรับ"))
+  "the unsupported-type event still gets a direct reply, not silence",
+  replies.length === repliesBefore + 1 && replies.slice(repliesBefore).every((r) => r.includes("ยังไม่รองรับ"))
 );
 check(
-  "the expired-token event fell back to a push message instead of staying silent",
+  "the media batch's expired reply token falls back to a push message instead of staying silent",
   pushes.length === pushesBefore + 1 &&
     pushes[pushesBefore].to === lineUserId &&
     pushes[pushesBefore].text.includes("ยังไม่ได้เริ่มทริปอยู่เลย")
-);
-check(
-  "an unsupported message type (e.g. 'file') gets an explicit reply instead of silence",
-  replies.some((r) => r.includes("ยังไม่รองรับ"))
 );
 
 const wrongSignatureRequest = new Request("http://localhost:8787/webhook", {

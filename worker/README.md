@@ -254,8 +254,28 @@ queued files at a time — **and each cron firing is its own Worker invocation, 
 subrequest/CPU budget**, so a batch of any size eventually gets through completely instead of
 losing files to a shared budget. Each drain sends one push message per user summarizing what
 just uploaded and how many files are still queued, ending with a final "all done" message once
-the queue for that user is empty. Smaller, everyday sends (below the threshold) are unaffected —
-they still upload and confirm immediately, exactly as before.
+the queue for that user is empty.
+
+Media files below the threshold still upload immediately, but — separately from the queueing
+work — also changed to send **one combined reply per webhook call** (`handleImmediateMediaBatch`)
+instead of one reply per file. This was originally just a requested UX improvement (a stream of
+identical confirmation messages for every photo in a send is noisy), but it turned out to matter
+for correctness too: a reply is itself an outbound subrequest, so the immediate path's real
+per-file cost is fetch-from-LINE + upload-to-Drive + **reply** = 3, not 2. `IMMEDIATE_MEDIA_BATCH_LIMIT`
+(20) was originally calibrated only against the 2-subrequest figure, meaning even a batch that
+correctly stayed *under* the queueing threshold could still quietly exceed the ~50-subrequest
+budget once the per-file reply was counted properly — a real report of a batch that looked "fine"
+by the queueing math still lost files. Collapsing replies to one per batch brings the immediate
+path back down to 2 subrequests per file (plus one reply for the whole batch), which is what
+actually makes `IMMEDIATE_MEDIA_BATCH_LIMIT`'s arithmetic hold.
+
+One nuance worth knowing: LINE doesn't always bundle a big multi-select send into a single webhook
+call — if some files (especially longer clips) take noticeably longer to finish uploading from the
+sender's phone, LINE can deliver the send as several smaller webhook calls spread over a few
+seconds instead of one large one. Each call is evaluated against `IMMEDIATE_MEDIA_BATCH_LIMIT`
+independently, which is safe (each is its own invocation with its own budget) but means the
+confirmation messages for one "single" send can arrive as a few separate batches rather than
+exactly one.
 
 ### Calendar (PLAN.md 15.3)
 
