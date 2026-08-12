@@ -492,40 +492,36 @@ async function processWithConcurrencyLimit<T>(
   }
 }
 
-// Even a batch that uploads immediately (rather than being queued) has a
-// subrequest cost per file: fetch from LINE (1) + upload to Drive (1) + a
-// reply (1) = 3 — the reply is easy to forget when doing this math, but it's
-// a real outbound request like the other two. At or above this many media
-// files in one webhook call, the whole batch is queued instead (see
-// uploadQueue.ts) and a scheduled invocation drains it a safe amount at a
-// time, each drain getting its own completely fresh budget — a batch of any
-// size gets through eventually instead of losing files. Below this, media
-// still uploads immediately, just as one combined reply per webhook call
-// (handleImmediateMediaBatch below) instead of one per file — collapsing N
-// replies into 1 is what makes the per-file cost 2 instead of 3.
+// Every media file, no matter the batch size, goes through the upload queue
+// (uploadQueue.ts) rather than uploading inline within the webhook call — an
+// earlier version uploaded small batches immediately for a faster reply, but
+// that turned out to be unreliable in a way no amount of tuning fixed: LINE
+// often splits one multi-select send into several separate webhook calls
+// (e.g. one per file, when some take longer to finish uploading from the
+// sender's phone than others), so "one combined reply per webhook call"
+// didn't actually mean "one combined reply per send" — a user could still
+// get a flood of separate one-file confirmations. Routing everything through
+// the same queue+scheduled-drain path used for large batches means the
+// drain naturally coalesces whatever's accumulated since it last ran into
+// one summary, regardless of how many separate webhook calls LINE split the
+// send into. The tradeoff, accepted deliberately: even a single photo now
+// takes up to about a minute (the cron interval) to get its confirmation,
+// instead of being instant.
 //
-// Set for the *worst case*, not the happy path: MAX_UPLOAD_ATTEMPTS means a
-// file that fails once costs double (a fresh LINE fetch + Drive upload on
-// retry) — 4 subrequests instead of 2. If failures are correlated rather
-// than isolated (e.g. Drive has a brief outage or rate-limits a burst of
-// requests — exactly the kind of thing the retry exists to ride out), most
-// or all files in one batch could need a retry at once. Sizing this against
-// just "a handful of retries" would reintroduce the exact silent-file-drop
-// failure this constant exists to prevent, just at a different threshold.
-// Even fully pessimistic (every single file retries) — 10 × 4 + a couple of
-// housekeeping requests ≈ low 40s — stays clear of the ~50-external-
-// subrequest ceiling a single invocation gets.
-const IMMEDIATE_MEDIA_BATCH_LIMIT = 10;
-
-// Same worst-case reasoning as IMMEDIATE_MEDIA_BATCH_LIMIT above: sized so
-// that even every single item in the drain needing its MAX_UPLOAD_ATTEMPTS
-// retry doesn't approach the ~50 external-subrequest ceiling.
+// Kept below the ~50-external-subrequest ceiling a single invocation gets,
+// sized for the *worst case* rather than the happy path: MAX_UPLOAD_ATTEMPTS
+// means a file that fails once costs double (a fresh LINE fetch + Drive
+// upload on retry) — 4 subrequests instead of 2 — and if failures are
+// correlated rather than isolated (e.g. Drive has a brief outage or
+// rate-limits a burst of requests, exactly the scenario the retry exists to
+// ride out), most or all files in one drain could need a retry at once.
+// Even fully pessimistic (every single item retries) — 10 × 4 + a couple of
+// housekeeping requests ≈ low 40s — stays clear of the ceiling.
 const DRAIN_BATCH_SIZE = 10;
 
-// Shared by both media-batch paths below: resolves the account link and
-// active trip once per sender instead of once per file, replying with the
-// appropriate prompt and returning null if either is missing so the caller
-// knows to stop.
+// Resolves the account link and active trip once per sender instead of once
+// per file, replying with the appropriate prompt and returning null if
+// either is missing so the caller knows to stop.
 async function resolveMediaBatchContext(
   env: Env,
   lineUserId: string,
@@ -562,69 +558,6 @@ async function resolveMediaBatchContext(
   return { refreshToken: link.refreshToken, trip };
 }
 
-// Below IMMEDIATE_MEDIA_BATCH_LIMIT: uploads every file right away (bounded
-// concurrency, same as before), but with one combined reply for the whole
-// batch instead of one per file — both a nicer chat experience (a real user
-// asked for this instead of a stream of separate confirmations) and, per the
-// IMMEDIATE_MEDIA_BATCH_LIMIT comment above, what keeps the per-file
-// subrequest cost low enough for the threshold's own math to hold.
-async function handleImmediateMediaBatch(
-  env: Env,
-  lineUserId: string,
-  events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
-  origin: string,
-  tokenCache: TokenCache
-): Promise<void> {
-  try {
-    const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
-    if (!ctx) return;
-    const { refreshToken, trip } = ctx;
-
-    let succeeded = 0;
-    let failed = 0;
-    await processWithConcurrencyLimit(events, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
-      try {
-        await withFreshAccessToken(
-          env,
-          refreshToken,
-          (accessToken) =>
-            uploadTripMedia(
-              env,
-              accessToken,
-              trip.folderId,
-              event.message.id,
-              event.timestamp,
-              isImageMessageEvent(event) ? "image" : "video"
-            ),
-          tokenCache
-        );
-        succeeded++;
-      } catch (err) {
-        console.error("immediate media batch upload failed", event.message.id, err);
-        failed++;
-      }
-    });
-
-    const parts = [`📸 เก็บ ${succeeded} ไฟล์เข้าทริป "${trip.name}" แล้ว`];
-    if (failed > 0) parts.push(`(อีก ${failed} ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`);
-    await replyOrPush(events[0], parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN);
-  } catch (err) {
-    // Nothing above should be able to throw uncaught, but this is the last
-    // line of defense: without it, a failure here (most likely replyOrPush
-    // itself, if both the reply and its push fallback fail) would escape
-    // uncaught through handleWebhook's Promise.all and crash the whole
-    // invocation — silencing every other event in the same webhook call,
-    // not just this batch. Best-effort only; if this also fails there's
-    // genuinely nothing more that can be done for this specific attempt.
-    console.error("handleImmediateMediaBatch failed", err);
-    await replyOrPush(
-      events[0],
-      "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองส่งรูป/คลิปใหม่อีกครั้งนะ",
-      env.LINE_CHANNEL_ACCESS_TOKEN
-    ).catch(() => undefined);
-  }
-}
-
 async function handleQueuedMediaBatch(
   env: Env,
   lineUserId: string,
@@ -655,9 +588,13 @@ async function handleQueuedMediaBatch(
       env.LINE_CHANNEL_ACCESS_TOKEN
     );
   } catch (err) {
-    // See the matching catch in handleImmediateMediaBatch for why this
-    // exists — same reasoning applies here (enqueueUploads or the final
-    // replyOrPush failing must not crash the whole webhook invocation).
+    // Last line of defense: without this, a failure here (most likely
+    // enqueueUploads or the final replyOrPush, if both the reply and its
+    // push fallback fail) would escape uncaught through handleWebhook's
+    // Promise.allSettled and could crash the whole invocation — silencing
+    // every other event in the same webhook call, not just this batch.
+    // Best-effort only; if this also fails there's genuinely nothing more
+    // that can be done for this specific attempt.
     console.error("handleQueuedMediaBatch failed", err);
     await replyOrPush(
       events[0],
@@ -692,13 +629,11 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
   // TokenCache comment on withFreshAccessToken for why.
   const tokenCache: TokenCache = new Map();
 
-  // Media events (image/video) are always handled as a batch — grouped by
-  // sender, one combined reply per sender — never individually inline below.
-  // Below IMMEDIATE_MEDIA_BATCH_LIMIT they still upload right away
-  // (handleImmediateMediaBatch); at/above it, the whole batch is queued for
-  // the scheduled drain instead (handleQueuedMediaBatch). See
-  // IMMEDIATE_MEDIA_BATCH_LIMIT's comment for why collapsing replies into
-  // one per batch matters, not just for tidiness.
+  // Media events (image/video) are always queued (uploadQueue.ts) and never
+  // uploaded inline here — grouped by sender, one combined reply per sender.
+  // See DRAIN_BATCH_SIZE's comment for why every media file goes through the
+  // queue unconditionally now, rather than small batches uploading inline
+  // for a faster reply the way an earlier version did.
   const mediaEvents = body.events.filter(
     (event): event is LineImageMessageEvent | LineVideoMessageEvent =>
       isImageMessageEvent(event) || isVideoMessageEvent(event)
@@ -712,16 +647,13 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
       forUser.push(event);
       eventsByUser.set(event.source.userId, forUser);
     }
-    const handleBatch = mediaEvents.length >= IMMEDIATE_MEDIA_BATCH_LIMIT ? handleQueuedMediaBatch : null;
-    // allSettled, not all: both batch handlers already catch everything
-    // internally (see their own try/catch), but this is defense in depth —
+    // allSettled, not all: handleQueuedMediaBatch already catches everything
+    // internally (see its own try/catch), but this is defense in depth —
     // one sender's batch throwing must never take down every other sender's
     // batch (or the rest of handleWebhook below) in the same webhook call.
     const results = await Promise.allSettled(
       [...eventsByUser.entries()].map(([lineUserId, events]) =>
-        handleBatch
-          ? handleBatch(env, lineUserId, events, origin)
-          : handleImmediateMediaBatch(env, lineUserId, events, origin, tokenCache)
+        handleQueuedMediaBatch(env, lineUserId, events, origin)
       )
     );
     for (const result of results) {
@@ -787,8 +719,8 @@ interface DrainUserSummary {
 }
 
 // Called on the cron trigger configured in wrangler.toml (see
-// IMMEDIATE_MEDIA_BATCH_LIMIT/DRAIN_BATCH_SIZE above for the full story of
-// why this exists). Each firing is its own Worker invocation with its own
+// DRAIN_BATCH_SIZE above for the full story of why this exists). Each firing
+// is its own Worker invocation with its own
 // fresh subrequest/CPU budget, so working through a big backlog a bounded
 // amount at a time — rather than trying to force it all through one webhook
 // call's budget — is what actually gets every file uploaded reliably.

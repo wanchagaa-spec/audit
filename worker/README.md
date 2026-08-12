@@ -340,6 +340,27 @@ immediately — Cloudflare keeps that promise running in the background after th
 already gone out, so LINE gets its fast acknowledgment regardless of how long the real work takes,
 and never has a reason to disconnect mid-request again.
 
+With the `outcome: "canceled"` root cause fixed, files started arriving completely — but a new,
+purely cosmetic problem showed up: a single "one send" of many photos could still produce a *flood*
+of separate "เก็บ 1 ไฟล์เข้าทริป..." confirmation messages instead of one summary. The cause was the
+same LINE behavior noted above (splitting one multi-select send into several separate webhook
+calls when individual files finish uploading from the sender's device at different times) combined
+with the immediate-upload path: each of those separate webhook calls independently qualified as
+"below `IMMEDIATE_MEDIA_BATCH_LIMIT`" and so each sent its own combined reply — correct per webhook
+call, but "one combined reply per webhook call" isn't the same thing as "one combined reply per
+send" when LINE itself splits the send. No batch-size threshold tuned from this server's side can
+fix that, because the fragmentation happens before the request ever reaches the Worker.
+
+The fix removes the immediate-upload path entirely: `IMMEDIATE_MEDIA_BATCH_LIMIT` and
+`handleImmediateMediaBatch` are gone, and **every** media file — regardless of batch size — now
+goes through the same upload queue and scheduled drain used for large batches. This works because
+the drain doesn't care how many separate webhook calls contributed to what's sitting in the queue;
+it naturally coalesces whatever has accumulated since it last ran into one summary message,
+sidestepping the fragmentation problem instead of trying to out-guess it. The accepted tradeoff:
+even a single photo now takes up to about a minute (the cron interval) to get its "received"
+confirmation, instead of being instant — a deliberate choice of consistent, guaranteed-single
+messages over speed.
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never
