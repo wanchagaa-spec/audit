@@ -332,6 +332,16 @@ function extensionForContentType(contentType: string, kind: "image" | "video"): 
 // attempt re-fetches from LINE rather than reusing bytes from a failed
 // attempt, since a ReadableStream can only be read once — a partially
 // consumed stream from a failed upload can't be retried directly.
+//
+// Known, accepted tradeoff: this retries blindly rather than checking
+// whether the "failed" attempt actually created the file in Drive before
+// the error surfaced (e.g. the create succeeded but reading/parsing the
+// response body afterward threw) — in that rare case a retry uploads a
+// second copy rather than detecting the first one succeeded. A duplicate
+// file is a strictly better failure mode than the one this retry replaces
+// (the photo silently never arriving at all), and checking for an existing
+// file first would cost another Drive subrequest per file — real budget
+// that isn't worth spending to guard against an edge case this narrow.
 const MAX_UPLOAD_ATTEMPTS = 2;
 
 // The actual upload work, assuming the caller has already resolved the
@@ -494,20 +504,23 @@ async function processWithConcurrencyLimit<T>(
 // (handleImmediateMediaBatch below) instead of one per file — collapsing N
 // replies into 1 is what makes the per-file cost 2 instead of 3.
 //
-// Set below the ~50-external-subrequest ceiling with real headroom, not
-// right up against it: MAX_UPLOAD_ATTEMPTS means a file that fails once
-// costs double (a fresh LINE fetch + Drive upload on retry), and Cloudflare's
-// own metrics showed a small but real background failure rate in practice.
-// Happy path (no retries) is 2 × 15 + a couple of housekeeping requests ≈
-// low 30s; even if a handful of files in the batch need a retry, this stays
-// well clear of the ceiling instead of being one bad file away from it.
-const IMMEDIATE_MEDIA_BATCH_LIMIT = 15;
+// Set for the *worst case*, not the happy path: MAX_UPLOAD_ATTEMPTS means a
+// file that fails once costs double (a fresh LINE fetch + Drive upload on
+// retry) — 4 subrequests instead of 2. If failures are correlated rather
+// than isolated (e.g. Drive has a brief outage or rate-limits a burst of
+// requests — exactly the kind of thing the retry exists to ride out), most
+// or all files in one batch could need a retry at once. Sizing this against
+// just "a handful of retries" would reintroduce the exact silent-file-drop
+// failure this constant exists to prevent, just at a different threshold.
+// Even fully pessimistic (every single file retries) — 10 × 4 + a couple of
+// housekeeping requests ≈ low 40s — stays clear of the ~50-external-
+// subrequest ceiling a single invocation gets.
+const IMMEDIATE_MEDIA_BATCH_LIMIT = 10;
 
-// Same headroom reasoning as IMMEDIATE_MEDIA_BATCH_LIMIT above: kept below
-// the ~50 external-subrequest budget with room for MAX_UPLOAD_ATTEMPTS
-// retries on whichever files hit a transient failure, not just the happy-path
-// count.
-const DRAIN_BATCH_SIZE = 15;
+// Same worst-case reasoning as IMMEDIATE_MEDIA_BATCH_LIMIT above: sized so
+// that even every single item in the drain needing its MAX_UPLOAD_ATTEMPTS
+// retry doesn't approach the ~50 external-subrequest ceiling.
+const DRAIN_BATCH_SIZE = 10;
 
 // Shared by both media-batch paths below: resolves the account link and
 // active trip once per sender instead of once per file, replying with the

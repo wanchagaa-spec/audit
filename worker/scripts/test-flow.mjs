@@ -574,8 +574,8 @@ check(
 // of the streaming-upload fix using Drive's resumable protocol, which needs
 // 2 Drive requests per file (init + content). Reverted to a single streamed
 // multipart request per file, so a batch costs exactly 1 Drive subrequest
-// per file again. This batch (15 photos) stays under
-// IMMEDIATE_MEDIA_BATCH_LIMIT (20), so it still uploads immediately through
+// per file again. This batch (8 photos) stays under
+// IMMEDIATE_MEDIA_BATCH_LIMIT (10), so it still uploads immediately through
 // the real handleWebhook entry point (concurrent processing, real signature
 // verification) — the queued/drained path for bigger batches is exercised
 // separately below. Also covers a later fix: immediate batches get one
@@ -585,7 +585,7 @@ check(
 // a per-file subrequest that IMMEDIATE_MEDIA_BATCH_LIMIT's original
 // calibration had missed, letting even a "moderate" immediate batch quietly
 // exceed the same budget the queueing threshold exists to protect.
-const moderateBatchSize = 10;
+const moderateBatchSize = 8;
 const moderateBatchEvents = Array.from({ length: moderateBatchSize }, (_, i) => ({
   type: "message",
   message: { type: "image", id: `modbatch-${i}` },
@@ -632,13 +632,16 @@ check(
 // subrequest, so an event landing at the platform's ceiling can lose its
 // upload *and* its error message together. Fixed by queueing whole batches
 // at/above IMMEDIATE_MEDIA_BATCH_LIMIT instead of processing them in one
-// invocation: this sends 45 photos (over the limit) through the real
+// invocation: this sends 40 photos (over the limit) through the real
 // handleWebhook entry point and confirms none upload immediately, then
 // drives the queue via drainUploadQueue (the same function the cron trigger
 // in wrangler.toml calls) the way it actually runs in production — a bounded
 // batch at a time, each drain a fresh invocation with its own budget — until
 // every file is confirmed uploaded.
-const largeBatchSize = 45;
+// Kept in sync manually with DRAIN_BATCH_SIZE in src/index.ts (not exported,
+// since it's an internal tuning constant, not part of that module's API).
+const DRAIN_BATCH_SIZE_FOR_TEST = 10;
+const largeBatchSize = 40;
 const largeBatchEvents = Array.from({ length: largeBatchSize }, (_, i) => ({
   type: "message",
   message: { type: "image", id: `bigbatch-${i}` },
@@ -667,33 +670,33 @@ check(
 const queuedAfterLargeBatch = await countQueuedForUser(env.ACCOUNTS, lineUserId);
 check(`all ${largeBatchSize} photos were queued for background upload`, queuedAfterLargeBatch === largeBatchSize);
 
-// First drain: DRAIN_BATCH_SIZE (15) of the 45 queued photos should upload,
-// leaving 30 still queued, with a push summary mentioning both counts.
-const pushesBeforeFirstDrain = pushes.length;
-await drainUploadQueue(env);
-check("the first drain uploads exactly one batch's worth (15) of photos", driveUploads.length === uploadsBeforeLargeBatch + 15);
-check(
-  "the first drain sends a push summary mentioning what's left",
-  pushes.length === pushesBeforeFirstDrain + 1 &&
-    pushes.at(-1).text.includes("15 ไฟล์") &&
-    pushes.at(-1).text.includes("เหลืออีก 30 ไฟล์")
-);
-check("30 photos remain queued after the first drain", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 30);
-
-// Second drain: another 15 of the remaining 30.
-await drainUploadQueue(env);
-check("the second drain uploads another 15 photos", driveUploads.length === uploadsBeforeLargeBatch + 30);
-check("15 photos remain queued after the second drain", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 15);
-
-// Third drain: the last 15 — queue empties, and the summary says so instead
-// of mentioning a remaining count.
-await drainUploadQueue(env);
-check(
-  `all ${largeBatchSize} photos are uploaded after enough drains`,
-  driveUploads.length === uploadsBeforeLargeBatch + largeBatchSize
-);
-check("the queue is empty once every photo has been drained", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0);
-check("the final drain's summary says the queue is fully caught up", pushes.at(-1).text.includes("อัปโหลดครบทุกไฟล์แล้ว"));
+// Drains DRAIN_BATCH_SIZE (10) of the 40 queued photos at a time — 4 drains
+// exactly — checking the running upload count, remaining-queued count, and
+// push summary wording after each one, the way the once-a-minute cron
+// trigger in wrangler.toml actually works through a big backlog in
+// production.
+const drainRounds = largeBatchSize / DRAIN_BATCH_SIZE_FOR_TEST;
+for (let round = 1; round <= drainRounds; round++) {
+  const pushesBefore = pushes.length;
+  await drainUploadQueue(env);
+  const expectedUploaded = round * DRAIN_BATCH_SIZE_FOR_TEST;
+  const expectedRemaining = largeBatchSize - expectedUploaded;
+  check(
+    `drain round ${round} uploads a total of ${expectedUploaded} of ${largeBatchSize} photos`,
+    driveUploads.length === uploadsBeforeLargeBatch + expectedUploaded
+  );
+  check(
+    `drain round ${round} leaves exactly ${expectedRemaining} photos queued`,
+    (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === expectedRemaining
+  );
+  const summaryText = pushes.length === pushesBefore + 1 ? pushes.at(-1).text : "";
+  check(
+    `drain round ${round}'s push summary says the right thing`,
+    expectedRemaining > 0
+      ? summaryText.includes(`เหลืออีก ${expectedRemaining} ไฟล์`)
+      : summaryText.includes("อัปโหลดครบทุกไฟล์แล้ว")
+  );
+}
 
 // Draining with nothing queued must be a safe no-op (this is what most of
 // the cron's once-a-minute firings will actually do, since large batches are

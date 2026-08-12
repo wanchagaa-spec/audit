@@ -284,11 +284,23 @@ of testing, ordinary transient flakiness rather than a design flaw. `uploadTripM
 upload function used by all three upload call sites) now retries once (`MAX_UPLOAD_ATTEMPTS = 2`)
 before giving up, re-fetching from LINE fresh on the retry rather than reusing the first attempt's
 stream (a `ReadableStream` can only be read once). `IMMEDIATE_MEDIA_BATCH_LIMIT` and
-`DRAIN_BATCH_SIZE` were both brought down from 20 to 15 to leave headroom for the extra subrequests
-a retried file costs, rather than sizing batches right up against the ~50-subrequest ceiling with
-nothing to spare. A file that still fails after its retry is reported in the batch's summary
-message (`(อีก N ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`) so there's always a clear next step
-instead of a silently incomplete album.
+`DRAIN_BATCH_SIZE` both come down to 10, sized for the *worst case* rather than the happy path: a
+retried file costs 4 subrequests instead of 2, and if failures are correlated (e.g. Drive has a
+brief outage or rate-limits a burst of requests — exactly the scenario the retry exists to ride
+out) most or all files in one batch could need a retry at once. Even fully pessimistically — every
+single file retrying — 10 files stays clear of the ~50-subrequest ceiling; sizing this against just
+"a handful of retries" would have reintroduced the same silent-file-drop failure at a different
+threshold. A file that still fails after its retry is reported in the batch's summary message
+(`(อีก N ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`) so there's always a clear next step instead
+of a silently incomplete album.
+
+One more accepted tradeoff worth knowing: the retry doesn't check whether a "failed" attempt
+actually created the file in Drive before the error surfaced (e.g. the create succeeded but
+reading the response body afterward threw) — in that rare case, retrying uploads a second copy
+rather than detecting the first attempt actually succeeded. A duplicate file is a strictly better
+outcome than the one this retry replaces (the photo never arriving at all), and checking for an
+existing file first would cost another Drive subrequest per file that isn't worth spending to
+guard against an edge case this narrow.
 
 ### Calendar (PLAN.md 15.3)
 
