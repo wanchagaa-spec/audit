@@ -13,6 +13,10 @@ class FakeKV {
     return this.store.has(key) ? this.store.get(key) : null;
   }
   async put(key, value, options = {}) {
+    if (simulateQueuePutFailureOnce && key.startsWith("upload-queue:")) {
+      simulateQueuePutFailureOnce = false;
+      throw new Error("simulated KV put failure");
+    }
     this.store.set(key, value);
     if (options.metadata) this.metadataStore.set(key, options.metadata);
     else this.metadataStore.delete(key);
@@ -72,6 +76,7 @@ const diaryRows = []; // simulates the Diary tab
 
 let simulateDriveUploadFailureCount = 0; // decremented each time; while > 0, fails the next Drive media upload request(s)
 let simulatePushFailureToo = false; // one-shot: fails the next push too (pair with an "expired" replyToken to simulate total messaging failure)
+let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to the upload queue, to exercise handleQueuedMediaBatch's outer catch
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
@@ -595,73 +600,89 @@ check(
   tokenCacheForBatch.size === 1
 );
 
-// Regression test for a real report: sending 37 photos in one LINE
-// multi-select left 2 of them silently missing from Drive, with total
-// silence (no reply, no error) for those two — traced to an earlier version
-// of the streaming-upload fix using Drive's resumable protocol, which needs
-// 2 Drive requests per file (init + content). Reverted to a single streamed
-// multipart request per file, so a batch costs exactly 1 Drive subrequest
-// per file again. This batch (8 photos) stays under
-// IMMEDIATE_MEDIA_BATCH_LIMIT (10), so it still uploads immediately through
-// the real handleWebhook entry point (concurrent processing, real signature
-// verification) — the queued/drained path for bigger batches is exercised
-// separately below. Also covers a later fix: immediate batches get one
-// combined reply for the whole batch, not one per file — a real user asked
-// for this (instead of a stream of separate confirmations), and it also
-// turned out to matter for the subrequest math: a reply per file was itself
-// a per-file subrequest that IMMEDIATE_MEDIA_BATCH_LIMIT's original
-// calibration had missed, letting even a "moderate" immediate batch quietly
-// exceed the same budget the queueing threshold exists to protect.
-const moderateBatchSize = 8;
-const moderateBatchEvents = Array.from({ length: moderateBatchSize }, (_, i) => ({
+// Regression test for a real report: even a small batch (well under the old
+// immediate-upload threshold) still produced a flood of separate one-file
+// confirmations, because LINE often splits one multi-select send into
+// several separate webhook calls (e.g. one per file, when some take longer
+// to finish uploading from the sender's phone than others) — "one combined
+// reply per webhook call" didn't mean "one combined reply per send". Every
+// media file now goes through the same queue+drain path regardless of batch
+// size, and the enqueue step itself sends no reply at all (a follow-up fix
+// after this: an intermediate "received, uploading" reply per webhook call
+// was itself still one flood source, since LINE's fragmented calls each
+// triggered their own) — so this send (8 photos) queues silently and the
+// first the user hears about it is the drain's own summary once uploaded
+// (accepted tradeoff: even a small send now takes up to about a minute, the
+// cron interval, before any confirmation arrives, instead of being instant).
+const smallBatchSize = 8;
+const smallBatchEvents = Array.from({ length: smallBatchSize }, (_, i) => ({
   type: "message",
-  message: { type: "image", id: `modbatch-${i}` },
+  message: { type: "image", id: `smallbatch-${i}` },
   source: { type: "user", userId: lineUserId },
-  replyToken: `reply-modbatch-${i}`,
+  replyToken: `reply-smallbatch-${i}`,
   timestamp: Date.now(),
 }));
-const moderateBatchRawBody = JSON.stringify({ events: moderateBatchEvents });
-const moderateBatchSignature = await signLineBody(moderateBatchRawBody, env.LINE_CHANNEL_SECRET);
-const moderateBatchRequest = new Request("http://localhost:8787/webhook", {
+const smallBatchRawBody = JSON.stringify({ events: smallBatchEvents });
+const smallBatchSignature = await signLineBody(smallBatchRawBody, env.LINE_CHANNEL_SECRET);
+const smallBatchRequest = new Request("http://localhost:8787/webhook", {
   method: "POST",
-  headers: { "x-line-signature": moderateBatchSignature },
-  body: moderateBatchRawBody,
+  headers: { "x-line-signature": smallBatchSignature },
+  body: smallBatchRawBody,
 });
-const uploadsBeforeModerateBatch = driveUploads.length;
-const repliesBeforeModerateBatch = replies.length;
-const driveUploadRequestsBeforeModerateBatch = driveUploadRequestCount;
-await handleWebhook(moderateBatchRequest, env);
+const uploadsBeforeSmallBatch = driveUploads.length;
+const repliesBeforeSmallBatch = replies.length;
+await handleWebhook(smallBatchRequest, env);
 check(
-  `all ${moderateBatchSize} photos in one moderate batch (under the queueing threshold) made it into Drive immediately`,
-  driveUploads.length === uploadsBeforeModerateBatch + moderateBatchSize
+  `a small batch (${smallBatchSize} photos) does not upload anything immediately — it queues instead`,
+  driveUploads.length === uploadsBeforeSmallBatch
 );
 check(
-  `all ${moderateBatchSize} photos get exactly one combined confirmation reply, not one per file`,
-  replies.length === repliesBeforeModerateBatch + 1 &&
-    replies.at(-1).includes(`${moderateBatchSize} ไฟล์`) &&
-    replies.at(-1).includes('ทริป "ทะเล"')
+  "queueing a batch sends no reply at all — only the drain's own summary counts as the confirmation",
+  replies.length === repliesBeforeSmallBatch
+);
+check(
+  `all ${smallBatchSize} photos were queued`,
+  (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === smallBatchSize
+);
+
+// Draining (DRAIN_BATCH_SIZE is 10, so this clears the whole 8-photo batch
+// in one pass) actually performs the uploads, one Drive subrequest per file,
+// and is the only place a confirmation message gets sent for this batch.
+const driveUploadRequestsBeforeSmallBatchDrain = driveUploadRequestCount;
+const pushesBeforeSmallBatchDrain = pushes.length;
+await drainUploadQueue(env);
+check(
+  `draining uploads all ${smallBatchSize} photos from the small batch`,
+  driveUploads.length === uploadsBeforeSmallBatch + smallBatchSize
 );
 check(
   "each file cost exactly one Drive upload subrequest, not two",
-  driveUploadRequestCount === driveUploadRequestsBeforeModerateBatch + moderateBatchSize
+  driveUploadRequestCount === driveUploadRequestsBeforeSmallBatchDrain + smallBatchSize
 );
 check(
-  `Drive uploads stayed bounded (never more than 5 in flight at once) across all ${moderateBatchSize} photos`,
-  maxConcurrentDriveUploadRequests <= 5
+  "the drain sends exactly one push confirming the batch finished, once it's actually done",
+  pushes.length === pushesBeforeSmallBatchDrain + 1 &&
+    pushes.at(-1).text.includes(`${smallBatchSize}`) &&
+    pushes.at(-1).text.includes('ทริป "ทะเล"') &&
+    pushes.at(-1).text.includes("ครบทุกไฟล์แล้ว")
+);
+check(
+  "the small batch's queue is empty after draining",
+  (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0
 );
 
-// Regression test for a bug found while investigating a real report: one
-// batch's final combined reply could fail completely (the reply itself AND
-// its push fallback both failing) — replyOrPush throws in that case, and
-// several call sites weren't guarded against it, so the exception used to
-// escape all the way up through handleWebhook's Promise.all, crashing the
-// *entire* invocation. That silenced not just the one failed batch but
-// every other event in the same webhook call too — matching a real report
+// Regression test for a bug found while investigating a real report: a
+// failure while handling a media batch (enqueueUploads throwing, in this
+// case) could escape uncaught through handleWebhook's Promise.all, crashing
+// the *entire* invocation — silencing not just the one failed batch but
+// every other event in the same webhook call too, matching a real report
 // where one photo batch got zero message while an unrelated one succeeded.
-// This sends one image event whose reply token is "expired" (so the reply
-// fails) together with a one-shot simulated push failure (so the fallback
-// also fails), in the SAME webhook call as an unrelated text message, and
-// confirms the text message still gets its normal reply.
+// This forces the queue write to fail (via simulateQueuePutFailureOnce) for
+// one image event, with its reply token also "expired" and a one-shot
+// simulated push failure so the catch block's own apology reply fails both
+// ways too — in the SAME webhook call as an unrelated text message — and
+// confirms the text message still gets its normal reply regardless.
+simulateQueuePutFailureOnce = true;
 const totalFailureImageEvent = {
   type: "message",
   message: { type: "image", id: "totalfail-img-1" },
@@ -723,18 +744,31 @@ const fastAckRequest = new Request("http://localhost:8787/webhook", {
 const fastAckCtx = new FakeExecutionContext();
 const uploadsBeforeFastAck = driveUploads.length;
 const repliesBeforeFastAck = replies.length;
+const queuedBeforeFastAck = await countQueuedForUser(env.ACCOUNTS, lineUserId);
 const fastAckResponse = await worker.fetch(fastAckRequest, env, fastAckCtx);
 check("the fetch handler responds ok right away", fastAckResponse.status === 200);
 check(
-  "the response comes back before the upload has actually happened",
+  "the response comes back before anything (queueing or any reply) has actually happened",
   driveUploads.length === uploadsBeforeFastAck && replies.length === repliesBeforeFastAck
 );
 await fastAckCtx.drain();
 check(
-  "draining the backgrounded work actually uploads the file and sends the reply",
-  driveUploads.length === uploadsBeforeFastAck + 1 &&
-    replies.length === repliesBeforeFastAck + 1 &&
-    replies.at(-1).includes('ทริป "ทะเล"')
+  "draining the backgrounded work queues the file silently — no reply until the drain actually uploads it",
+  driveUploads.length === uploadsBeforeFastAck && // not uploaded yet — queued, not immediate
+    replies.length === repliesBeforeFastAck &&
+    (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === queuedBeforeFastAck + 1
+);
+// Fully drain everything queued so far (this test's file, plus any leftovers
+// a prior test may have queued without draining) before moving on, keeping
+// later tests' queue-count assertions from having to account for cross-test
+// leftovers.
+const totalQueuedBeforeFinalDrain = queuedBeforeFastAck + 1;
+while ((await countQueuedForUser(env.ACCOUNTS, lineUserId)) > 0) {
+  await drainUploadQueue(env);
+}
+check(
+  "a subsequent drain actually uploads the file that the fast-ack path queued (plus any earlier leftovers)",
+  driveUploads.length === uploadsBeforeFastAck + totalQueuedBeforeFinalDrain
 );
 
 // Regression test for a real report: even after cutting Drive requests back
@@ -744,14 +778,16 @@ check(
 // it's spent — each photo/video needs 2 outbound requests (fetch from LINE,
 // upload to Drive), and even the fallback error reply is itself a
 // subrequest, so an event landing at the platform's ceiling can lose its
-// upload *and* its error message together. Fixed by queueing whole batches
-// at/above IMMEDIATE_MEDIA_BATCH_LIMIT instead of processing them in one
-// invocation: this sends 40 photos (over the limit) through the real
-// handleWebhook entry point and confirms none upload immediately, then
-// drives the queue via drainUploadQueue (the same function the cron trigger
-// in wrangler.toml calls) the way it actually runs in production — a bounded
-// batch at a time, each drain a fresh invocation with its own budget — until
-// every file is confirmed uploaded.
+// upload *and* its error message together. Fixed by queueing every batch
+// (regardless of size, see the always-queue comment on DRAIN_BATCH_SIZE in
+// src/index.ts) instead of processing it in one invocation: this sends 40
+// photos through the real handleWebhook entry point and confirms none
+// upload immediately and no reply is sent at all, then drives the queue via
+// drainUploadQueue (the same function the cron trigger in wrangler.toml
+// calls) the way it actually runs in production — a bounded batch at a
+// time, each drain a fresh invocation with its own budget — until every
+// file is confirmed uploaded, with only the drain's own push messages ever
+// notifying the user.
 // Kept in sync manually with DRAIN_BATCH_SIZE in src/index.ts (not exported,
 // since it's an internal tuning constant, not part of that module's API).
 const DRAIN_BATCH_SIZE_FOR_TEST = 10;
@@ -774,13 +810,10 @@ const uploadsBeforeLargeBatch = driveUploads.length;
 const repliesBeforeLargeBatch = replies.length;
 await handleWebhook(largeBatchRequest, env);
 check(
-  `a ${largeBatchSize}-photo batch (over the threshold) does not upload anything immediately`,
+  `a ${largeBatchSize}-photo batch does not upload anything immediately`,
   driveUploads.length === uploadsBeforeLargeBatch
 );
-check(
-  "the whole large batch gets exactly one combined reply, not one per file",
-  replies.length === repliesBeforeLargeBatch + 1 && replies.at(-1).includes(`${largeBatchSize} ไฟล์`)
-);
+check("queueing the large batch sends no reply either", replies.length === repliesBeforeLargeBatch);
 const queuedAfterLargeBatch = await countQueuedForUser(env.ACCOUNTS, lineUserId);
 check(`all ${largeBatchSize} photos were queued for background upload`, queuedAfterLargeBatch === largeBatchSize);
 
