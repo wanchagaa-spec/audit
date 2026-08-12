@@ -223,6 +223,19 @@ for a single large file, and a big batch still costs exactly one Drive request p
 stays atomic — metadata and content go in the same request, so a failure never leaves an
 orphaned, unnamed file behind in Drive the way a two-step upload could.
 
+Even at one Drive request per file, a *very* large batch could still lose one: a real report of
+50 photos in one send came back with 1 silently missing and no error reply for it either. Each
+photo/video event needs 2 outbound requests (fetch from LINE, upload to Drive), plus the reply
+itself is a request — `handleWebhook` processing the entire batch fully concurrently meant a huge
+batch could spike a lot of simultaneous subrequests, likely brushing up against some platform-
+level ceiling; since the fallback error reply is itself a subrequest, an event unlucky enough to
+land right at that ceiling could lose its upload *and* its error message together, which is
+exactly what "total silence" looks like. `handleWebhook` now processes events with **bounded**
+concurrency (`WEBHOOK_EVENT_CONCURRENCY = 5` in `src/index.ts`) instead of either extreme —
+one-at-a-time (which caused the earlier reply-token-expiry problem) or fully concurrent (which
+caused this one) — capping how many subrequests are ever in flight together while still
+processing much faster than sequentially.
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never

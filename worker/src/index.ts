@@ -407,6 +407,34 @@ async function replyOrPush(
   }
 }
 
+// Runs `handler` over `items`, at most `limit` at a time, rather than all at
+// once. A batch of many photos/clips needs 2 outbound subrequests per file
+// (fetch from LINE, upload to Drive) plus its own reply — running an entire
+// large batch fully concurrently maximizes how many of those are in flight
+// at the same instant, which turned out to matter: a real report of 50
+// photos in one send came back with 1 silently missing from Drive and no
+// error reply for it either, even after cutting Drive's own request count
+// back down to one per file. The likely cause is some platform-level ceiling
+// on simultaneous/total subrequests for one webhook call — and since the
+// fallback error reply is itself a subrequest, an event unlucky enough to
+// land right at that ceiling can lose both its upload *and* its error
+// message at once, which is exactly what "total silence" looks like from
+// the user's side. Bounding concurrency caps how many subrequests are ever
+// in flight together, while still processing far faster than one-at-a-time
+// (the sequential version was what caused the earlier reply-token-expiry
+// bug — see replyOrPush above), so this keeps both fixes.
+const WEBHOOK_EVENT_CONCURRENCY = 5;
+
+async function processWithConcurrencyLimit<T>(
+  items: T[],
+  limit: number,
+  handler: (item: T) => Promise<void>
+): Promise<void> {
+  for (let i = 0; i < items.length; i += limit) {
+    await Promise.allSettled(items.slice(i, i + limit).map(handler));
+  }
+}
+
 export async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-line-signature");
@@ -419,62 +447,62 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
   // TokenCache comment on withFreshAccessToken for why.
   const tokenCache: TokenCache = new Map();
 
-  // Processed concurrently rather than one-at-a-time: a batch of photos/clips
-  // used to be handled sequentially, so each event's reply had to wait for
-  // every earlier event's full Drive round-trip first, making later replies
-  // far more likely to miss their token's short window (see replyOrPush).
-  // Running them together means each event's own reply latency is roughly
-  // its own processing time, not the sum of the whole batch's.
-  await Promise.allSettled(
-    body.events.map(async (event) => {
-      try {
-        if (isTextMessageEvent(event)) {
-          const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
-          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
-        } else if (isImageMessageEvent(event)) {
-          const reply = await handleImageMessage(
-            env,
-            event.source.userId,
-            event.message.id,
-            event.timestamp,
-            origin,
-            tokenCache
-          );
-          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
-        } else if (isVideoMessageEvent(event)) {
-          const reply = await handleVideoMessage(
-            env,
-            event.source.userId,
-            event.message.id,
-            event.timestamp,
-            origin,
-            tokenCache
-          );
-          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
-        } else if (isUnsupportedMessageEvent(event)) {
-          await replyOrPush(
-            event,
-            "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ",
-            env.LINE_CHANNEL_ACCESS_TOKEN
-          );
-        }
-      } catch (err) {
-        if (
-          isTextMessageEvent(event) ||
-          isImageMessageEvent(event) ||
-          isVideoMessageEvent(event) ||
-          isUnsupportedMessageEvent(event)
-        ) {
-          await replyOrPush(
-            event,
-            "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
-            env.LINE_CHANNEL_ACCESS_TOKEN
-          ).catch(() => undefined);
-        }
-        console.error("webhook handling failed", err);
+  // Processed with bounded concurrency rather than one-at-a-time or all at
+  // once — see WEBHOOK_EVENT_CONCURRENCY above for why neither extreme
+  // works: a batch of photos/clips used to be handled fully sequentially,
+  // so each event's reply had to wait for every earlier event's full Drive
+  // round-trip first, making later replies far more likely to miss their
+  // token's short window (see replyOrPush); running the whole batch fully
+  // concurrently instead fixed that but could spike too many subrequests in
+  // flight at once for a large batch.
+  await processWithConcurrencyLimit(body.events, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
+    try {
+      if (isTextMessageEvent(event)) {
+        const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
+        await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      } else if (isImageMessageEvent(event)) {
+        const reply = await handleImageMessage(
+          env,
+          event.source.userId,
+          event.message.id,
+          event.timestamp,
+          origin,
+          tokenCache
+        );
+        await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      } else if (isVideoMessageEvent(event)) {
+        const reply = await handleVideoMessage(
+          env,
+          event.source.userId,
+          event.message.id,
+          event.timestamp,
+          origin,
+          tokenCache
+        );
+        await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      } else if (isUnsupportedMessageEvent(event)) {
+        await replyOrPush(
+          event,
+          "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ",
+          env.LINE_CHANNEL_ACCESS_TOKEN
+        );
       }
-    })
-  );
+    } catch (err) {
+      if (
+        isTextMessageEvent(event) ||
+        isImageMessageEvent(event) ||
+        isVideoMessageEvent(event) ||
+        isUnsupportedMessageEvent(event)
+      ) {
+        await replyOrPush(
+          event,
+          "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
+          env.LINE_CHANNEL_ACCESS_TOKEN
+        ).catch(() => undefined);
+      }
+      console.error("webhook handling failed", err);
+    }
+  });
 
   return new Response("ok");
 }
