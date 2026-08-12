@@ -27,7 +27,7 @@ const GREETINGS = new Set([
 const HELP_MESSAGE =
   "สวัสดีค่ะ พิมพ์รายการที่เกิดขึ้นได้เลย เช่น \"ซื้อกาแฟ 60\" หรือ \"เงินเดือนเข้า 25000\" ฉันจะช่วยจดให้อัตโนมัติ";
 
-function isGreeting(text: string): boolean {
+export function isGreeting(text: string): boolean {
   return GREETINGS.has(text.trim().toLowerCase());
 }
 

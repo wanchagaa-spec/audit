@@ -45,6 +45,15 @@ must never reach a browser.
    bot (up to 100) — while the app is unverified/"Testing", only listed accounts can
    complete sign-in. See PLAN.md for the tradeoff against submitting the app for Google
    verification instead.
+5. Under **APIs & Services → Library**, make sure **Google Sheets API**, **Google Drive
+   API**, and **Google Calendar API** are all "Enabled" for this project (search each by
+   name, click it, click Enable if it isn't already) — a disabled API fails with a clear
+   `has not been used in this project` error from Google, so this is worth checking first
+   if something that used to work suddenly errors after adding the calendar feature.
+6. **If you already linked accounts before the calendar feature existed**: those refresh
+   tokens only cover `drive.file`, not `calendar.events`. The bot detects this itself and
+   replies with a fresh link when someone tries a calendar command — no action needed here,
+   just know it'll ask once per already-linked person.
 
 ### 4. Deploy — no terminal needed, everything runs on GitHub
 
@@ -103,25 +112,100 @@ the *LIFF's own channel* — not the Messaging API channel that the webhook and 
 messages use — so linked accounts never matched later messages. The current design signs
 the id straight from the webhook event instead, which is always in the right scope.)
 
+### 6. Set up the rich menu (optional, but recommended)
+
+Adds a persistent 6-button image menu under the chat input in LINE — tapping a button just
+sends its text as an ordinary message, so it's a shortcut into commands the bot already
+understands, nothing new to build on the LINE side.
+
+1. Go to the repo's **Actions** tab → **"One-time - Set up LINE Rich Menu"** → **Run
+   workflow**. It uploads `worker/assets/rich-menu.png` and sets it as the default menu for
+   everyone (needs `LINE_CHANNEL_ACCESS_TOKEN`, already a repo secret from step 4).
+2. Open a chat with the bot in LINE — the menu shows up under the input within a minute or
+   so (may need to close and reopen the chat once).
+3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
+   the previous menu of the same name first, so it's safe to run repeatedly.
+
+The six buttons: วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด (recent
+transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar), ไดอารี่เดือนนี้มี
+อะไรบ้าง (this month's diary). They're all read/status commands on purpose — commands that
+need more input from you (`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`) can't be a
+single tap, so those stay as typed commands (see `วิธีใช้` for the full list).
+
 ## Try it
 
 Add the Official Account as a friend in LINE. First message should prompt you to tap a
 link to connect your Google account. After signing in, you'll see a "เชื่อมบัญชีสำเร็จ"
-page — close it and go back to the chat. From then on, just log things like
-"ซื้อกาแฟ 60", or ask it questions — see `src/commands.ts` for the full matcher list
-(each with several accepted phrasings), summarized by texting "วิธีใช้":
+page — close it and go back to the chat.
+
+Any greeting ("สวัสดี", "hi", "เริ่ม", ...) gets a short self-introduction covering the 4
+things the bot can do, with a pointer to "วิธีใช้" for the full command reference — see
+`WELCOME_MESSAGE` in `src/index.ts` and the grouped help text in `src/commands.ts`. From
+there, just log things like "ซื้อกาแฟ 60", or ask it questions:
 
 - สรุปวันนี้ / สรุปสัปดาห์นี้ / สรุปเดือนนี้ / สรุปเดือนที่แล้ว
 - เหลือเงินเท่าไหร่ (all-time cumulative balance) / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่
 - วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด (by count) / เฉลี่ยใช้เงินต่อวันเท่าไหร่
 - งบเหลือเท่าไหร่ (reads the Budgets tab, set from the web app's Settings)
 - ค้นหา &lt;คำ&gt; / รายการล่าสุด
-- วิธีใช้ (lists all of the above)
+- วิธีใช้ (lists everything above plus trip/calendar/diary commands, grouped by feature)
 
 All of these are plain Google Sheets reads/aggregations over data already in the
 spreadsheet — no external AI involved, so they stay within the free-forever design (see
 PLAN.md section 14 for the tradeoff notes on adding an AI fallback for messages none of
 these cover).
+
+### Trip photo albums (PLAN.md 15.2)
+
+Send photos to the bot and they're organized into Google Drive automatically, grouped by
+trip and day:
+
+- `เริ่มทริป <ชื่อ>` — e.g. "เริ่มทริป ทะเล" — starts a trip session. Every photo you send
+  after this uploads automatically into that trip's Drive folder, in a subfolder for the
+  day it was sent (`จดบัญชี - อัลบั้มทริป/ทะเล/1-1-2569/`, ...), no captioning needed.
+- `ทริปตอนนี้` — checks whether a trip is still open (in case you forgot to close one).
+- `จบทริป` — closes the current trip. Sending a photo with no trip open gets rejected with
+  a reminder to start one first, rather than uploading somewhere generic.
+- Starting a new trip while one is already open asks for confirmation first ("ยังไม่ได้ปิด
+  ทริป ... จะปิดแล้วเริ่ม ... เลยไหม") instead of silently switching — reply "ใช่" to confirm,
+  anything else cancels the switch and the original trip stays open.
+
+Uses the same `drive.file` OAuth scope already granted for the spreadsheet, so no extra
+Google consent step is needed for this feature. See the callout in PLAN.md 15.2 for why
+there's no "type a folder name alongside the photo" option — LINE doesn't attach captions
+to image messages, they always arrive as separate events.
+
+### Calendar (PLAN.md 15.3)
+
+Reminders are handled entirely by Google Calendar's own notifications — the bot never
+messages you proactively, it only creates/reads/edits/deletes events when you ask:
+
+- `นัด <เรื่อง> <วันที่> <เวลา>` — e.g. "นัด ประชุมทีม 12/1/2569 13:00" or "นัด ประชุมทีม
+  12 ม.ค. 13:00" (year optional, defaults to this year). Only understands explicit
+  dates/times like these, not phrases like "พรุ่งนี้บ่ายสอง" — see the note in
+  `src/thaiDate.ts` for why. Always asks to confirm ("ใช่") before actually creating
+  anything.
+- `มีนัดอะไรวันนี้` / `มีนัดอะไรพรุ่งนี้` / `มีนัดอะไรสัปดาห์นี้` — lists events in that range.
+- `ลบนัด <คำค้น>` / `แก้นัด <คำค้น> เป็น <วันที่/เวลาใหม่>` — searches your upcoming events by
+  title; if more than one matches, it lists them and asks you to be more specific instead
+  of guessing. Both also confirm before touching anything.
+
+Needs the extra `calendar.events` OAuth scope (see setup step 3.6 above) — accounts linked
+before this feature existed will get a one-time re-link prompt the first time they try a
+calendar command.
+
+### Diary (PLAN.md 15.4)
+
+- `ไดอารี่ <ข้อความ>` or `บันทึก <ข้อความ>` — e.g. "ไดอารี่ วันนี้อากาศดีมาก". Add `#หมวด` right
+  after the command to tag a category (e.g. "ไดอารี่ #งาน ประชุมเสร็จเร็ว"); otherwise it's
+  filed under "อื่นๆ". Confirms before saving, same as calendar.
+- `ไดอารี่เดือนนี้มีอะไรบ้าง` / `ค้นหาไดอารี่ <คำ>` — read entries back.
+- No edit/delete commands yet for diary entries (lower stakes than a wrong calendar event
+  or a lost transaction, so this was left out of v1 — see Known limitations below).
+
+Diary entries live in a `Diary` tab that's created automatically on first use, in your
+**personal** spreadsheet only — never a shared group-book spreadsheet (group books aren't
+wired up in the bot yet anyway; see Known limitations).
 
 ## Local development
 
@@ -140,6 +224,12 @@ specifically checks that the signed `state` param on the generated Google auth l
 decodes back to the same LINE user id the webhook event carried, which is the exact bug
 class the LIFF removal above fixed.
 
+To tweak the rich menu's design, edit `assets/generate-rich-menu.py` (needs
+`pip install pillow`) and run it — it writes `assets/rich-menu.png` from scratch every
+time, so it's always reproducible from source rather than being an opaque binary someone
+has to redraw by hand. Then re-run the "One-time - Set up LINE Rich Menu" Action (step 6
+above) to publish it.
+
 ## Known limitations (documented honestly, not blockers)
 
 - Account linking (`setAccountLink`) always creates a **new personal spreadsheet** the
@@ -150,3 +240,15 @@ class the LIFF removal above fixed.
 - Group books (inviting others via LINE) aren't wired up yet — only personal books.
 - The monthly summary is a plain text message, not a chart image (see PLAN.md 14.3 for
   the image-generation option if wanted later).
+- Trip photos only upload while a trip is open (`เริ่มทริป` first) — there's no "attach a
+  folder name to a single stray photo" fallback, since LINE doesn't support captions on
+  image messages (see PLAN.md 15.2). No auto-timeout closes a forgotten trip either; use
+  `ทริปตอนนี้` to check.
+- Calendar events are single occurrences only — no recurring/repeating events yet
+  (PLAN.md 15.3). Date/time parsing is rule-based and only understands explicit formats
+  ("12/1/2569 13:00", "12 ม.ค. 13.00"), not natural phrases like "พรุ่งนี้บ่ายสอง".
+- Diary entries have no edit/delete command yet, only create + monthly list + search
+  (PLAN.md 15.4).
+- Only one confirmation can be pending at a time (trip switch, calendar create/edit/delete,
+  diary create all share one slot per user) — asking a second thing before answering the
+  first silently drops whichever was asked first rather than queueing it.

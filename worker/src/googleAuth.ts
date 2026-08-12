@@ -1,6 +1,11 @@
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+// drive.file: the Sheets spreadsheet + trip photo folders (PLAN.md 15.2)
+// calendar.events: creating/editing/deleting calendar entries (PLAN.md 15.3)
+const OAUTH_SCOPES = [
+  "https://www.googleapis.com/auth/drive.file",
+  "https://www.googleapis.com/auth/calendar.events",
+].join(" ");
 
 export function buildGoogleAuthorizeUrl(params: {
   clientId: string;
@@ -11,7 +16,7 @@ export function buildGoogleAuthorizeUrl(params: {
   url.searchParams.set("client_id", params.clientId);
   url.searchParams.set("redirect_uri", params.redirectUri);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", DRIVE_SCOPE);
+  url.searchParams.set("scope", OAUTH_SCOPES);
   url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
   url.searchParams.set("state", params.state);

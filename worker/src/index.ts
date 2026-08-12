@@ -1,11 +1,33 @@
-import { handleUserMessage } from "../../app/src/lib/chatEngine.ts";
+import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
-import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
-import { isTextMessageEvent, replyToLine, verifyLineSignature, type LineWebhookBody } from "./line.ts";
-import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
-import { getAccountLink, getPending, setAccountLink, setPending } from "./state.ts";
-import { signState, verifyState } from "./signedState.ts";
+import { InsufficientCalendarScopeError } from "./calendar.ts";
+import { matchCalendarCommand } from "./calendarCommands.ts";
 import { matchCommand } from "./commands.ts";
+import { resolveConfirmation } from "./confirmations.ts";
+import { matchDiaryCommand } from "./diaryCommands.ts";
+import { findOrCreateFolderCached, uploadImageToFolder } from "./drive.ts";
+import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
+import {
+  fetchLineImageContent,
+  isImageMessageEvent,
+  isTextMessageEvent,
+  replyToLine,
+  verifyLineSignature,
+  type LineWebhookBody,
+} from "./line.ts";
+import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
+import { signState, verifyState } from "./signedState.ts";
+import {
+  getAccountLink,
+  getActiveTrip,
+  getPending,
+  getPendingConfirmation,
+  setAccountLink,
+  setPending,
+  type ActionCtx,
+} from "./state.ts";
+import { bangkokDateFolderName } from "./thaiDate.ts";
+import { matchTripCommand } from "./tripCommands.ts";
 
 export interface Env {
   ACCOUNTS: KVNamespace;
@@ -15,6 +37,17 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   STATE_SIGNING_SECRET: string;
 }
+
+const WELCOME_MESSAGE = [
+  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 4 เรื่องหลักๆ:",
+  "",
+  "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
+  "📸 เก็บรูปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป/วันที่",
+  "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
+  "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
+  "",
+  "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
+].join("\n");
 
 function html(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
@@ -87,6 +120,32 @@ async function withFreshAccessToken<T>(
   return fn(accessToken);
 }
 
+async function buildUnlinkedPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
+  // The state param embeds this exact webhook-scoped lineUserId, signed, so
+  // /oauth/callback links the account to the same id future messages use.
+  const authorizeUrl = await buildAuthorizeUrl(env, lineUserId, origin);
+  return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
+}
+
+async function buildAuthorizeUrl(env: Env, lineUserId: string, origin: string): Promise<string> {
+  const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
+  return buildGoogleAuthorizeUrl({
+    clientId: env.GOOGLE_CLIENT_ID,
+    redirectUri: `${origin}/oauth/callback`,
+    state,
+  });
+}
+
+// Accounts linked before the calendar feature shipped only granted the
+// drive.file scope. A 401/403 from the Calendar API means that's the case —
+// send the same re-link link, worded for "add a permission" rather than
+// "connect for the first time" (setAccountLink overwrites the refresh token
+// in place, so existing data/spreadsheetId are untouched).
+async function buildCalendarRelinkPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
+  const authorizeUrl = await buildAuthorizeUrl(env, lineUserId, origin);
+  return `ต้องเชื่อมบัญชี Google ใหม่อีกครั้งเพื่อขอสิทธิ์ปฏิทินเพิ่ม (บัญชีเดิมยังไม่มีสิทธิ์นี้) กดลิงก์นี้แล้วเลือกบัญชีเดิมได้เลย ข้อมูลเก่าจะไม่หายนะ\n${authorizeUrl}`;
+}
+
 export async function handleTextMessage(
   env: Env,
   lineUserId: string,
@@ -94,16 +153,47 @@ export async function handleTextMessage(
   origin: string
 ): Promise<string> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
-  if (!link) {
-    // The state param embeds this exact webhook-scoped lineUserId, signed, so
-    // /oauth/callback links the account to the same id future messages use.
-    const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
-    const authorizeUrl = buildGoogleAuthorizeUrl({
-      clientId: env.GOOGLE_CLIENT_ID,
-      redirectUri: `${origin}/oauth/callback`,
-      state,
-    });
-    return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
+  if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
+
+  const actionCtx = (accessToken: string): ActionCtx => ({
+    accessToken,
+    kv: env.ACCOUNTS,
+    lineUserId,
+    spreadsheetId: link.spreadsheetId,
+  });
+
+  try {
+    const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, lineUserId);
+    if (pendingConfirmation) {
+      const reply = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+        resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation)
+      );
+      if (reply) return reply;
+      // Not an affirmative reply — the pending question is already cleared
+      // (see confirmations.ts), fall through and handle `text` normally.
+    }
+
+    const tripHandler = await matchTripCommand(text);
+    if (tripHandler) {
+      return await withFreshAccessToken(env, link.refreshToken, (accessToken) => tripHandler(actionCtx(accessToken)));
+    }
+
+    const calendarHandler = await matchCalendarCommand(text);
+    if (calendarHandler) {
+      return await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+        calendarHandler(actionCtx(accessToken))
+      );
+    }
+
+    const diaryHandler = await matchDiaryCommand(text);
+    if (diaryHandler) {
+      return await withFreshAccessToken(env, link.refreshToken, (accessToken) => diaryHandler(actionCtx(accessToken)));
+    }
+  } catch (err) {
+    if (err instanceof InsufficientCalendarScopeError) {
+      return buildCalendarRelinkPrompt(env, lineUserId, origin);
+    }
+    throw err;
   }
 
   const reportHandler = await matchCommand(text);
@@ -114,6 +204,17 @@ export async function handleTextMessage(
   }
 
   const pending = await getPending(env.ACCOUNTS, lineUserId);
+
+  // Checked after every real command above so "วิธีใช้"/"help" (also in
+  // chatEngine's GREETINGS) still get the detailed list from matchCommand
+  // instead of being shadowed by this shorter welcome blurb — and only when
+  // there's no dangling money clarification, so a stray greeting mid-flow
+  // still cancels it properly via chatEngine's own greeting handling instead
+  // of leaving `pending` stuck in KV.
+  if (!pending && isGreeting(text)) {
+    return WELCOME_MESSAGE;
+  }
+
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, lineUserId, result.pending);
 
@@ -138,6 +239,38 @@ export async function handleTextMessage(
   return result.botMessage;
 }
 
+export async function handleImageMessage(
+  env: Env,
+  lineUserId: string,
+  messageId: string,
+  timestampMs: number,
+  origin: string
+): Promise<string> {
+  const link = await getAccountLink(env.ACCOUNTS, lineUserId);
+  if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
+
+  const trip = await getActiveTrip(env.ACCOUNTS, lineUserId);
+  if (!trip) {
+    return 'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูปตามมาได้เลย';
+  }
+
+  return withFreshAccessToken(env, link.refreshToken, async (accessToken) => {
+    const { bytes, contentType } = await fetchLineImageContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+    const dateFolder = bangkokDateFolderName(timestampMs);
+    const dayFolderCacheKey = `dayfolder:${lineUserId}:${trip.folderId}:${dateFolder}`;
+    const dayFolderId = await findOrCreateFolderCached(
+      accessToken,
+      env.ACCOUNTS,
+      dayFolderCacheKey,
+      dateFolder,
+      trip.folderId
+    );
+    const ext = contentType.includes("png") ? "png" : "jpg";
+    await uploadImageToFolder(accessToken, dayFolderId, `${messageId}.${ext}`, bytes, contentType);
+    return `📸 เก็บรูปในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
+  });
+}
+
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-line-signature");
@@ -148,16 +281,28 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const origin = new URL(request.url).origin;
 
   for (const event of body.events) {
-    if (!isTextMessageEvent(event)) continue;
     try {
-      const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin);
-      await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      if (isTextMessageEvent(event)) {
+        const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin);
+        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      } else if (isImageMessageEvent(event)) {
+        const reply = await handleImageMessage(
+          env,
+          event.source.userId,
+          event.message.id,
+          event.timestamp,
+          origin
+        );
+        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      }
     } catch (err) {
-      await replyToLine(
-        event.replyToken,
-        "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
-        env.LINE_CHANNEL_ACCESS_TOKEN
-      ).catch(() => undefined);
+      if (isTextMessageEvent(event) || isImageMessageEvent(event)) {
+        await replyToLine(
+          event.replyToken,
+          "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
+          env.LINE_CHANNEL_ACCESS_TOKEN
+        ).catch(() => undefined);
+      }
       console.error("webhook handling failed", err);
     }
   }

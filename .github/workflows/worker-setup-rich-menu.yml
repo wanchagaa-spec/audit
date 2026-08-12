@@ -1,0 +1,20 @@
+name: One-time - Set up LINE Rich Menu
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-rich-menu:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Create and publish the rich menu
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        run: node scripts/setup-rich-menu.mjs
