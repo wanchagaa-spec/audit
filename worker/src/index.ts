@@ -30,6 +30,7 @@ import {
   setAccountLink,
   setPending,
   type ActionCtx,
+  type ActiveTrip,
 } from "./state.ts";
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand } from "./transactionCommands.ts";
@@ -324,6 +325,39 @@ function extensionForContentType(contentType: string, kind: "image" | "video"): 
   return contentType.includes("png") ? "png" : "jpg";
 }
 
+// The actual upload work, assuming the caller has already resolved the
+// account link and destination folder — factored out so the three places
+// that need it (a single immediate upload, a same-webhook-call media batch,
+// and the queue drain) don't each duplicate the fetch + upload logic. Takes
+// a bare folderId rather than a full ActiveTrip since that's all it needs —
+// the queue drain only has a snapshotted folderId/tripName, not a live trip.
+async function uploadTripMedia(
+  env: Env,
+  accessToken: string,
+  tripFolderId: string,
+  messageId: string,
+  timestampMs: number,
+  kind: "image" | "video"
+): Promise<void> {
+  const { body, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+  const timestamp = new Date(timestampMs);
+  const ext = extensionForContentType(contentType, kind);
+  // Uploads straight into the trip folder (created once, up front, when
+  // the trip started) with a zero-padded date baked into the filename
+  // (so files still sort chronologically), instead of finding-or-
+  // creating a per-day subfolder on every single upload. That per-day
+  // lookup used to run for every photo/video, which (a) had an
+  // unavoidable race — Drive's find-then-create isn't atomic, so
+  // several files sent in the same LINE multi-select burst could each
+  // miss the search and create duplicate day folders, splitting the
+  // trip's files across them — and (b) burned 3-4 extra subrequests per
+  // file, which could exceed Cloudflare's per-request subrequest budget
+  // when someone sent many photos/clips at once, silently dropping
+  // whichever ones ran out of budget. A flat folder needs neither.
+  const filename = `${bangkokDateKey(timestamp)}_${messageId}.${ext}`;
+  await uploadFileToFolder(accessToken, tripFolderId, filename, body, contentType);
+}
+
 async function handleTripMediaMessage(
   env: Env,
   lineUserId: string,
@@ -346,26 +380,10 @@ async function handleTripMediaMessage(
     env,
     link.refreshToken,
     async (accessToken) => {
-      const { body, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
-      const timestamp = new Date(timestampMs);
-      const dateFolder = bangkokDateFolderName(timestampMs);
-      const ext = extensionForContentType(contentType, kind);
-      // Uploads straight into the trip folder (created once, up front, when
-      // the trip started) with a zero-padded date baked into the filename
-      // (so files still sort chronologically), instead of finding-or-
-      // creating a per-day subfolder on every single upload. That per-day
-      // lookup used to run for every photo/video, which (a) had an
-      // unavoidable race — Drive's find-then-create isn't atomic, so
-      // several files sent in the same LINE multi-select burst could each
-      // miss the search and create duplicate day folders, splitting the
-      // trip's files across them — and (b) burned 3-4 extra subrequests per
-      // file, which could exceed Cloudflare's per-request subrequest budget
-      // when someone sent many photos/clips at once, silently dropping
-      // whichever ones ran out of budget. A flat folder needs neither.
-      const filename = `${bangkokDateKey(timestamp)}_${messageId}.${ext}`;
-      await uploadFileToFolder(accessToken, trip.folderId, filename, body, contentType);
+      await uploadTripMedia(env, accessToken, trip.folderId, messageId, timestampMs, kind);
       const emoji = kind === "video" ? "🎬" : "📸";
       const noun = kind === "video" ? "คลิป" : "รูป";
+      const dateFolder = bangkokDateFolderName(timestampMs);
       return `${emoji} เก็บ${noun}ในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
     },
     tokenCache
@@ -444,17 +462,20 @@ async function processWithConcurrencyLimit<T>(
   }
 }
 
-// Even with bounded concurrency, a genuinely large batch (a real report: 50
-// photos in one LINE multi-select) can still spend enough of one webhook
-// invocation's subrequest/CPU budget to silently lose a file or two — there's
-// only so much budget in a single invocation, no matter how it's spent. At or
-// above this many media files in one webhook call, the whole batch is queued
-// (see uploadQueue.ts) instead of processed immediately, and a scheduled
-// invocation drains it a safe amount at a time — each drain gets its own
-// completely fresh budget, so a batch of any size gets through eventually
-// instead of losing files. Below this, media still uploads immediately with
-// a per-file reply, same as always — most sends are a handful of photos, and
-// there's no reason to make those wait on a once-a-minute cron.
+// Even a batch that uploads immediately (rather than being queued) has a
+// subrequest cost per file: fetch from LINE (1) + upload to Drive (1) + a
+// reply (1) = 3 — the reply is easy to forget when doing this math, but it's
+// a real outbound request like the other two. At or above this many media
+// files in one webhook call, the whole batch is queued instead (see
+// uploadQueue.ts) and a scheduled invocation drains it a safe amount at a
+// time, each drain getting its own completely fresh budget — a batch of any
+// size gets through eventually instead of losing files. Below this, media
+// still uploads immediately, just as one combined reply per webhook call
+// (handleImmediateMediaBatch below) instead of one per file — collapsing N
+// replies into 1 is what makes the per-file cost 2 instead of 3, which is
+// what actually keeps a batch just under this limit safely under the ~50
+// external-subrequest budget a single invocation gets (2 × 20 + a couple of
+// housekeeping requests ≈ low 40s, comfortably clear of the ceiling).
 const IMMEDIATE_MEDIA_BATCH_LIMIT = 20;
 
 // Kept comfortably under the ~50 external-subrequest budget a single
@@ -462,16 +483,20 @@ const IMMEDIATE_MEDIA_BATCH_LIMIT = 20;
 // to Drive), leaving headroom for the summary push message(s) at the end.
 const DRAIN_BATCH_SIZE = 20;
 
-async function handleQueuedMediaBatch(
+// Shared by both media-batch paths below: resolves the account link and
+// active trip once per sender instead of once per file, replying with the
+// appropriate prompt and returning null if either is missing so the caller
+// knows to stop.
+async function resolveMediaBatchContext(
   env: Env,
   lineUserId: string,
   events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
   origin: string
-): Promise<void> {
+): Promise<{ refreshToken: string; trip: ActiveTrip } | null> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) {
     await replyOrPush(events[0], await buildUnlinkedPrompt(env, lineUserId, origin), env.LINE_CHANNEL_ACCESS_TOKEN);
-    return;
+    return null;
   }
   const trip = await getActiveTrip(env.ACCOUNTS, lineUserId);
   if (!trip) {
@@ -480,8 +505,67 @@ async function handleQueuedMediaBatch(
       'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูป/คลิปตามมาได้เลย',
       env.LINE_CHANNEL_ACCESS_TOKEN
     );
-    return;
+    return null;
   }
+  return { refreshToken: link.refreshToken, trip };
+}
+
+// Below IMMEDIATE_MEDIA_BATCH_LIMIT: uploads every file right away (bounded
+// concurrency, same as before), but with one combined reply for the whole
+// batch instead of one per file — both a nicer chat experience (a real user
+// asked for this instead of a stream of separate confirmations) and, per the
+// IMMEDIATE_MEDIA_BATCH_LIMIT comment above, what keeps the per-file
+// subrequest cost low enough for the threshold's own math to hold.
+async function handleImmediateMediaBatch(
+  env: Env,
+  lineUserId: string,
+  events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
+  origin: string,
+  tokenCache: TokenCache
+): Promise<void> {
+  const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
+  if (!ctx) return;
+  const { refreshToken, trip } = ctx;
+
+  let succeeded = 0;
+  let failed = 0;
+  await processWithConcurrencyLimit(events, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
+    try {
+      await withFreshAccessToken(
+        env,
+        refreshToken,
+        (accessToken) =>
+          uploadTripMedia(
+            env,
+            accessToken,
+            trip.folderId,
+            event.message.id,
+            event.timestamp,
+            isImageMessageEvent(event) ? "image" : "video"
+          ),
+        tokenCache
+      );
+      succeeded++;
+    } catch (err) {
+      console.error("immediate media batch upload failed", event.message.id, err);
+      failed++;
+    }
+  });
+
+  const parts = [`📸 เก็บ ${succeeded} ไฟล์เข้าทริป "${trip.name}" แล้ว`];
+  if (failed > 0) parts.push(`(อีก ${failed} ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`);
+  await replyOrPush(events[0], parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN);
+}
+
+async function handleQueuedMediaBatch(
+  env: Env,
+  lineUserId: string,
+  events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
+  origin: string
+): Promise<void> {
+  const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
+  if (!ctx) return;
+  const { trip } = ctx;
 
   const jobs: QueuedUpload[] = events.map((event) => ({
     lineUserId,
@@ -515,13 +599,18 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
   // TokenCache comment on withFreshAccessToken for why.
   const tokenCache: TokenCache = new Map();
 
+  // Media events (image/video) are always handled as a batch — grouped by
+  // sender, one combined reply per sender — never individually inline below.
+  // Below IMMEDIATE_MEDIA_BATCH_LIMIT they still upload right away
+  // (handleImmediateMediaBatch); at/above it, the whole batch is queued for
+  // the scheduled drain instead (handleQueuedMediaBatch). See
+  // IMMEDIATE_MEDIA_BATCH_LIMIT's comment for why collapsing replies into
+  // one per batch matters, not just for tidiness.
   const mediaEvents = body.events.filter(
     (event): event is LineImageMessageEvent | LineVideoMessageEvent =>
       isImageMessageEvent(event) || isVideoMessageEvent(event)
   );
-  const isBigMediaBatch = mediaEvents.length >= IMMEDIATE_MEDIA_BATCH_LIMIT;
-
-  if (isBigMediaBatch) {
+  if (mediaEvents.length > 0) {
     // Grouped by sender — a webhook call is almost always one person's send,
     // but handling it generally costs nothing extra.
     const eventsByUser = new Map<string, Array<LineImageMessageEvent | LineVideoMessageEvent>>();
@@ -530,54 +619,33 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
       forUser.push(event);
       eventsByUser.set(event.source.userId, forUser);
     }
+    const handleBatch = mediaEvents.length >= IMMEDIATE_MEDIA_BATCH_LIMIT ? handleQueuedMediaBatch : null;
     await Promise.all(
       [...eventsByUser.entries()].map(([lineUserId, events]) =>
-        handleQueuedMediaBatch(env, lineUserId, events, origin)
+        handleBatch
+          ? handleBatch(env, lineUserId, events, origin)
+          : handleImmediateMediaBatch(env, lineUserId, events, origin, tokenCache)
       )
     );
   }
 
-  // Below the threshold, every event (including media) is processed
-  // immediately below, same as always. At/above it, the media events were
-  // already queued above, so only whatever's left (text, unsupported types)
-  // goes through the immediate path.
+  // Everything else (text, unsupported message types) is processed
+  // individually with bounded concurrency, same as always.
   const mediaEventSet = new Set<LineWebhookBody["events"][number]>(mediaEvents);
-  const eventsToProcessNow = isBigMediaBatch
-    ? body.events.filter((event) => !mediaEventSet.has(event))
-    : body.events;
+  const otherEvents = body.events.filter((event) => !mediaEventSet.has(event));
 
   // Processed with bounded concurrency rather than one-at-a-time or all at
   // once — see WEBHOOK_EVENT_CONCURRENCY above for why neither extreme
-  // works: a batch of photos/clips used to be handled fully sequentially,
-  // so each event's reply had to wait for every earlier event's full Drive
-  // round-trip first, making later replies far more likely to miss their
-  // token's short window (see replyOrPush); running the whole batch fully
-  // concurrently instead fixed that but could spike too many subrequests in
-  // flight at once for a large batch.
-  await processWithConcurrencyLimit(eventsToProcessNow, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
+  // works: events used to be handled fully sequentially, so each one's
+  // reply had to wait for every earlier one's full round-trip first, making
+  // later replies far more likely to miss their token's short window (see
+  // replyOrPush); running a whole batch fully concurrently instead fixed
+  // that but could spike too many subrequests in flight at once for a large
+  // batch.
+  await processWithConcurrencyLimit(otherEvents, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
     try {
       if (isTextMessageEvent(event)) {
         const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
-        await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
-      } else if (isImageMessageEvent(event)) {
-        const reply = await handleImageMessage(
-          env,
-          event.source.userId,
-          event.message.id,
-          event.timestamp,
-          origin,
-          tokenCache
-        );
-        await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
-      } else if (isVideoMessageEvent(event)) {
-        const reply = await handleVideoMessage(
-          env,
-          event.source.userId,
-          event.message.id,
-          event.timestamp,
-          origin,
-          tokenCache
-        );
         await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
       } else if (isUnsupportedMessageEvent(event)) {
         await replyOrPush(
@@ -587,12 +655,7 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
         );
       }
     } catch (err) {
-      if (
-        isTextMessageEvent(event) ||
-        isImageMessageEvent(event) ||
-        isVideoMessageEvent(event) ||
-        isUnsupportedMessageEvent(event)
-      ) {
+      if (isTextMessageEvent(event) || isUnsupportedMessageEvent(event)) {
         await replyOrPush(
           event,
           "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
@@ -633,12 +696,8 @@ export async function drainUploadQueue(env: Env): Promise<void> {
         await withFreshAccessToken(
           env,
           link.refreshToken,
-          async (accessToken) => {
-            const { body, contentType } = await fetchLineMediaContent(job.messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
-            const ext = extensionForContentType(contentType, job.kind);
-            const filename = `${bangkokDateKey(new Date(job.timestampMs))}_${job.messageId}.${ext}`;
-            await uploadFileToFolder(accessToken, job.tripFolderId, filename, body, contentType);
-          },
+          (accessToken) =>
+            uploadTripMedia(env, accessToken, job.tripFolderId, job.messageId, job.timestampMs, job.kind),
           tokenCache
         );
       }
