@@ -22,6 +22,7 @@ class FakeKV {
 const sheetRows = []; // simulates the Transactions tab
 const budgetRows = []; // simulates the Budgets tab
 const replies = []; // captures what would have been sent back to LINE
+const pushes = []; // captures push messages (the reply-token-expired fallback)
 
 const driveFolders = []; // simulates Drive folders: {id, name, parentId}
 const driveUploads = []; // simulates uploaded files: {id, folderId}
@@ -88,7 +89,17 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.includes("api.line.me/v2/bot/message/reply")) {
     const body = JSON.parse(init.body);
+    // Simulates an expired/already-used reply token: any replyToken
+    // containing "expired" fails, so tests can exercise the push fallback.
+    if (body.replyToken.includes("expired")) {
+      return new Response(JSON.stringify({ message: "Invalid reply token" }), { status: 400 });
+    }
     replies.push(body.messages[0].text);
+    return new Response("{}", { status: 200 });
+  }
+  if (u.includes("api.line.me/v2/bot/message/push")) {
+    const body = JSON.parse(init.body);
+    pushes.push({ to: body.to, text: body.messages[0].text });
     return new Response("{}", { status: 200 });
   }
   if (u.startsWith("https://api-data.line.me/v2/bot/message/") && u.endsWith("/content")) {
@@ -207,10 +218,27 @@ globalThis.fetch = async (url, init = {}) => {
   throw new Error(`unexpected fetch to ${u}`);
 };
 
-const { handleTextMessage, handleImageMessage, handleVideoMessage } = await import("../src/index.ts");
+const { handleTextMessage, handleImageMessage, handleVideoMessage, handleWebhook } = await import(
+  "../src/index.ts"
+);
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
 const { bangkokDateKey, addDaysToDateKey } = await import("../src/thaiDate.ts");
+
+async function signLineBody(rawBody, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(rawBody));
+  const arr = new Uint8Array(signature);
+  let binary = "";
+  for (const byte of arr) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
 function toSlashDate(dateKey) {
   const [y, m, d] = dateKey.split("-").map(Number);
@@ -223,6 +251,8 @@ const env = {
   GOOGLE_CLIENT_ID: "test-client-id",
   GOOGLE_CLIENT_SECRET: "test-client-secret",
   STATE_SIGNING_SECRET: "test-state-secret",
+  LINE_CHANNEL_SECRET: "test-channel-secret",
+  LINE_CHANNEL_ACCESS_TOKEN: "test-channel-access-token",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -466,6 +496,74 @@ check("status reports no open trip after ending", statusAfterEnd.includes("ไ�
 
 const imageAfterEndReply = await handleImageMessage(env, lineUserId, "msg-3", Date.now(), origin);
 check("image after ending the trip asks to start one again", imageAfterEndReply.includes("เริ่มทริป"));
+
+// Regression test for a real report: sending several photos/clips together
+// used to arrive as fewer confirmations than files sent, with total silence
+// (no reply, no error) for the missing ones. Root cause: handleWebhook
+// processed events one at a time, so a later event's reply could miss its
+// LINE reply token's short window after waiting through every earlier
+// event's full round trip — and a failed reply retried the same expired
+// token in the catch block, swallowing that failure too. This exercises the
+// real handleWebhook entry point (signature verification included) with a
+// batch that mixes a normal event, one whose reply token has "expired", and
+// one of an unsupported message type (LINE can send "file" for some clips).
+const webhookEvents = [
+  {
+    type: "message",
+    message: { type: "image", id: "batch2-ok" },
+    source: { type: "user", userId: lineUserId },
+    replyToken: "reply-ok-1",
+    timestamp: Date.now(),
+  },
+  {
+    type: "message",
+    message: { type: "image", id: "batch2-expired" },
+    source: { type: "user", userId: lineUserId },
+    replyToken: "reply-expired-2",
+    timestamp: Date.now(),
+  },
+  {
+    type: "message",
+    message: { type: "file", id: "batch2-file" },
+    source: { type: "user", userId: lineUserId },
+    replyToken: "reply-ok-3",
+    timestamp: Date.now(),
+  },
+];
+const rawWebhookBody = JSON.stringify({ events: webhookEvents });
+const webhookSignature = await signLineBody(rawWebhookBody, env.LINE_CHANNEL_SECRET);
+const webhookRequest = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": webhookSignature },
+  body: rawWebhookBody,
+});
+const repliesBefore = replies.length;
+const pushesBefore = pushes.length;
+const webhookResponse = await handleWebhook(webhookRequest, env);
+check("webhook call returns ok even with a mixed/failing batch", webhookResponse.status === 200);
+check(
+  "the normal-token events got a direct reply, not silence",
+  replies.length === repliesBefore + 2 &&
+    replies.slice(repliesBefore).every((r) => r.includes("ยังไม่ได้เริ่มทริปอยู่เลย") || r.includes("ยังไม่รองรับ"))
+);
+check(
+  "the expired-token event fell back to a push message instead of staying silent",
+  pushes.length === pushesBefore + 1 &&
+    pushes[pushesBefore].to === lineUserId &&
+    pushes[pushesBefore].text.includes("ยังไม่ได้เริ่มทริปอยู่เลย")
+);
+check(
+  "an unsupported message type (e.g. 'file') gets an explicit reply instead of silence",
+  replies.some((r) => r.includes("ยังไม่รองรับ"))
+);
+
+const wrongSignatureRequest = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": "not-a-real-signature" },
+  body: rawWebhookBody,
+});
+const wrongSignatureResponse = await handleWebhook(wrongSignatureRequest, env);
+check("an invalid LINE signature is still rejected", wrongSignatureResponse.status === 401);
 
 // 8. Calendar (PLAN.md 15.3): format hint, confirm-before-create, decline,
 // list by day, search-based edit/delete, and the insufficient-scope re-link.

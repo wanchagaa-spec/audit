@@ -188,6 +188,18 @@ LINE often bundles into a single webhook call. See PLAN.md 15.2's second "แก
 callout for the full story. All events in one webhook call now also share a single refreshed
 Google access token (`TokenCache` in `src/index.ts`) instead of each file fetching its own.
 
+Even after that fix, a large batch could still end up with fewer confirmation replies than
+files sent — total silence for the missing ones, not an error. The remaining cause:
+`handleWebhook` processed events one at a time, so a later event's reply had to wait through
+every earlier event's full Drive round trip first, which could push it past its LINE reply
+token's short validity window; a failed reply then retried the *same* expired token in the
+catch block and swallowed that failure too. Events in one webhook call are now processed
+concurrently (`Promise.allSettled` in `handleWebhook`), and any reply that still fails falls
+back to a push message (`pushToLine` in `src/line.ts`), which targets the LINE user directly
+and isn't tied to a token, so a reply is never silently lost. Message types this bot doesn't
+handle (e.g. LINE's `file` type, which some clips can arrive as) also now get an explicit "not
+supported yet" reply instead of falling through with no response at all.
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never

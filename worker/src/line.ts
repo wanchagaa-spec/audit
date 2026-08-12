@@ -22,9 +22,21 @@ export interface LineVideoMessageEvent {
   timestamp: number;
 }
 
+export interface LineUnsupportedMessageEvent {
+  type: "message";
+  message: { type: string; [key: string]: unknown };
+  source: { type: "user"; userId: string };
+  replyToken: string;
+  timestamp: number;
+}
+
 export interface LineWebhookBody {
   events: Array<
-    LineMessageEvent | LineImageMessageEvent | LineVideoMessageEvent | { type: string; [key: string]: unknown }
+    | LineMessageEvent
+    | LineImageMessageEvent
+    | LineVideoMessageEvent
+    | LineUnsupportedMessageEvent
+    | { type: string; [key: string]: unknown }
   >;
 }
 
@@ -92,6 +104,24 @@ export function isVideoMessageEvent(
   );
 }
 
+/** Any other real message type LINE can send (file, audio, sticker,
+ * location, ...) that this bot doesn't handle yet. Used so handleWebhook can
+ * still send *something* back instead of silently dropping the event — a
+ * user sending a batch of clips can have some of them arrive as a type LINE
+ * doesn't call "video" (e.g. "file" for some clip formats), and getting no
+ * reply at all looks identical to a crash from the user's side. */
+export function isUnsupportedMessageEvent(
+  event: LineWebhookBody["events"][number]
+): event is LineUnsupportedMessageEvent {
+  return (
+    event.type === "message" &&
+    "message" in event &&
+    typeof (event as LineUnsupportedMessageEvent).message?.type === "string" &&
+    !["text", "image", "video"].includes((event as LineUnsupportedMessageEvent).message.type) &&
+    (event as LineUnsupportedMessageEvent).source?.type === "user"
+  );
+}
+
 /** Fetches the raw bytes for any LINE message content — image, video, or
  * audio all use this same content API, keyed only by messageId. */
 export async function fetchLineMediaContent(
@@ -127,5 +157,26 @@ export async function replyToLine(
   });
   if (!res.ok) {
     throw new Error(`LINE reply API error (${res.status}): ${await res.text()}`);
+  }
+}
+
+/** Push messages target a userId directly instead of a one-time replyToken,
+ * so — unlike replyToLine — they can't fail from a token that's expired or
+ * already been used. Used as a fallback when a reply attempt fails, so slow
+ * processing (e.g. a big trip-photo batch) never results in total silence. */
+export async function pushToLine(userId: string, text: string, channelAccessToken: string): Promise<void> {
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${channelAccessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      to: userId,
+      messages: [{ type: "text", text: text.slice(0, 5000) }],
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`LINE push API error (${res.status}): ${await res.text()}`);
   }
 }

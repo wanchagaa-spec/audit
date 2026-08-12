@@ -11,7 +11,9 @@ import {
   fetchLineMediaContent,
   isImageMessageEvent,
   isTextMessageEvent,
+  isUnsupportedMessageEvent,
   isVideoMessageEvent,
+  pushToLine,
   replyToLine,
   verifyLineSignature,
   type LineWebhookBody,
@@ -113,13 +115,13 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
 // A single LINE multi-select send can bundle many events (photos, videos,
 // text) into one webhook request; each event was independently calling
 // Google's token endpoint for the same account, burning through Cloudflare's
-// per-request subrequest budget for no reason (events in one webhook call
-// are handled sequentially — see handleWebhook — so there's never a reason
-// two events would need two different tokens). handleWebhook creates one of
-// these per request and threads it through; call sites that don't pass one
-// (e.g. tests calling handleTextMessage directly) just always refresh, same
-// as before.
-type TokenCache = Map<string, string>;
+// per-request subrequest budget for no reason. handleWebhook now processes
+// all events in one call concurrently (see handleWebhook), so the cache
+// stores the in-flight Promise rather than the resolved string — otherwise
+// two events could both miss the cache at the same instant and each fire
+// their own refresh request. Call sites that don't pass one (e.g. tests
+// calling handleTextMessage directly) just always refresh, same as before.
+type TokenCache = Map<string, Promise<string>>;
 
 async function withFreshAccessToken<T>(
   env: Env,
@@ -127,16 +129,16 @@ async function withFreshAccessToken<T>(
   fn: (accessToken: string) => Promise<T>,
   tokenCache?: TokenCache
 ): Promise<T> {
-  let accessToken = tokenCache?.get(refreshToken);
-  if (!accessToken) {
-    accessToken = await refreshAccessToken({
+  let tokenPromise = tokenCache?.get(refreshToken);
+  if (!tokenPromise) {
+    tokenPromise = refreshAccessToken({
       refreshToken,
       clientId: env.GOOGLE_CLIENT_ID,
       clientSecret: env.GOOGLE_CLIENT_SECRET,
     });
-    tokenCache?.set(refreshToken, accessToken);
+    tokenCache?.set(refreshToken, tokenPromise);
   }
-  return fn(accessToken);
+  return fn(await tokenPromise);
 }
 
 async function buildUnlinkedPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
@@ -383,7 +385,29 @@ export async function handleVideoMessage(
   return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "video", tokenCache);
 }
 
-async function handleWebhook(request: Request, env: Env): Promise<Response> {
+// LINE reply tokens are single-use and short-lived. Sending several photos
+// or clips together bundles many events into one webhook call, and each
+// Drive upload takes real network time — replying to event N only after
+// events 1..N-1 finished serially could push N's reply past its token's
+// window, and a failed reply threw straight into the catch block below,
+// which retried the *same* (still-expired) token and swallowed that
+// failure too, producing total silence. Push messages target the userId
+// directly, so they're immune to token expiry — falling back to one here
+// means the user always hears back even if the reply attempt lost the race.
+async function replyOrPush(
+  event: { replyToken: string; source: { userId: string } },
+  text: string,
+  channelAccessToken: string
+): Promise<void> {
+  try {
+    await replyToLine(event.replyToken, text, channelAccessToken);
+  } catch (err) {
+    console.error("line reply failed, falling back to push", err);
+    await pushToLine(event.source.userId, text, channelAccessToken);
+  }
+}
+
+export async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-line-signature");
   const valid = await verifyLineSignature(rawBody, signature, env.LINE_CHANNEL_SECRET);
@@ -395,43 +419,62 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
   // TokenCache comment on withFreshAccessToken for why.
   const tokenCache: TokenCache = new Map();
 
-  for (const event of body.events) {
-    try {
-      if (isTextMessageEvent(event)) {
-        const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
-        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
-      } else if (isImageMessageEvent(event)) {
-        const reply = await handleImageMessage(
-          env,
-          event.source.userId,
-          event.message.id,
-          event.timestamp,
-          origin,
-          tokenCache
-        );
-        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
-      } else if (isVideoMessageEvent(event)) {
-        const reply = await handleVideoMessage(
-          env,
-          event.source.userId,
-          event.message.id,
-          event.timestamp,
-          origin,
-          tokenCache
-        );
-        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+  // Processed concurrently rather than one-at-a-time: a batch of photos/clips
+  // used to be handled sequentially, so each event's reply had to wait for
+  // every earlier event's full Drive round-trip first, making later replies
+  // far more likely to miss their token's short window (see replyOrPush).
+  // Running them together means each event's own reply latency is roughly
+  // its own processing time, not the sum of the whole batch's.
+  await Promise.allSettled(
+    body.events.map(async (event) => {
+      try {
+        if (isTextMessageEvent(event)) {
+          const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
+          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+        } else if (isImageMessageEvent(event)) {
+          const reply = await handleImageMessage(
+            env,
+            event.source.userId,
+            event.message.id,
+            event.timestamp,
+            origin,
+            tokenCache
+          );
+          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+        } else if (isVideoMessageEvent(event)) {
+          const reply = await handleVideoMessage(
+            env,
+            event.source.userId,
+            event.message.id,
+            event.timestamp,
+            origin,
+            tokenCache
+          );
+          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+        } else if (isUnsupportedMessageEvent(event)) {
+          await replyOrPush(
+            event,
+            "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ",
+            env.LINE_CHANNEL_ACCESS_TOKEN
+          );
+        }
+      } catch (err) {
+        if (
+          isTextMessageEvent(event) ||
+          isImageMessageEvent(event) ||
+          isVideoMessageEvent(event) ||
+          isUnsupportedMessageEvent(event)
+        ) {
+          await replyOrPush(
+            event,
+            "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
+            env.LINE_CHANNEL_ACCESS_TOKEN
+          ).catch(() => undefined);
+        }
+        console.error("webhook handling failed", err);
       }
-    } catch (err) {
-      if (isTextMessageEvent(event) || isImageMessageEvent(event) || isVideoMessageEvent(event)) {
-        await replyToLine(
-          event.replyToken,
-          "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
-          env.LINE_CHANNEL_ACCESS_TOKEN
-        ).catch(() => undefined);
-      }
-      console.error("webhook handling failed", err);
-    }
-  }
+    })
+  );
 
   return new Response("ok");
 }
