@@ -161,11 +161,13 @@ these cover).
 ### Trip photo albums (PLAN.md 15.2)
 
 Send photos or video clips to the bot and they're organized into Google Drive automatically,
-grouped by trip and day:
+grouped by trip:
 
 - `เริ่มทริป <ชื่อ>` — e.g. "เริ่มทริป ทะเล" — starts a trip session. Every photo or video clip
-  you send after this uploads automatically into that trip's Drive folder, in a subfolder for
-  the day it was sent (`จดบัญชี - อัลบั้มทริป/ทะเล/1-1-2569/`, ...), no captioning needed.
+  you send after this uploads automatically into that trip's Drive folder
+  (`จดบัญชี - อัลบั้มทริป/ทะเล/`), filename prefixed with the date it was sent
+  (`2569-01-01_xxxxx.jpg`, zero-padded so filenames still sort chronologically), no
+  captioning needed.
 - `ทริปตอนนี้` — checks whether a trip is still open (in case you forgot to close one).
 - `จบทริป` — closes the current trip. Sending a photo with no trip open gets rejected with
   a reminder to start one first, rather than uploading somewhere generic.
@@ -177,6 +179,14 @@ Uses the same `drive.file` OAuth scope already granted for the spreadsheet, so n
 Google consent step is needed for this feature. See the callout in PLAN.md 15.2 for why
 there's no "type a folder name alongside the photo" option — LINE doesn't attach captions
 to image messages, they always arrive as separate events.
+
+Files upload directly into the trip's folder rather than a per-day subfolder — an earlier
+version created a subfolder per day, which turned out to have a real race (Drive's
+find-or-create isn't atomic) and burn extra Cloudflare subrequests per file; both got worse
+specifically when several photos/clips were sent together in one LINE multi-select, which
+LINE often bundles into a single webhook call. See PLAN.md 15.2's second "แก้ไขระหว่างพัฒนา"
+callout for the full story. All events in one webhook call now also share a single refreshed
+Google access token (`TokenCache` in `src/index.ts`) instead of each file fetching its own.
 
 ### Calendar (PLAN.md 15.3)
 

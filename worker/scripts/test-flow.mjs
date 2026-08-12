@@ -118,7 +118,21 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files")) {
     const id = nextDriveId("file");
-    driveUploads.push({ id });
+    let name;
+    let parentId;
+    try {
+      const contentType = init.headers?.["Content-Type"] ?? "";
+      const boundary = contentType.match(/boundary=(.+)$/)?.[1];
+      const text = init.body && typeof init.body.text === "function" ? await init.body.text() : "";
+      const metaPart = boundary ? text.split(`--${boundary}`)[1] : null;
+      const metaJson = metaPart?.split("\r\n\r\n")[1]?.split("\r\n--")[0];
+      const meta = metaJson ? JSON.parse(metaJson) : {};
+      name = meta.name;
+      parentId = meta.parents?.[0];
+    } catch {
+      // best-effort parse for the test mock only
+    }
+    driveUploads.push({ id, name, parentId });
     return new Response(JSON.stringify({ id }), { status: 200 });
   }
   if (u.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
@@ -365,27 +379,32 @@ check("trip folder was created under the album root", driveFolders.some((f) => f
 const statusReply1 = await handleTextMessage(env, lineUserId, "ทริปตอนนี้", origin);
 check("status reports the open trip", statusReply1.includes("ทะเล"));
 
+const tripFolderId = driveFolders.find((f) => f.name === "ทะเล").id;
+const foldersBeforePhoto = driveFolders.length;
 const photoReply = await handleImageMessage(env, lineUserId, "msg-2", Date.now(), origin);
 check("photo upload confirms the trip name", photoReply.includes('ทริป "ทะเล"'));
 check("an upload was recorded", driveUploads.length === uploadsBeforeTrip + 1);
 check(
-  "a date subfolder was created under the trip folder",
-  driveFolders.some((f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id)
+  "the photo uploads straight into the trip folder, not a per-day subfolder",
+  driveUploads.at(-1).parentId === tripFolderId && driveFolders.length === foldersBeforePhoto
+);
+check(
+  "the filename is date-prefixed with a zero-padded, sortable date",
+  /^\d{4}-\d{2}-\d{2}_msg-2\.\w+$/.test(driveUploads.at(-1).name)
 );
 
-// A second photo the same day should reuse the cached day-folder id (KV)
-// instead of searching/creating in Drive again — this is what shrinks the
-// duplicate-folder race window found in review.
-const dateFoldersBeforeSecondPhoto = driveFolders.filter(
-  (f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id
-).length;
+// A second photo the same day must land in the very same trip folder too —
+// regression test for the duplicate-day-folder race this replaced: Drive's
+// find-then-create wasn't atomic, so two uploads landing at nearly the same
+// instant (e.g. sent together as a LINE multi-select) could each miss the
+// day-folder search and create their own, splitting the trip across two
+// folders. A flat trip folder has nothing to race on.
 const photoReply2 = await handleImageMessage(env, lineUserId, "msg-2b", Date.now(), origin);
 check("second same-day photo also confirms the trip name", photoReply2.includes('ทริป "ทะเล"'));
 check("a second upload was recorded", driveUploads.length === uploadsBeforeTrip + 2);
 check(
-  "the cached day folder was reused, not recreated",
-  driveFolders.filter((f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id).length ===
-    dateFoldersBeforeSecondPhoto
+  "the second photo lands in the same trip folder, no new folder created",
+  driveUploads.at(-1).parentId === tripFolderId && driveFolders.length === foldersBeforePhoto
 );
 
 // Video clips (LINE "video" message type) must upload just like photos —
@@ -396,6 +415,28 @@ const uploadsBeforeVideo = driveUploads.length;
 const videoReply = await handleVideoMessage(env, lineUserId, "vid-1", Date.now(), origin);
 check("video upload confirms the trip name", videoReply.includes('ทริป "ทะเล"'));
 check("a video upload was recorded", driveUploads.length === uploadsBeforeVideo + 1);
+check("the video also lands directly in the trip folder", driveUploads.at(-1).parentId === tripFolderId);
+
+// A batch of many photos+videos sent together (bundled into one webhook
+// call, as LINE can do for a multi-select send) must not blow through
+// Cloudflare's per-request subrequest budget. Sharing one refreshed access
+// token across the whole batch (instead of re-fetching one per file) plus
+// dropping the per-day folder lookup cuts each file down to a handful of
+// subrequests — cheap enough that even a large batch stays well under the
+// limit. This doesn't call the real webhook handler (no real LINE signature
+// here), so it drives handleImageMessage/handleVideoMessage directly with a
+// shared token cache the same way handleWebhook does.
+const tokenCacheForBatch = new Map();
+const uploadsBeforeBatch = driveUploads.length;
+for (let i = 0; i < 12; i++) {
+  const handler = i % 2 === 0 ? handleImageMessage : handleVideoMessage;
+  await handler(env, lineUserId, `batch-${i}`, Date.now(), origin, tokenCacheForBatch);
+}
+check("all 12 batched uploads succeeded", driveUploads.length === uploadsBeforeBatch + 12);
+check(
+  "the whole batch reused one cached access token instead of refreshing per file",
+  tokenCacheForBatch.size === 1
+);
 
 const switchPromptReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
 check(

@@ -5,7 +5,7 @@ import { matchCalendarCommand } from "./calendarCommands.ts";
 import { matchCommand } from "./commands.ts";
 import { resolveConfirmation } from "./confirmations.ts";
 import { matchDiaryCommand } from "./diaryCommands.ts";
-import { findOrCreateFolderCached, uploadFileToFolder } from "./drive.ts";
+import { uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import {
   fetchLineMediaContent,
@@ -27,7 +27,7 @@ import {
   setPending,
   type ActionCtx,
 } from "./state.ts";
-import { bangkokDateFolderName } from "./thaiDate.ts";
+import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand } from "./transactionCommands.ts";
 import { matchTripCommand } from "./tripCommands.ts";
 
@@ -44,7 +44,7 @@ const WELCOME_MESSAGE = [
   "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 4 เรื่องหลักๆ:",
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
-  "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป/วันที่",
+  "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
   "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
   "",
@@ -109,16 +109,33 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   return html(renderLinkedPage());
 }
 
+// Refresh tokens obtained per user per webhook call, keyed by refreshToken.
+// A single LINE multi-select send can bundle many events (photos, videos,
+// text) into one webhook request; each event was independently calling
+// Google's token endpoint for the same account, burning through Cloudflare's
+// per-request subrequest budget for no reason (events in one webhook call
+// are handled sequentially — see handleWebhook — so there's never a reason
+// two events would need two different tokens). handleWebhook creates one of
+// these per request and threads it through; call sites that don't pass one
+// (e.g. tests calling handleTextMessage directly) just always refresh, same
+// as before.
+type TokenCache = Map<string, string>;
+
 async function withFreshAccessToken<T>(
   env: Env,
   refreshToken: string,
-  fn: (accessToken: string) => Promise<T>
+  fn: (accessToken: string) => Promise<T>,
+  tokenCache?: TokenCache
 ): Promise<T> {
-  const accessToken = await refreshAccessToken({
-    refreshToken,
-    clientId: env.GOOGLE_CLIENT_ID,
-    clientSecret: env.GOOGLE_CLIENT_SECRET,
-  });
+  let accessToken = tokenCache?.get(refreshToken);
+  if (!accessToken) {
+    accessToken = await refreshAccessToken({
+      refreshToken,
+      clientId: env.GOOGLE_CLIENT_ID,
+      clientSecret: env.GOOGLE_CLIENT_SECRET,
+    });
+    tokenCache?.set(refreshToken, accessToken);
+  }
   return fn(accessToken);
 }
 
@@ -160,7 +177,8 @@ export async function handleTextMessage(
   env: Env,
   lineUserId: string,
   text: string,
-  origin: string
+  origin: string,
+  tokenCache?: TokenCache
 ): Promise<string> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
@@ -175,8 +193,11 @@ export async function handleTextMessage(
   try {
     const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, lineUserId);
     if (pendingConfirmation) {
-      const reply = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-        resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation)
+      const reply = await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation),
+        tokenCache
       );
       if (reply) return reply;
       // Not an affirmative reply — the pending question is already cleared
@@ -185,19 +206,32 @@ export async function handleTextMessage(
 
     const tripHandler = await matchTripCommand(text);
     if (tripHandler) {
-      return await withFreshAccessToken(env, link.refreshToken, (accessToken) => tripHandler(actionCtx(accessToken)));
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => tripHandler(actionCtx(accessToken)),
+        tokenCache
+      );
     }
 
     const calendarHandler = await matchCalendarCommand(text);
     if (calendarHandler) {
-      return await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-        calendarHandler(actionCtx(accessToken))
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => calendarHandler(actionCtx(accessToken)),
+        tokenCache
       );
     }
 
     const diaryHandler = await matchDiaryCommand(text);
     if (diaryHandler) {
-      return await withFreshAccessToken(env, link.refreshToken, (accessToken) => diaryHandler(actionCtx(accessToken)));
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => diaryHandler(actionCtx(accessToken)),
+        tokenCache
+      );
     }
 
     // Checked before reportHandler below: "ลบรายการล่าสุด"/"ยกเลิกรายการล่าสุด"
@@ -207,8 +241,11 @@ export async function handleTextMessage(
     // anything — this is the exact bug a user hit.
     const transactionHandler = await matchTransactionCommand(text);
     if (transactionHandler) {
-      return await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-        transactionHandler(actionCtx(accessToken))
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => transactionHandler(actionCtx(accessToken)),
+        tokenCache
       );
     }
   } catch (err) {
@@ -223,8 +260,11 @@ export async function handleTextMessage(
 
   const reportHandler = await matchCommand(text);
   if (reportHandler) {
-    return withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-      reportHandler(accessToken, link.spreadsheetId)
+    return withFreshAccessToken(
+      env,
+      link.refreshToken,
+      (accessToken) => reportHandler(accessToken, link.spreadsheetId),
+      tokenCache
     );
   }
 
@@ -245,19 +285,23 @@ export async function handleTextMessage(
 
   if (result.transactionDraft) {
     const now = new Date().toISOString();
-    await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-      appendTransaction(accessToken, link.spreadsheetId, {
-        id: crypto.randomUUID(),
-        date: now.slice(0, 10),
-        type: result.transactionDraft!.type,
-        amount: result.transactionDraft!.amount,
-        categoryId: result.transactionDraft!.categoryId,
-        note: result.transactionDraft!.note,
-        rawText: text,
-        addedBy: lineUserId,
-        addedByName: "LINE",
-        createdAt: now,
-      })
+    await withFreshAccessToken(
+      env,
+      link.refreshToken,
+      (accessToken) =>
+        appendTransaction(accessToken, link.spreadsheetId, {
+          id: crypto.randomUUID(),
+          date: now.slice(0, 10),
+          type: result.transactionDraft!.type,
+          amount: result.transactionDraft!.amount,
+          categoryId: result.transactionDraft!.categoryId,
+          note: result.transactionDraft!.note,
+          rawText: text,
+          addedBy: lineUserId,
+          addedByName: "LINE",
+          createdAt: now,
+        }),
+      tokenCache
     );
   }
 
@@ -275,7 +319,8 @@ async function handleTripMediaMessage(
   messageId: string,
   timestampMs: number,
   origin: string,
-  kind: "image" | "video"
+  kind: "image" | "video",
+  tokenCache?: TokenCache
 ): Promise<string> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
@@ -286,23 +331,34 @@ async function handleTripMediaMessage(
     return `ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่ง${noun}ตามมาได้เลย`;
   }
 
-  return withFreshAccessToken(env, link.refreshToken, async (accessToken) => {
-    const { bytes, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
-    const dateFolder = bangkokDateFolderName(timestampMs);
-    const dayFolderCacheKey = `dayfolder:${lineUserId}:${trip.folderId}:${dateFolder}`;
-    const dayFolderId = await findOrCreateFolderCached(
-      accessToken,
-      env.ACCOUNTS,
-      dayFolderCacheKey,
-      dateFolder,
-      trip.folderId
-    );
-    const ext = extensionForContentType(contentType, kind);
-    await uploadFileToFolder(accessToken, dayFolderId, `${messageId}.${ext}`, bytes, contentType);
-    const emoji = kind === "video" ? "🎬" : "📸";
-    const noun = kind === "video" ? "คลิป" : "รูป";
-    return `${emoji} เก็บ${noun}ในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
-  });
+  return withFreshAccessToken(
+    env,
+    link.refreshToken,
+    async (accessToken) => {
+      const { bytes, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+      const timestamp = new Date(timestampMs);
+      const dateFolder = bangkokDateFolderName(timestampMs);
+      const ext = extensionForContentType(contentType, kind);
+      // Uploads straight into the trip folder (created once, up front, when
+      // the trip started) with a zero-padded date baked into the filename
+      // (so files still sort chronologically), instead of finding-or-
+      // creating a per-day subfolder on every single upload. That per-day
+      // lookup used to run for every photo/video, which (a) had an
+      // unavoidable race — Drive's find-then-create isn't atomic, so
+      // several files sent in the same LINE multi-select burst could each
+      // miss the search and create duplicate day folders, splitting the
+      // trip's files across them — and (b) burned 3-4 extra subrequests per
+      // file, which could exceed Cloudflare's per-request subrequest budget
+      // when someone sent many photos/clips at once, silently dropping
+      // whichever ones ran out of budget. A flat folder needs neither.
+      const filename = `${bangkokDateKey(timestamp)}_${messageId}.${ext}`;
+      await uploadFileToFolder(accessToken, trip.folderId, filename, bytes, contentType);
+      const emoji = kind === "video" ? "🎬" : "📸";
+      const noun = kind === "video" ? "คลิป" : "รูป";
+      return `${emoji} เก็บ${noun}ในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
+    },
+    tokenCache
+  );
 }
 
 export async function handleImageMessage(
@@ -310,9 +366,10 @@ export async function handleImageMessage(
   lineUserId: string,
   messageId: string,
   timestampMs: number,
-  origin: string
+  origin: string,
+  tokenCache?: TokenCache
 ): Promise<string> {
-  return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "image");
+  return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "image", tokenCache);
 }
 
 export async function handleVideoMessage(
@@ -320,9 +377,10 @@ export async function handleVideoMessage(
   lineUserId: string,
   messageId: string,
   timestampMs: number,
-  origin: string
+  origin: string,
+  tokenCache?: TokenCache
 ): Promise<string> {
-  return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "video");
+  return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "video", tokenCache);
 }
 
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
@@ -333,11 +391,14 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
 
   const body = JSON.parse(rawBody) as LineWebhookBody;
   const origin = new URL(request.url).origin;
+  // Shared across every event in this one webhook call — see the
+  // TokenCache comment on withFreshAccessToken for why.
+  const tokenCache: TokenCache = new Map();
 
   for (const event of body.events) {
     try {
       if (isTextMessageEvent(event)) {
-        const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin);
+        const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
         await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
       } else if (isImageMessageEvent(event)) {
         const reply = await handleImageMessage(
@@ -345,7 +406,8 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
           event.source.userId,
           event.message.id,
           event.timestamp,
-          origin
+          origin,
+          tokenCache
         );
         await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
       } else if (isVideoMessageEvent(event)) {
@@ -354,7 +416,8 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
           event.source.userId,
           event.message.id,
           event.timestamp,
-          origin
+          origin,
+          tokenCache
         );
         await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
       }
