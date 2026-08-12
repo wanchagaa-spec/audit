@@ -17,6 +17,7 @@ library available in this environment) to match a white-badge-on-color-tile
 style.
 """
 
+import math
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -25,9 +26,14 @@ HERE = Path(__file__).parent
 FONT_DIR = HERE / "fonts"
 
 # LINE rich menu images must be one of a few fixed sizes; 2500x1686 is the
-# standard "full" size and divides evenly into a 3x2 button grid.
+# standard "full" size. 4x2 divides evenly (625x843 per tile) and fits 7
+# real command tiles plus one non-tappable brand tile (see BUTTONS below) —
+# grew from the original 3x2 grid when the AI Q&A feature (PLAN.md 15.10)
+# needed a spot; checked with Pillow's textbbox first that every existing
+# title still fits comfortably at the narrower width before committing to
+# this over shrinking fonts or an uneven per-row column count.
 WIDTH, HEIGHT = 2500, 1686
-COLS, ROWS = 3, 2
+COLS, ROWS = 4, 2
 
 PAGE_BG = (240, 247, 242)  # soft off-white, faint green tint
 FRAME_BORDER = (22, 163, 74)  # same green as the tiles
@@ -40,11 +46,6 @@ FRAME_MARGIN = 28
 FRAME_RADIUS = 56
 GUTTER = 16
 TILE_RADIUS = 30
-
-# Column/row boundaries chosen to split evenly and sum exactly to WIDTH/HEIGHT
-# (2500 isn't divisible by 3, so the middle/right columns are 1px narrower).
-COL_X = [0, 834, 1667, 2500]
-ROW_Y = [0, 843, 1686]
 
 
 def icon_help(draw, cx, cy, r, color, font):
@@ -119,6 +120,31 @@ def icon_diary(draw, cx, cy, r, stroke, color):
         draw.line([x0 + w * 0.42, ly, x0 + w * 0.86, ly], fill=color, width=max(2, stroke - 6))
 
 
+def icon_sparkle(draw, cx, cy, r, color):
+    # A 4-pointed star/sparkle — the shorthand for "AI" most chat apps use
+    # (echoes Gemini's own logo mark), alternating an outer and inner radius
+    # across 8 points around the center.
+    outer, inner = r * 1.15, r * 0.4
+    pts = []
+    for i in range(8):
+        angle = math.pi / 4 * i - math.pi / 2
+        radius = outer if i % 2 == 0 else inner
+        pts.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+    draw.polygon(pts, fill=color)
+
+
+def icon_wallet(draw, cx, cy, r, stroke, color):
+    w, h = r * 1.8, r * 1.3
+    x0, y0 = cx - w / 2, cy - h / 2
+    draw.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=h * 0.18, outline=color, width=stroke)
+    clasp_r = h * 0.16
+    draw.ellipse(
+        [x0 + w - clasp_r * 1.6, cy - clasp_r, x0 + w - clasp_r * 1.6 + clasp_r * 2, cy + clasp_r],
+        outline=color,
+        width=max(2, stroke - 6),
+    )
+
+
 BUTTONS = [
     {"title": "วิธีใช้", "sub": "HELP", "icon": "help"},
     {"title": "สรุปเดือนนี้", "sub": "MONEY SUMMARY", "icon": "money"},
@@ -126,6 +152,11 @@ BUTTONS = [
     {"title": "ทริปตอนนี้", "sub": "TRIP STATUS", "icon": "camera"},
     {"title": "นัดวันนี้", "sub": "TODAY'S EVENTS", "icon": "calendar"},
     {"title": "ไดอารี่เดือนนี้", "sub": "DIARY", "icon": "diary"},
+    {"title": "วิเคราะห์", "sub": "AI ANALYSIS", "icon": "sparkle"},
+    # Not a command — no tap area is defined for this cell in
+    # setup-rich-menu.mjs, so it's purely a brand tile that fills the 8th
+    # slot in the 4x2 grid instead of leaving a dead, unlabeled rectangle.
+    {"title": "ผู้ช่วยการเงิน", "sub": "LINE BOT", "icon": "wallet"},
 ]
 
 
@@ -151,6 +182,10 @@ def draw_icon(draw, kind, cx, cy, r, help_font):
         icon_calendar(draw, cx, cy, r, ICON_STROKE, color)
     elif kind == "diary":
         icon_diary(draw, cx, cy, r, ICON_STROKE, color)
+    elif kind == "sparkle":
+        icon_sparkle(draw, cx, cy, r, color)
+    elif kind == "wallet":
+        icon_wallet(draw, cx, cy, r, ICON_STROKE, color)
 
 
 def main():

@@ -137,7 +137,7 @@ the id straight from the webhook event instead, which is always in the right sco
 
 ### 7. Set up the rich menu (optional, but recommended)
 
-Adds a persistent 6-button image menu under the chat input in LINE — tapping a button just
+Adds a persistent image menu under the chat input in LINE — tapping a button just
 sends its text as an ordinary message, so it's a shortcut into commands the bot already
 understands, nothing new to build on the LINE side.
 
@@ -149,11 +149,13 @@ understands, nothing new to build on the LINE side.
 3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
    the previous menu of the same name first, so it's safe to run repeatedly.
 
-The six buttons: วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด (recent
-transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar), ไดอารี่เดือนนี้มี
-อะไรบ้าง (this month's diary). They're all read/status commands on purpose — commands that
-need more input from you (`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`) can't be a
-single tap, so those stay as typed commands (see `วิธีใช้` for the full list).
+A 4x2 grid: 7 tappable buttons — วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด
+(recent transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar),
+ไดอารี่เดือนนี้มีอะไรบ้าง (this month's diary), วิเคราะห์ (AI analysis, PLAN.md 15.10) — plus a
+non-tappable 8th "ผู้ช่วยการเงิน" brand tile filling out the grid. All 7 real buttons are
+read/status commands on purpose — commands that need more input from you (`เริ่มทริป <ชื่อ>`,
+`นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`, `ถาม <คำถาม>`) can't be a single tap, so those stay as
+typed commands (see `วิธีใช้` for the full list).
 
 ## Try it
 
