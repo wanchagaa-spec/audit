@@ -54,69 +54,88 @@ export async function getOrCreateAlbumRoot(accessToken: string): Promise<string>
   return created.id;
 }
 
-// Streams the file straight from its source into Drive via the resumable
-// upload protocol, instead of buffering it into an ArrayBuffer/Blob first
-// (the previous multipart approach, which needed the whole file in memory to
-// interleave it with the JSON metadata part). A longer video clip is tens of
-// MB, and holding the whole thing in memory just to re-serialize it risked
-// the Worker's memory limit and added real latency — a real user report was
-// a ~1 minute clip that uploaded fine via LINE but never got a bot reply,
-// while short clips worked.
+// Concatenates fixed byte chunks and/or passthrough streams into one
+// ReadableStream, reading each source only once and only as fast as the
+// consumer pulls. Used below to build a streamed multipart body without
+// materializing the whole thing (or the whole media file) in memory first.
+function concatStreams(...parts: Array<Uint8Array | ReadableStream<Uint8Array>>): ReadableStream<Uint8Array> {
+  let index = 0;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (index < parts.length) {
+        const part = parts[index];
+        if (part instanceof Uint8Array) {
+          controller.enqueue(part);
+          index++;
+          return;
+        }
+        if (!reader) reader = part.getReader();
+        const { value, done } = await reader.read();
+        if (done) {
+          reader = null;
+          index++;
+          continue;
+        }
+        controller.enqueue(value);
+        return;
+      }
+      controller.close();
+    },
+  });
+}
+
+// Uploads in a single request — Drive's multipart upload, same as before the
+// streaming work started — but with the body assembled as a stream instead
+// of a fully-buffered Blob, so a large video clip never has to sit in Worker
+// memory in one piece. This combines two things that turned out to matter
+// for real reports and can't each be dropped:
 //
-// Deliberately not `uploadType=media` (Google's "simple upload"): that's
-// documented for small files only (roughly under 5MB) — the opposite of the
-// case this exists for. Resumable upload is Google's documented mechanism
-// for larger/streamed files, and its init request carries the metadata
-// (name + parent folder) up front, so — unlike simple upload — there's no
-// separate rename/move call after the fact, and no risk of an orphaned,
-// unnamed file sitting in Drive's root if a later step fails: nothing is
-// created in Drive at all until the content upload itself succeeds.
+// - Streaming (not buffering) matters for a single large file: a ~1 minute
+//   clip that uploaded fine via LINE never got a bot reply, traced to
+//   buffering the whole file into memory before upload (risking the
+//   Worker's memory limit and doubling total latency).
+// - A single request per file matters for a *large batch*: an earlier
+//   version of this streaming fix used Drive's resumable upload, which needs
+//   two requests per file (init + content). Sending 37 photos in one LINE
+//   multi-select then needed ~75 Drive subrequests in one webhook call,
+//   which silently exceeded Cloudflare's per-request subrequest budget for
+//   a couple of the files — the exact "some files vanish with zero reply"
+//   failure mode already hit and fixed once before (see PLAN.md 15.2's
+//   second correction), reintroduced by doubling the request count per file.
+//
+// Multipart (unlike simple upload) also carries the name+parent metadata
+// inline, so this stays atomic — Drive doesn't create anything until the one
+// request completes, so a failure never leaves an orphaned file behind.
 export async function uploadFileToFolder(
   accessToken: string,
   folderId: string,
   filename: string,
   body: ReadableStream<Uint8Array>,
-  mimeType: string,
-  contentLength: number | null
+  mimeType: string
 ): Promise<string> {
-  const sessionRes = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=resumable&fields=id`, {
+  const boundary = `beq_${crypto.randomUUID()}`;
+  const encoder = new TextEncoder();
+  const metadata = JSON.stringify({ name: filename, parents: [folderId] });
+  const prefix = encoder.encode(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n` +
+      `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`
+  );
+  const suffix = encoder.encode(`\r\n--${boundary}--`);
+  const streamedBody = concatStreams(prefix, body, suffix);
+
+  const res = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json; charset=UTF-8",
-      "X-Upload-Content-Type": mimeType,
+      "Content-Type": `multipart/related; boundary=${boundary}`,
     },
-    body: JSON.stringify({ name: filename, parents: [folderId] }),
-  });
-  if (!sessionRes.ok) {
-    throw new Error(`Google Drive upload session error (${sessionRes.status}): ${await sessionRes.text()}`);
-  }
-  const uploadUrl = sessionRes.headers.get("location");
-  if (!uploadUrl) {
-    throw new Error("Google Drive did not return a resumable upload session URL");
-  }
-
-  // A single-request resumable upload needs the total size up front. LINE's
-  // content API sends a Content-Length in practice, so the common case still
-  // streams straight through with nothing buffered here; on the rare chance
-  // it's missing, fall back to reading the stream fully first so this never
-  // behaves worse than the old buffer-everything approach it replaced.
-  let uploadBody: ReadableStream<Uint8Array> | ArrayBuffer = body;
-  let length = contentLength;
-  if (length == null) {
-    uploadBody = await new Response(body).arrayBuffer();
-    length = uploadBody.byteLength;
-  }
-
-  const putRes = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: { "Content-Type": mimeType, "Content-Length": String(length) },
-    body: uploadBody,
-    ...(uploadBody instanceof ReadableStream ? { duplex: "half" } : {}),
+    body: streamedBody,
+    duplex: "half",
   } as RequestInit);
-  if (!putRes.ok) {
-    throw new Error(`Google Drive upload error (${putRes.status}): ${await putRes.text()}`);
+  if (!res.ok) {
+    throw new Error(`Google Drive upload error (${res.status}): ${await res.text()}`);
   }
-  const { id } = (await putRes.json()) as { id: string };
-  return id;
+  const data = (await res.json()) as { id: string };
+  return data.id;
 }
