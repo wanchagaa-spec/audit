@@ -42,31 +42,6 @@ export async function findOrCreateFolder(accessToken: string, name: string, pare
   return created.id;
 }
 
-/**
- * Same as `findOrCreateFolder`, but remembers the result in KV under
- * `cacheKey` and returns that on later calls without touching Drive at all.
- * `findOrCreateFolder`'s find-then-create isn't atomic, so two uploads
- * processed at nearly the same instant can both miss the Drive search and
- * each create their own folder — KV has no compare-and-set either, so this
- * doesn't eliminate that race, but once any call wins and caches the id,
- * every subsequent call (the common case: several photos in the same day)
- * skips the Drive round-trip entirely, which is both faster and shrinks the
- * exposed window to just the first call for a given key.
- */
-export async function findOrCreateFolderCached(
-  accessToken: string,
-  kv: KVNamespace,
-  cacheKey: string,
-  name: string,
-  parentId: string
-): Promise<string> {
-  const cached = await kv.get(cacheKey);
-  if (cached) return cached;
-  const folderId = await findOrCreateFolder(accessToken, name, parentId);
-  await kv.put(cacheKey, folderId, { expirationTtl: 2 * 24 * 60 * 60 });
-  return folderId;
-}
-
 export async function getOrCreateAlbumRoot(accessToken: string): Promise<string> {
   const q = `mimeType='${FOLDER_MIME}' and name='${ALBUM_ROOT_FOLDER_NAME}' and trashed=false and 'root' in parents`;
   const found = await driveFetch(accessToken, `/files?q=${encodeURIComponent(q)}&fields=files(id)&spaces=drive`);
