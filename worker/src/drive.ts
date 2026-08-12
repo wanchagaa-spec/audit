@@ -54,32 +54,69 @@ export async function getOrCreateAlbumRoot(accessToken: string): Promise<string>
   return created.id;
 }
 
+// Streams the file straight from its source into Drive via the resumable
+// upload protocol, instead of buffering it into an ArrayBuffer/Blob first
+// (the previous multipart approach, which needed the whole file in memory to
+// interleave it with the JSON metadata part). A longer video clip is tens of
+// MB, and holding the whole thing in memory just to re-serialize it risked
+// the Worker's memory limit and added real latency — a real user report was
+// a ~1 minute clip that uploaded fine via LINE but never got a bot reply,
+// while short clips worked.
+//
+// Deliberately not `uploadType=media` (Google's "simple upload"): that's
+// documented for small files only (roughly under 5MB) — the opposite of the
+// case this exists for. Resumable upload is Google's documented mechanism
+// for larger/streamed files, and its init request carries the metadata
+// (name + parent folder) up front, so — unlike simple upload — there's no
+// separate rename/move call after the fact, and no risk of an orphaned,
+// unnamed file sitting in Drive's root if a later step fails: nothing is
+// created in Drive at all until the content upload itself succeeds.
 export async function uploadFileToFolder(
   accessToken: string,
   folderId: string,
   filename: string,
-  bytes: ArrayBuffer,
-  mimeType: string
+  body: ReadableStream<Uint8Array>,
+  mimeType: string,
+  contentLength: number | null
 ): Promise<string> {
-  const boundary = `beq_${crypto.randomUUID()}`;
-  const metadata = JSON.stringify({ name: filename, parents: [folderId] });
-  const body = new Blob([
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
-    `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`,
-    bytes,
-    `\r\n--${boundary}--`,
-  ]);
-  const res = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id`, {
+  const sessionRes = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=resumable&fields=id`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": `multipart/related; boundary=${boundary}`,
+      "Content-Type": "application/json; charset=UTF-8",
+      "X-Upload-Content-Type": mimeType,
     },
-    body,
+    body: JSON.stringify({ name: filename, parents: [folderId] }),
   });
-  if (!res.ok) {
-    throw new Error(`Google Drive upload error (${res.status}): ${await res.text()}`);
+  if (!sessionRes.ok) {
+    throw new Error(`Google Drive upload session error (${sessionRes.status}): ${await sessionRes.text()}`);
   }
-  const data = (await res.json()) as { id: string };
-  return data.id;
+  const uploadUrl = sessionRes.headers.get("location");
+  if (!uploadUrl) {
+    throw new Error("Google Drive did not return a resumable upload session URL");
+  }
+
+  // A single-request resumable upload needs the total size up front. LINE's
+  // content API sends a Content-Length in practice, so the common case still
+  // streams straight through with nothing buffered here; on the rare chance
+  // it's missing, fall back to reading the stream fully first so this never
+  // behaves worse than the old buffer-everything approach it replaced.
+  let uploadBody: ReadableStream<Uint8Array> | ArrayBuffer = body;
+  let length = contentLength;
+  if (length == null) {
+    uploadBody = await new Response(body).arrayBuffer();
+    length = uploadBody.byteLength;
+  }
+
+  const putRes = await fetch(uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": mimeType, "Content-Length": String(length) },
+    body: uploadBody,
+    ...(uploadBody instanceof ReadableStream ? { duplex: "half" } : {}),
+  } as RequestInit);
+  if (!putRes.ok) {
+    throw new Error(`Google Drive upload error (${putRes.status}): ${await putRes.text()}`);
+  }
+  const { id } = (await putRes.json()) as { id: string };
+  return id;
 }

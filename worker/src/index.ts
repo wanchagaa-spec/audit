@@ -337,7 +337,10 @@ async function handleTripMediaMessage(
     env,
     link.refreshToken,
     async (accessToken) => {
-      const { bytes, contentType } = await fetchLineMediaContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+      const { body, contentType, contentLength } = await fetchLineMediaContent(
+        messageId,
+        env.LINE_CHANNEL_ACCESS_TOKEN
+      );
       const timestamp = new Date(timestampMs);
       const dateFolder = bangkokDateFolderName(timestampMs);
       const ext = extensionForContentType(contentType, kind);
@@ -354,7 +357,7 @@ async function handleTripMediaMessage(
       // when someone sent many photos/clips at once, silently dropping
       // whichever ones ran out of budget. A flat folder needs neither.
       const filename = `${bangkokDateKey(timestamp)}_${messageId}.${ext}`;
-      await uploadFileToFolder(accessToken, trip.folderId, filename, bytes, contentType);
+      await uploadFileToFolder(accessToken, trip.folderId, filename, body, contentType, contentLength);
       const emoji = kind === "video" ? "🎬" : "📸";
       const noun = kind === "video" ? "คลิป" : "รูป";
       return `${emoji} เก็บ${noun}ในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
