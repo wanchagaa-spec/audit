@@ -11,6 +11,11 @@ const TIMEZONE = "Asia/Bangkok";
  * `calendar.events` scope — the caller should prompt the user to re-link. */
 export class InsufficientCalendarScopeError extends Error {}
 
+/** Thrown when the Google Cloud project itself hasn't turned the Calendar
+ * API on — re-linking the Google account can't fix this, only enabling the
+ * API in Google Cloud Console can (see worker/README.md setup step 3.5). */
+export class CalendarApiDisabledError extends Error {}
+
 async function calendarFetch(accessToken: string, path: string, init: RequestInit = {}): Promise<any> {
   const res = await fetch(`${CALENDAR_BASE}${path}`, {
     ...init,
@@ -21,7 +26,20 @@ async function calendarFetch(accessToken: string, path: string, init: RequestIni
     },
   });
   if (res.status === 401 || res.status === 403) {
-    throw new InsufficientCalendarScopeError("Google Calendar access not granted for this account yet");
+    const bodyText = await res.text();
+    // Google returns 403 for two very different problems that look
+    // identical from just the status code — telling them apart so the user
+    // gets a fix that actually applies:
+    //   - the Calendar API isn't enabled for the project at all (reason
+    //     "accessNotConfigured" / "has not been used in project ... or it
+    //     is disabled") — re-linking the Google account changes nothing.
+    //   - the access token genuinely lacks the calendar.events scope
+    //     (reason "ACCESS_TOKEN_SCOPE_INSUFFICIENT" / "insufficient
+    //     authentication scopes") — re-linking is the actual fix.
+    if (/accessNotConfigured|has (not|n't) been used in project|it is disabled/i.test(bodyText)) {
+      throw new CalendarApiDisabledError(bodyText);
+    }
+    throw new InsufficientCalendarScopeError(bodyText);
   }
   if (!res.ok) {
     throw new Error(`Google Calendar API error (${res.status}): ${await res.text()}`);
