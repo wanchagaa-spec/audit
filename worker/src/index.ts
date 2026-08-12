@@ -579,22 +579,20 @@ async function handleQueuedMediaBatch(
     }));
     await enqueueUploads(env.ACCOUNTS, jobs);
 
-    // Only one reply for the whole batch — the other events' reply tokens
-    // are simply left unused (LINE tokens that never get used just expire
+    // Deliberately no "received, uploading in background" reply here — the
+    // user only wants to hear back once files are actually done uploading.
+    // drainUploadQueue below sends that confirmation once the cron drain
+    // actually finishes the work. All of this batch's reply tokens are
+    // simply left unused (LINE tokens that never get used just expire
     // quietly on their own; there's no cost to skipping them).
-    await replyOrPush(
-      events[0],
-      `📥 รับไว้ ${events.length} ไฟล์แล้ว กำลังทยอยอัปโหลดเข้าทริป "${trip.name}" อยู่นะ จะแจ้งเมื่อเสร็จ`,
-      env.LINE_CHANNEL_ACCESS_TOKEN
-    );
   } catch (err) {
     // Last line of defense: without this, a failure here (most likely
-    // enqueueUploads or the final replyOrPush, if both the reply and its
-    // push fallback fail) would escape uncaught through handleWebhook's
-    // Promise.allSettled and could crash the whole invocation — silencing
-    // every other event in the same webhook call, not just this batch.
-    // Best-effort only; if this also fails there's genuinely nothing more
-    // that can be done for this specific attempt.
+    // enqueueUploads, or a KV lookup inside resolveMediaBatchContext) would
+    // escape uncaught through handleWebhook's Promise.allSettled and could
+    // crash the whole invocation — silencing every other event in the same
+    // webhook call, not just this batch. Best-effort only; if the fallback
+    // reply below also fails there's genuinely nothing more that can be
+    // done for this specific attempt.
     console.error("handleQueuedMediaBatch failed", err);
     await replyOrPush(
       events[0],

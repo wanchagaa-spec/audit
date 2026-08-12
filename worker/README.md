@@ -361,6 +361,19 @@ even a single photo now takes up to about a minute (the cron interval) to get it
 confirmation, instead of being instant — a deliberate choice of consistent, guaranteed-single
 messages over speed.
 
+That "received, uploading in background" reply turned out to be one flood source too many, even
+after the fix above: `handleQueuedMediaBatch` still sent it once per *webhook call*, and since LINE
+can still split one send into several webhook calls, a user could see several "รับไว้ N ไฟล์แล้ว..."
+messages back to back — each individually correct, together still noisy. The user asked for it to
+go away entirely: no "received" acknowledgment at all, just silence until the files are actually
+uploaded. `handleQueuedMediaBatch` no longer sends any reply on the success path — it enqueues and
+returns, leaving every reply token in the batch to expire unused (free, since an unused LINE reply
+token costs nothing). The only message the user now gets for a media send is `drainUploadQueue`'s
+own push summary once the cron drain actually finishes uploading, which was already the single
+place progress/completion gets reported and already coalesces correctly regardless of how many
+webhook calls contributed to what's queued. Net effect: exactly one message per accumulation,
+sent only once the work is done, with the same up-to-a-minute delay as before.
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never
