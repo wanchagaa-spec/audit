@@ -260,13 +260,40 @@ const recentReply = await handleTextMessage(env, lineUserId, "รายการ
 check("recent transactions list is returned", recentReply.includes("5 รายการล่าสุด"));
 
 const helpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
-check("help lists available commands", helpReply.includes("คำสั่งที่ใช้ได้ตอนนี้"));
+check(
+  "help lists commands grouped by feature area",
+  helpReply.includes("💰 จดเงิน") &&
+    helpReply.includes("📸 อัลบั้มรูปทริป") &&
+    helpReply.includes("📅 ปฏิทิน") &&
+    helpReply.includes("📔 ไดอารี่")
+);
 
 const weekReply = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
 check("week summary doesn't error", weekReply.includes("รายรับ"));
 
 const lastMonthReply = await handleTextMessage(env, lineUserId, "สรุปเดือนที่แล้ว", origin);
 check("last month summary doesn't error", lastMonthReply.length > 0);
+
+const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
+check(
+  "a plain greeting gets the 4-area welcome message, not the detailed help",
+  greetingReply.includes("4 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+);
+
+// A greeting sent mid-clarification must still cancel the pending question
+// (chatEngine's own behavior) instead of leaving it stuck in KV — regression
+// test for a bug caught while wiring up the welcome message.
+await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // triggers "จำนวนเงินเท่าไหร่คะ"
+const greetingWhilePendingReply = await handleTextMessage(env, lineUserId, "หวัดดีครับ", origin);
+check(
+  "a greeting mid-clarification cancels it via chatEngine, not the rich welcome",
+  !greetingWhilePendingReply.includes("4 เรื่องหลักๆ")
+);
+const afterGreetingReply = await handleTextMessage(env, lineUserId, "ข้าว 30", origin);
+check(
+  "the next real message after that isn't misread as answering the stale question",
+  afterGreetingReply.includes("30")
+);
 
 // 7. Trip photo album (PLAN.md 15.2): image with no active trip is rejected,
 // starting a trip creates the album-root + trip folders, images then upload

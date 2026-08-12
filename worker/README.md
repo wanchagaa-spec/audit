@@ -112,20 +112,43 @@ the *LIFF's own channel* — not the Messaging API channel that the webhook and 
 messages use — so linked accounts never matched later messages. The current design signs
 the id straight from the webhook event instead, which is always in the right scope.)
 
+### 6. Set up the rich menu (optional, but recommended)
+
+Adds a persistent 6-button image menu under the chat input in LINE — tapping a button just
+sends its text as an ordinary message, so it's a shortcut into commands the bot already
+understands, nothing new to build on the LINE side.
+
+1. Go to the repo's **Actions** tab → **"One-time - Set up LINE Rich Menu"** → **Run
+   workflow**. It uploads `worker/assets/rich-menu.png` and sets it as the default menu for
+   everyone (needs `LINE_CHANNEL_ACCESS_TOKEN`, already a repo secret from step 4).
+2. Open a chat with the bot in LINE — the menu shows up under the input within a minute or
+   so (may need to close and reopen the chat once).
+3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
+   the previous menu of the same name first, so it's safe to run repeatedly.
+
+The six buttons: วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด (recent
+transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar), ไดอารี่เดือนนี้มี
+อะไรบ้าง (this month's diary). They're all read/status commands on purpose — commands that
+need more input from you (`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`) can't be a
+single tap, so those stay as typed commands (see `วิธีใช้` for the full list).
+
 ## Try it
 
 Add the Official Account as a friend in LINE. First message should prompt you to tap a
 link to connect your Google account. After signing in, you'll see a "เชื่อมบัญชีสำเร็จ"
-page — close it and go back to the chat. From then on, just log things like
-"ซื้อกาแฟ 60", or ask it questions — see `src/commands.ts` for the full matcher list
-(each with several accepted phrasings), summarized by texting "วิธีใช้":
+page — close it and go back to the chat.
+
+Any greeting ("สวัสดี", "hi", "เริ่ม", ...) gets a short self-introduction covering the 4
+things the bot can do, with a pointer to "วิธีใช้" for the full command reference — see
+`WELCOME_MESSAGE` in `src/index.ts` and the grouped help text in `src/commands.ts`. From
+there, just log things like "ซื้อกาแฟ 60", or ask it questions:
 
 - สรุปวันนี้ / สรุปสัปดาห์นี้ / สรุปเดือนนี้ / สรุปเดือนที่แล้ว
 - เหลือเงินเท่าไหร่ (all-time cumulative balance) / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่
 - วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด (by count) / เฉลี่ยใช้เงินต่อวันเท่าไหร่
 - งบเหลือเท่าไหร่ (reads the Budgets tab, set from the web app's Settings)
 - ค้นหา &lt;คำ&gt; / รายการล่าสุด
-- วิธีใช้ (lists all of the above)
+- วิธีใช้ (lists everything above plus trip/calendar/diary commands, grouped by feature)
 
 All of these are plain Google Sheets reads/aggregations over data already in the
 spreadsheet — no external AI involved, so they stay within the free-forever design (see
@@ -200,6 +223,12 @@ after changing `src/index.ts`, `commands.ts`, or `state.ts` to catch regressions
 specifically checks that the signed `state` param on the generated Google auth link
 decodes back to the same LINE user id the webhook event carried, which is the exact bug
 class the LIFF removal above fixed.
+
+To tweak the rich menu's design, edit `assets/generate-rich-menu.py` (needs
+`pip install pillow`) and run it — it writes `assets/rich-menu.png` from scratch every
+time, so it's always reproducible from source rather than being an opaque binary someone
+has to redraw by hand. Then re-run the "One-time - Set up LINE Rich Menu" Action (step 6
+above) to publish it.
 
 ## Known limitations (documented honestly, not blockers)
 

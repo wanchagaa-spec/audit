@@ -1,4 +1,4 @@
-import { handleUserMessage } from "../../app/src/lib/chatEngine.ts";
+import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { InsufficientCalendarScopeError } from "./calendar.ts";
 import { matchCalendarCommand } from "./calendarCommands.ts";
@@ -36,6 +36,17 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   STATE_SIGNING_SECRET: string;
 }
+
+const WELCOME_MESSAGE = [
+  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 4 เรื่องหลักๆ:",
+  "",
+  "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
+  "📸 เก็บรูปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป/วันที่",
+  "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
+  "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
+  "",
+  "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
+].join("\n");
 
 function html(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
@@ -192,6 +203,17 @@ export async function handleTextMessage(
   }
 
   const pending = await getPending(env.ACCOUNTS, lineUserId);
+
+  // Checked after every real command above so "วิธีใช้"/"help" (also in
+  // chatEngine's GREETINGS) still get the detailed list from matchCommand
+  // instead of being shadowed by this shorter welcome blurb — and only when
+  // there's no dangling money clarification, so a stray greeting mid-flow
+  // still cancels it properly via chatEngine's own greeting handling instead
+  // of leaving `pending` stuck in KV.
+  if (!pending && isGreeting(text)) {
+    return WELCOME_MESSAGE;
+  }
+
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, lineUserId, result.pending);
 
