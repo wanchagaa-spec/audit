@@ -205,15 +205,23 @@ used to fetch the whole thing from LINE into an `ArrayBuffer`, wrap it in a `Blo
 Drive multipart metadata, and only then start uploading — doubling the total wait (download
 fully, then upload fully) and risking the Worker's memory limit for a big enough file. A real
 report matched this exactly: a 19-second clip uploaded fine, a same-batch ~1-minute clip that
-had already finished sending in LINE never got a bot reply at all. `uploadFileToFolder` in
-`src/drive.ts` now streams the file straight from the LINE response into Drive's **resumable
-upload** protocol (`uploadType=resumable`) instead of buffering it: an init request carries the
-metadata (filename + trip folder) up front and returns a session URL, then the raw bytes stream
-straight into that session (`res.body` piped directly into `fetch`'s `body`). Deliberately not
-Drive's simpler `uploadType=media` — Google documents that one for files under ~5MB, the
-opposite of the case this exists for — and since metadata is set at session-init rather than in
-a follow-up call, a failed content upload leaves nothing behind in Drive at all, instead of an
-orphaned, unnamed file sitting in the account's root.
+had already finished sending in LINE never got a bot reply at all.
+
+`uploadFileToFolder` in `src/drive.ts` fixes this by streaming instead of buffering, but stays a
+**single request per file** — Drive's regular multipart upload (`uploadType=multipart`), the
+same endpoint used from the start, just with the request body assembled as a stream
+(`concatStreams`) instead of a fully-buffered `Blob`. An earlier version of this fix switched to
+Drive's resumable upload protocol instead, since it streams naturally — but resumable needs two
+requests per file (an init call, then the content), and doubling the Drive request count per
+file turned out to matter a lot for *large batches*: a real report of 37 photos sent in one LINE
+multi-select came back with 2 silently missing from Drive, no reply and no error for either —
+the two-requests-per-file version could need ~75 Drive subrequests for one webhook call, enough
+to silently exceed Cloudflare's per-request subrequest budget, cutting the Worker's invocation
+off outright rather than failing in a way the code could catch and reply to. Streaming a
+multipart body keeps both properties that turned out to matter: nothing is buffered in memory
+for a single large file, and a big batch still costs exactly one Drive request per file. It also
+stays atomic — metadata and content go in the same request, so a failure never leaves an
+orphaned, unnamed file behind in Drive the way a two-step upload could.
 
 ### Calendar (PLAN.md 15.3)
 

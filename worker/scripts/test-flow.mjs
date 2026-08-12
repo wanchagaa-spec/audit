@@ -26,7 +26,6 @@ const pushes = []; // captures push messages (the reply-token-expired fallback)
 
 const driveFolders = []; // simulates Drive folders: {id, name, parentId}
 const driveUploads = []; // simulates uploaded files: {id, folderId}
-const resumableSessions = new Map(); // uploadId -> {name, parentId} set at session-init time
 let driveIdSeq = 0;
 function nextDriveId(prefix) {
   driveIdSeq += 1;
@@ -42,7 +41,8 @@ let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
 
-let simulateResumablePutFailure = false; // one-shot: fails the next resumable upload's content step
+let simulateDriveUploadFailure = false; // one-shot: fails the next Drive media upload request
+let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
@@ -137,36 +137,42 @@ globalThis.fetch = async (url, init = {}) => {
       return new Response(JSON.stringify({ id }), { status: 200 });
     }
   }
-  if (
-    u.startsWith("https://www.googleapis.com/upload/drive/v3/files") &&
-    new URL(u).searchParams.get("uploadType") === "resumable" &&
-    (!init.method || init.method === "POST")
-  ) {
-    // Resumable upload, step 1: the metadata (name + parent folder) is set
-    // here, at session-init time, not in a follow-up call — mirrors the real
-    // API, where nothing is actually created in Drive until step 2 succeeds.
-    const body = JSON.parse(init.body);
-    const uploadId = nextDriveId("session");
-    resumableSessions.set(uploadId, { name: body.name, parentId: body.parents?.[0] });
-    return new Response(null, {
-      status: 200,
-      headers: { Location: `https://www.googleapis.com/upload/drive/v3/files?upload_id=${uploadId}` },
-    });
-  }
-  if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files") && new URL(u).searchParams.get("upload_id")) {
-    if (simulateResumablePutFailure) {
-      simulateResumablePutFailure = false;
+  if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files")) {
+    driveUploadRequestCount++;
+    if (simulateDriveUploadFailure) {
+      simulateDriveUploadFailure = false;
       return new Response(JSON.stringify({ error: "simulated content upload failure" }), { status: 500 });
     }
-    // Resumable upload, step 2: the actual bytes, streamed straight from the
-    // LINE content mock's response body. Reading the stream's full size here
-    // proves the streaming path doesn't drop or truncate bytes along the way.
-    const uploadId = new URL(u).searchParams.get("upload_id");
-    const session = resumableSessions.get(uploadId);
-    const uploadedBytes = init.body ? await new Response(init.body).arrayBuffer() : new ArrayBuffer(0);
+    // Single-request streamed multipart upload: metadata + binary content in
+    // one body, assembled as a stream (see concatStreams in drive.ts) rather
+    // than a fully-buffered Blob. Decoded as latin1 here (not the default
+    // UTF-8), which maps each byte to one code point 1:1 — the only way to
+    // losslessly round-trip arbitrary binary content back out of a JS string
+    // so the byte-count regression check below stays accurate.
+    const contentType = init.headers?.["Content-Type"] ?? "";
+    const boundary = contentType.match(/boundary=(.+)$/)?.[1];
+    const bodyBuffer = init.body ? Buffer.from(await new Response(init.body).arrayBuffer()) : Buffer.alloc(0);
+    const text = bodyBuffer.toString("latin1");
+    const marker = `--${boundary}`;
+    let name;
+    let parentId;
+    let payloadSize = 0;
+    try {
+      const metaPart = text.split(marker)[1];
+      const metaJson = metaPart.split("\r\n\r\n")[1].split("\r\n--")[0];
+      const meta = JSON.parse(metaJson);
+      name = meta.name;
+      parentId = meta.parents?.[0];
+
+      const secondBoundaryIndex = text.indexOf(marker, text.indexOf(marker) + marker.length);
+      const contentHeaderEnd = text.indexOf("\r\n\r\n", secondBoundaryIndex) + 4;
+      const closingBoundaryIndex = text.lastIndexOf(`\r\n--${boundary}--`);
+      payloadSize = closingBoundaryIndex - contentHeaderEnd;
+    } catch {
+      // best-effort parse for the test mock only
+    }
     const id = nextDriveId("file");
-    driveUploads.push({ id, name: session?.name, parentId: session?.parentId, size: uploadedBytes.byteLength });
-    resumableSessions.delete(uploadId);
+    driveUploads.push({ id, name, parentId, size: payloadSize });
     return new Response(JSON.stringify({ id }), { status: 200 });
   }
   if (u.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
@@ -483,14 +489,13 @@ check(
   driveUploads.at(-1).size === 2 * 1024 * 1024
 );
 
-// Regression test for a review finding on the streaming-upload PR: resumable
-// upload's metadata (name + parent folder) is set at session-init time, and
-// nothing is actually created in Drive until the content upload (step 2)
-// itself succeeds — unlike the earlier simple-upload-then-rename approach,
-// where a failed rename/move step left an orphaned, unnamed file sitting in
-// Drive's root forever. A failure here must leave no trace in Drive at all.
+// Regression test for a review finding on the streaming-upload work: the
+// multipart request carries metadata (name + parent folder) and content
+// together in one atomic request, so a failure never leaves an orphaned,
+// unnamed file sitting in Drive's root — nothing is created at all unless
+// the whole request succeeds.
 const uploadsBeforeFailedPut = driveUploads.length;
-simulateResumablePutFailure = true;
+simulateDriveUploadFailure = true;
 let failedUploadThrew = false;
 try {
   await handleVideoMessage(env, lineUserId, "vid-willfail", Date.now(), origin);
@@ -519,6 +524,52 @@ check("all 12 batched uploads succeeded", driveUploads.length === uploadsBeforeB
 check(
   "the whole batch reused one cached access token instead of refreshing per file",
   tokenCacheForBatch.size === 1
+);
+
+// Regression test for a real report: sending 37 photos in one LINE
+// multi-select left 2 of them silently missing from Drive, with total
+// silence (no reply, no error) for those two — traced to an earlier version
+// of the streaming-upload fix using Drive's resumable protocol, which needs
+// 2 Drive requests per file (init + content). A 37-file batch then needed
+// ~75 Drive subrequests in one webhook call, which can silently exceed
+// Cloudflare's per-request subrequest budget for whichever files land past
+// the cutoff — the Worker's invocation gets cut off outright, not a normal
+// catchable error, so those events never get a reply either. Reverted to a
+// single streamed multipart request per file, so a big batch costs exactly
+// 1 Drive subrequest per file again. Runs through the real handleWebhook
+// entry point (concurrent processing, real signature verification) with 40
+// photos in one call — bigger than the real report — to exercise this
+// directly rather than just trusting the request-count math.
+const bigBatchSize = 40;
+const bigBatchEvents = Array.from({ length: bigBatchSize }, (_, i) => ({
+  type: "message",
+  message: { type: "image", id: `bigbatch-${i}` },
+  source: { type: "user", userId: lineUserId },
+  replyToken: `reply-bigbatch-${i}`,
+  timestamp: Date.now(),
+}));
+const bigBatchRawBody = JSON.stringify({ events: bigBatchEvents });
+const bigBatchSignature = await signLineBody(bigBatchRawBody, env.LINE_CHANNEL_SECRET);
+const bigBatchRequest = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": bigBatchSignature },
+  body: bigBatchRawBody,
+});
+const uploadsBeforeBigBatch = driveUploads.length;
+const repliesBeforeBigBatch = replies.length;
+const driveUploadRequestsBeforeBigBatch = driveUploadRequestCount;
+await handleWebhook(bigBatchRequest, env);
+check(
+  `all ${bigBatchSize} photos in one large multi-select batch made it into Drive`,
+  driveUploads.length === uploadsBeforeBigBatch + bigBatchSize
+);
+check(
+  `all ${bigBatchSize} photos got a confirmation reply — none silently dropped`,
+  replies.length === repliesBeforeBigBatch + bigBatchSize
+);
+check(
+  "each file cost exactly one Drive upload subrequest, not two",
+  driveUploadRequestCount === driveUploadRequestsBeforeBigBatch + bigBatchSize
 );
 
 const switchPromptReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
