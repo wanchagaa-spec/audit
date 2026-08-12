@@ -23,8 +23,16 @@ const sheetRows = []; // simulates the Transactions tab
 const budgetRows = []; // simulates the Budgets tab
 const replies = []; // captures what would have been sent back to LINE
 
+const driveFolders = []; // simulates Drive folders: {id, name, parentId}
+const driveUploads = []; // simulates uploaded files: {id, folderId}
+let driveIdSeq = 0;
+function nextDriveId(prefix) {
+  driveIdSeq += 1;
+  return `${prefix}-${driveIdSeq}`;
+}
+
 const realFetch = fetch;
-globalThis.fetch = async (url, init) => {
+globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
 
   if (u.includes("oauth2.googleapis.com/token")) {
@@ -54,11 +62,40 @@ globalThis.fetch = async (url, init) => {
     replies.push(body.messages[0].text);
     return new Response("{}", { status: 200 });
   }
+  if (u.startsWith("https://api-data.line.me/v2/bot/message/") && u.endsWith("/content")) {
+    return new Response(new Uint8Array([1, 2, 3, 4]).buffer, {
+      status: 200,
+      headers: { "content-type": "image/jpeg" },
+    });
+  }
+  if (u.startsWith("https://www.googleapis.com/drive/v3/files")) {
+    const parsed = new URL(u);
+    if (!init.method || init.method === "GET") {
+      const q = parsed.searchParams.get("q") ?? "";
+      const nameMatch = q.match(/name='((?:[^'\\]|\\.)*)'/);
+      const parentMatch = q.match(/'([^']+)' in parents/);
+      const name = nameMatch ? nameMatch[1].replace(/\\'/g, "'") : null;
+      const parentId = parentMatch ? parentMatch[1] : null;
+      const matches = driveFolders.filter((f) => f.name === name && f.parentId === parentId);
+      return new Response(JSON.stringify({ files: matches.map((f) => ({ id: f.id })) }), { status: 200 });
+    }
+    if (init.method === "POST") {
+      const body = JSON.parse(init.body);
+      const id = nextDriveId("folder");
+      driveFolders.push({ id, name: body.name, parentId: body.parents?.[0] ?? "root" });
+      return new Response(JSON.stringify({ id }), { status: 200 });
+    }
+  }
+  if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files")) {
+    const id = nextDriveId("file");
+    driveUploads.push({ id });
+    return new Response(JSON.stringify({ id }), { status: 200 });
+  }
 
   throw new Error(`unexpected fetch to ${u}`);
 };
 
-const { handleTextMessage } = await import("../src/index.ts");
+const { handleTextMessage, handleImageMessage } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
 
@@ -163,6 +200,59 @@ check("week summary doesn't error", weekReply.includes("รายรับ"));
 
 const lastMonthReply = await handleTextMessage(env, lineUserId, "สรุปเดือนที่แล้ว", origin);
 check("last month summary doesn't error", lastMonthReply.length > 0);
+
+// 7. Trip photo album (PLAN.md 15.2): image with no active trip is rejected,
+// starting a trip creates the album-root + trip folders, images then upload
+// into a date subfolder, switching trips needs confirmation, and ending works.
+const uploadsBeforeTrip = driveUploads.length;
+const noTripImageReply = await handleImageMessage(env, lineUserId, "msg-1", Date.now(), origin);
+check("image with no active trip asks to start one first", noTripImageReply.includes("เริ่มทริป"));
+check("no upload happened without an active trip", driveUploads.length === uploadsBeforeTrip);
+
+const startTripReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ทะเล", origin);
+check("starting a trip confirms the name", startTripReply.includes('ทริป "ทะเล"'));
+check("album root folder was created", driveFolders.some((f) => f.name === "จดบัญชี - อัลบั้มทริป"));
+check("trip folder was created under the album root", driveFolders.some((f) => f.name === "ทะเล"));
+
+const statusReply1 = await handleTextMessage(env, lineUserId, "ทริปตอนนี้", origin);
+check("status reports the open trip", statusReply1.includes("ทะเล"));
+
+const photoReply = await handleImageMessage(env, lineUserId, "msg-2", Date.now(), origin);
+check("photo upload confirms the trip name", photoReply.includes('ทริป "ทะเล"'));
+check("an upload was recorded", driveUploads.length === uploadsBeforeTrip + 1);
+check(
+  "a date subfolder was created under the trip folder",
+  driveFolders.some((f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id)
+);
+
+const switchPromptReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
+check(
+  "starting a new trip while one is open asks to confirm first",
+  switchPromptReply.includes("ทะเล") && switchPromptReply.includes("ภูเขา")
+);
+
+const declineReply = await handleTextMessage(env, lineUserId, "ซื้อกาแฟ 60", origin);
+check("declining the switch still logs the unrelated message as an expense", declineReply.includes("60"));
+const statusAfterDecline = await handleTextMessage(env, lineUserId, "ทริปตอนนี้", origin);
+check("declined switch leaves the original trip open", statusAfterDecline.includes("ทะเล"));
+
+const switchPromptReply2 = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
+check("re-prompts to switch trips", switchPromptReply2.includes("ยืนยัน"));
+const confirmSwitchReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the switch closes the old trip and opens the new one",
+  confirmSwitchReply.includes("ทะเล") && confirmSwitchReply.includes("ภูเขา")
+);
+const statusAfterSwitch = await handleTextMessage(env, lineUserId, "ทริปตอนนี้", origin);
+check("status now reports the new trip", statusAfterSwitch.includes("ภูเขา"));
+
+const endTripReply = await handleTextMessage(env, lineUserId, "จบทริป", origin);
+check("ending the trip confirms the name", endTripReply.includes("ภูเขา"));
+const statusAfterEnd = await handleTextMessage(env, lineUserId, "ทริปตอนนี้", origin);
+check("status reports no open trip after ending", statusAfterEnd.includes("ไม่มีทริป"));
+
+const imageAfterEndReply = await handleImageMessage(env, lineUserId, "msg-3", Date.now(), origin);
+check("image after ending the trip asks to start one again", imageAfterEndReply.includes("เริ่มทริป"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

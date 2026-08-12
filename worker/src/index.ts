@@ -1,11 +1,27 @@
 import { handleUserMessage } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
-import { isTextMessageEvent, replyToLine, verifyLineSignature, type LineWebhookBody } from "./line.ts";
+import {
+  fetchLineImageContent,
+  isImageMessageEvent,
+  isTextMessageEvent,
+  replyToLine,
+  verifyLineSignature,
+  type LineWebhookBody,
+} from "./line.ts";
 import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
-import { getAccountLink, getPending, setAccountLink, setPending } from "./state.ts";
+import {
+  getAccountLink,
+  getActiveTrip,
+  getPending,
+  getPendingTripSwitch,
+  setAccountLink,
+  setPending,
+} from "./state.ts";
 import { signState, verifyState } from "./signedState.ts";
 import { matchCommand } from "./commands.ts";
+import { matchTripCommand, resolveTripSwitchConfirmation } from "./tripCommands.ts";
+import { bangkokDateFolderName, findOrCreateFolder, uploadImageToFolder } from "./drive.ts";
 
 export interface Env {
   ACCOUNTS: KVNamespace;
@@ -87,6 +103,18 @@ async function withFreshAccessToken<T>(
   return fn(accessToken);
 }
 
+async function buildUnlinkedPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
+  // The state param embeds this exact webhook-scoped lineUserId, signed, so
+  // /oauth/callback links the account to the same id future messages use.
+  const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
+  const authorizeUrl = buildGoogleAuthorizeUrl({
+    clientId: env.GOOGLE_CLIENT_ID,
+    redirectUri: `${origin}/oauth/callback`,
+    state,
+  });
+  return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
+}
+
 export async function handleTextMessage(
   env: Env,
   lineUserId: string,
@@ -94,16 +122,23 @@ export async function handleTextMessage(
   origin: string
 ): Promise<string> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
-  if (!link) {
-    // The state param embeds this exact webhook-scoped lineUserId, signed, so
-    // /oauth/callback links the account to the same id future messages use.
-    const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
-    const authorizeUrl = buildGoogleAuthorizeUrl({
-      clientId: env.GOOGLE_CLIENT_ID,
-      redirectUri: `${origin}/oauth/callback`,
-      state,
-    });
-    return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
+  if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
+
+  const pendingSwitch = await getPendingTripSwitch(env.ACCOUNTS, lineUserId);
+  if (pendingSwitch) {
+    const switchReply = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+      resolveTripSwitchConfirmation({ accessToken, kv: env.ACCOUNTS, lineUserId }, text, pendingSwitch)
+    );
+    if (switchReply) return switchReply;
+    // Not an affirmative reply — the switch prompt is cancelled, fall through
+    // and handle `text` as an ordinary message instead.
+  }
+
+  const tripHandler = await matchTripCommand(text);
+  if (tripHandler) {
+    return withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+      tripHandler({ accessToken, kv: env.ACCOUNTS, lineUserId })
+    );
   }
 
   const reportHandler = await matchCommand(text);
@@ -138,6 +173,31 @@ export async function handleTextMessage(
   return result.botMessage;
 }
 
+export async function handleImageMessage(
+  env: Env,
+  lineUserId: string,
+  messageId: string,
+  timestampMs: number,
+  origin: string
+): Promise<string> {
+  const link = await getAccountLink(env.ACCOUNTS, lineUserId);
+  if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
+
+  const trip = await getActiveTrip(env.ACCOUNTS, lineUserId);
+  if (!trip) {
+    return 'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูปตามมาได้เลย';
+  }
+
+  return withFreshAccessToken(env, link.refreshToken, async (accessToken) => {
+    const { bytes, contentType } = await fetchLineImageContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+    const dateFolder = bangkokDateFolderName(timestampMs);
+    const dayFolderId = await findOrCreateFolder(accessToken, dateFolder, trip.folderId);
+    const ext = contentType.includes("png") ? "png" : "jpg";
+    await uploadImageToFolder(accessToken, dayFolderId, `${messageId}.${ext}`, bytes, contentType);
+    return `📸 เก็บรูปในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;
+  });
+}
+
 async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-line-signature");
@@ -148,16 +208,28 @@ async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const origin = new URL(request.url).origin;
 
   for (const event of body.events) {
-    if (!isTextMessageEvent(event)) continue;
     try {
-      const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin);
-      await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      if (isTextMessageEvent(event)) {
+        const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin);
+        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      } else if (isImageMessageEvent(event)) {
+        const reply = await handleImageMessage(
+          env,
+          event.source.userId,
+          event.message.id,
+          event.timestamp,
+          origin
+        );
+        await replyToLine(event.replyToken, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+      }
     } catch (err) {
-      await replyToLine(
-        event.replyToken,
-        "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
-        env.LINE_CHANNEL_ACCESS_TOKEN
-      ).catch(() => undefined);
+      if (isTextMessageEvent(event) || isImageMessageEvent(event)) {
+        await replyToLine(
+          event.replyToken,
+          "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
+          env.LINE_CHANNEL_ACCESS_TOKEN
+        ).catch(() => undefined);
+      }
       console.error("webhook handling failed", err);
     }
   }

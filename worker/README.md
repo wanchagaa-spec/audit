@@ -123,6 +123,26 @@ spreadsheet — no external AI involved, so they stay within the free-forever de
 PLAN.md section 14 for the tradeoff notes on adding an AI fallback for messages none of
 these cover).
 
+### Trip photo albums (PLAN.md 15.2)
+
+Send photos to the bot and they're organized into Google Drive automatically, grouped by
+trip and day:
+
+- `เริ่มทริป <ชื่อ>` — e.g. "เริ่มทริป ทะเล" — starts a trip session. Every photo you send
+  after this uploads automatically into that trip's Drive folder, in a subfolder for the
+  day it was sent (`จดบัญชี - อัลบั้มทริป/ทะเล/1-1-2569/`, ...), no captioning needed.
+- `ทริปตอนนี้` — checks whether a trip is still open (in case you forgot to close one).
+- `จบทริป` — closes the current trip. Sending a photo with no trip open gets rejected with
+  a reminder to start one first, rather than uploading somewhere generic.
+- Starting a new trip while one is already open asks for confirmation first ("ยังไม่ได้ปิด
+  ทริป ... จะปิดแล้วเริ่ม ... เลยไหม") instead of silently switching — reply "ใช่" to confirm,
+  anything else cancels the switch and the original trip stays open.
+
+Uses the same `drive.file` OAuth scope already granted for the spreadsheet, so no extra
+Google consent step is needed for this feature. See the callout in PLAN.md 15.2 for why
+there's no "type a folder name alongside the photo" option — LINE doesn't attach captions
+to image messages, they always arrive as separate events.
+
 ## Local development
 
 ```bash
@@ -150,3 +170,7 @@ class the LIFF removal above fixed.
 - Group books (inviting others via LINE) aren't wired up yet — only personal books.
 - The monthly summary is a plain text message, not a chart image (see PLAN.md 14.3 for
   the image-generation option if wanted later).
+- Trip photos only upload while a trip is open (`เริ่มทริป` first) — there's no "attach a
+  folder name to a single stray photo" fallback, since LINE doesn't support captions on
+  image messages (see PLAN.md 15.2). No auto-timeout closes a forgotten trip either; use
+  `ทริปตอนนี้` to check.

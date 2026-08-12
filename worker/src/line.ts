@@ -3,10 +3,19 @@ export interface LineMessageEvent {
   message: { type: "text"; text: string };
   source: { type: "user"; userId: string };
   replyToken: string;
+  timestamp: number;
+}
+
+export interface LineImageMessageEvent {
+  type: "message";
+  message: { type: "image"; id: string };
+  source: { type: "user"; userId: string };
+  replyToken: string;
+  timestamp: number;
 }
 
 export interface LineWebhookBody {
-  events: Array<LineMessageEvent | { type: string; [key: string]: unknown }>;
+  events: Array<LineMessageEvent | LineImageMessageEvent | { type: string; [key: string]: unknown }>;
 }
 
 function toBase64(bytes: ArrayBuffer): string {
@@ -49,6 +58,32 @@ export function isTextMessageEvent(
     (event as LineMessageEvent).message?.type === "text" &&
     (event as LineMessageEvent).source?.type === "user"
   );
+}
+
+export function isImageMessageEvent(
+  event: LineWebhookBody["events"][number]
+): event is LineImageMessageEvent {
+  return (
+    event.type === "message" &&
+    "message" in event &&
+    (event as LineImageMessageEvent).message?.type === "image" &&
+    (event as LineImageMessageEvent).source?.type === "user"
+  );
+}
+
+export async function fetchLineImageContent(
+  messageId: string,
+  channelAccessToken: string
+): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+  const res = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+    headers: { Authorization: `Bearer ${channelAccessToken}` },
+  });
+  if (!res.ok) {
+    throw new Error(`LINE content API error (${res.status}): ${await res.text()}`);
+  }
+  const contentType = res.headers.get("content-type") ?? "image/jpeg";
+  const bytes = await res.arrayBuffer();
+  return { bytes, contentType };
 }
 
 export async function replyToLine(
