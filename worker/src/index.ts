@@ -1,6 +1,6 @@
 import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
-import { InsufficientCalendarScopeError } from "./calendar.ts";
+import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";
 import { matchCalendarCommand } from "./calendarCommands.ts";
 import { matchCommand } from "./commands.ts";
 import { resolveConfirmation } from "./confirmations.ts";
@@ -146,6 +146,14 @@ async function buildCalendarRelinkPrompt(env: Env, lineUserId: string, origin: s
   return `ต้องเชื่อมบัญชี Google ใหม่อีกครั้งเพื่อขอสิทธิ์ปฏิทินเพิ่ม (บัญชีเดิมยังไม่มีสิทธิ์นี้) กดลิงก์นี้แล้วเลือกบัญชีเดิมได้เลย ข้อมูลเก่าจะไม่หายนะ\n${authorizeUrl}`;
 }
 
+// A completely different problem from insufficient scope: the Calendar API
+// itself is switched off at the Google Cloud project level. Re-linking the
+// Google account does nothing here — every account, old or freshly
+// reconnected, will keep getting a 403 until an admin flips it on in Google
+// Cloud Console (see worker/README.md setup step 3.5).
+const CALENDAR_API_DISABLED_MESSAGE =
+  'ปฏิทินยังใช้ไม่ได้ เพราะ "Google Calendar API" ยังไม่ได้เปิดใช้งานในโปรเจกต์ Google Cloud (คนละเรื่องกับสิทธิ์ของบัญชีที่เชื่อมไว้ เชื่อมบัญชีใหม่ไม่ช่วย) ผู้ดูแลต้องไปที่ Google Cloud Console → APIs & Services → Library → ค้นหา "Google Calendar API" → กด Enable แล้วลองพิมพ์คำสั่งปฏิทินใหม่อีกครั้ง';
+
 export async function handleTextMessage(
   env: Env,
   lineUserId: string,
@@ -190,6 +198,9 @@ export async function handleTextMessage(
       return await withFreshAccessToken(env, link.refreshToken, (accessToken) => diaryHandler(actionCtx(accessToken)));
     }
   } catch (err) {
+    if (err instanceof CalendarApiDisabledError) {
+      return CALENDAR_API_DISABLED_MESSAGE;
+    }
     if (err instanceof InsufficientCalendarScopeError) {
       return buildCalendarRelinkPrompt(env, lineUserId, origin);
     }

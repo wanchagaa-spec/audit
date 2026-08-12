@@ -34,6 +34,7 @@ function nextDriveId(prefix) {
 const calendarEvents = []; // simulates Google Calendar: {id, summary, start:{dateTime}, end:{dateTime}}
 let calendarIdSeq = 0;
 let simulateInsufficientCalendarScope = false;
+let simulateCalendarApiDisabled = false;
 
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
@@ -101,6 +102,19 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
     if (simulateInsufficientCalendarScope) return new Response("forbidden", { status: 403 });
+    if (simulateCalendarApiDisabled) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 403,
+            message:
+              "Google Calendar API has not been used in project 123 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/calendar-json.googleapis.com/overview",
+            errors: [{ reason: "accessNotConfigured" }],
+          },
+        }),
+        { status: 403 }
+      );
+    }
     const parsed = new URL(u);
     if (parsed.pathname === "/calendar/v3/calendars/primary/events") {
       if (!init.method || init.method === "GET") {
@@ -442,6 +456,18 @@ check(
   relinkReply.includes("สิทธิ์ปฏิทินเพิ่ม") && relinkReply.includes("accounts.google.com")
 );
 simulateInsufficientCalendarScope = false;
+
+// Regression test for a real bug hit in production: a disabled Calendar API
+// also returns 403, but re-linking (the message above) can't fix that — the
+// bot must tell the difference and point at the actual fix instead of
+// sending the user through a re-link loop that will never succeed.
+simulateCalendarApiDisabled = true;
+const apiDisabledReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรวันนี้", origin);
+check(
+  "a disabled Calendar API gets an 'enable it in Cloud Console' message, not a re-link loop",
+  apiDisabledReply.includes("Google Cloud Console") && !apiDisabledReply.includes("เชื่อมบัญชี Google ใหม่อีกครั้ง")
+);
+simulateCalendarApiDisabled = false;
 
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
