@@ -77,6 +77,8 @@ const diaryRows = []; // simulates the Diary tab
 let simulateDriveUploadFailureCount = 0; // decremented each time; while > 0, fails the next Drive media upload request(s)
 let simulatePushFailureToo = false; // one-shot: fails the next push too (pair with an "expired" replyToken to simulate total messaging failure)
 let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to the upload queue, to exercise handleQueuedMediaBatch's outer catch
+let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
+const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
@@ -295,6 +297,22 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.includes("Diary!A2:E100000")) {
     return new Response(JSON.stringify({ values: diaryRows }), { status: 200 });
   }
+  if (u.includes("generativelanguage.googleapis.com")) {
+    if (simulateGeminiFailure) {
+      simulateGeminiFailure = false;
+      return new Response(JSON.stringify({ error: { message: "simulated Gemini failure" } }), { status: 500 });
+    }
+    const body = JSON.parse(init.body);
+    const systemInstruction = body.systemInstruction?.parts?.[0]?.text ?? "";
+    const question = body.contents?.[0]?.parts?.[0]?.text ?? "";
+    geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
+    // A canned (not truly AI-generated) answer that echoes the question back,
+    // so tests can assert the real question made it all the way through.
+    return new Response(
+      JSON.stringify({ candidates: [{ content: { parts: [{ text: `[mock AI answer] คำถาม: ${question}` }] } }] }),
+      { status: 200 }
+    );
+  }
 
   throw new Error(`unexpected fetch to ${u}`);
 };
@@ -340,6 +358,7 @@ const env = {
   STATE_SIGNING_SECRET: "test-state-secret",
   LINE_CHANNEL_SECRET: "test-channel-secret",
   LINE_CHANNEL_ACCESS_TOKEN: "test-channel-access-token",
+  GEMINI_API_KEY: "test-gemini-key",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -450,7 +469,8 @@ check(
   helpReply.includes("💰 จดเงิน") &&
     helpReply.includes("📸 อัลบั้มรูปทริป") &&
     helpReply.includes("📅 ปฏิทิน") &&
-    helpReply.includes("📔 ไดอารี่")
+    helpReply.includes("📔 ไดอารี่") &&
+    helpReply.includes("🤖 ถามคำถาม/วิเคราะห์")
 );
 
 const weekReply = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
@@ -462,7 +482,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("4 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("5 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -472,7 +492,7 @@ await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // tr
 const greetingWhilePendingReply = await handleTextMessage(env, lineUserId, "หวัดดีครับ", origin);
 check(
   "a greeting mid-clarification cancels it via chatEngine, not the rich welcome",
-  !greetingWhilePendingReply.includes("4 เรื่องหลักๆ")
+  !greetingWhilePendingReply.includes("5 เรื่องหลักๆ")
 );
 const afterGreetingReply = await handleTextMessage(env, lineUserId, "ข้าว 30", origin);
 check(
@@ -714,7 +734,7 @@ check(
 check(
   "an unrelated text event in the same webhook call still gets its normal reply",
   replies.length > repliesBeforeTotalFailure &&
-    replies.slice(repliesBeforeTotalFailure).some((r) => r.includes("4 เรื่องหลักๆ"))
+    replies.slice(repliesBeforeTotalFailure).some((r) => r.includes("5 เรื่องหลักๆ"))
 );
 
 // Regression test for a real report backed by Cloudflare's own request logs:
@@ -1182,6 +1202,54 @@ check(
   "the multi-line entry is saved with the line break intact",
   multilineDiaryConfirmReply.includes("บันทึกไดอารี่แล้ว") &&
     diaryRows.some((r) => r[3] === "วันนี้อากาศดีมาก\nไปทะเลด้วย")
+);
+
+// AI Q&A / analysis (PLAN.md 15.6): "ถาม <คำถาม>" and "วิเคราะห์" route to
+// Gemini instead of the money parser or any hardcoded report — exercises the
+// full path (matchAiCommand -> aggregate Sheets/Diary data -> askGemini) and
+// its guardrails: an empty question gets a usage hint without ever calling
+// Gemini, a Gemini failure surfaces a friendly fallback instead of crashing,
+// and the prompt sent to Gemini only ever contains precomputed totals for
+// money questions, never raw arithmetic left for the model to do itself.
+const aiNoQuestionReply = await handleTextMessage(env, lineUserId, "ถาม", origin);
+check(
+  "asking with no question text gets a usage hint instead of calling Gemini",
+  aiNoQuestionReply.includes("ถาม เดือนนี้") && geminiRequests.length === 0
+);
+
+const geminiRequestsBeforeAsk = geminiRequests.length;
+const aiAskReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+check(
+  "a real question is forwarded to Gemini and its answer is returned as-is",
+  aiAskReply.includes("[mock AI answer]") && aiAskReply.includes("เดือนนี้ใช้เงินหมวดไหนเยอะสุด")
+);
+check("exactly one Gemini request was made for the question", geminiRequests.length === geminiRequestsBeforeAsk + 1);
+const lastGeminiRequest = geminiRequests.at(-1);
+check("the Gemini request authenticates with the configured API key", lastGeminiRequest.apiKey === "test-gemini-key");
+check(
+  "the prompt hands Gemini precomputed totals instead of letting it do arithmetic itself",
+  lastGeminiRequest.systemInstruction.includes("รายรับรวม") &&
+    lastGeminiRequest.systemInstruction.includes("รายจ่ายรวม") &&
+    lastGeminiRequest.systemInstruction.includes("ห้ามคำนวณหรือเดาตัวเลขเอง")
+);
+
+const aiAnalyzeReply = await handleTextMessage(env, lineUserId, "วิเคราะห์", origin);
+check(
+  '"วิเคราะห์" alone still asks something useful instead of showing a usage hint',
+  aiAnalyzeReply.includes("[mock AI answer]") && aiAnalyzeReply.includes("วิเคราะห์พฤติกรรมการใช้จ่าย")
+);
+
+simulateGeminiFailure = true;
+const aiFailureReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
+check(
+  "a Gemini failure (quota/error) surfaces as a friendly fallback message, not a crash",
+  aiFailureReply.includes("ระบบ AI ขัดข้อง")
+);
+
+const aiPhraseOverlapReply = await handleTextMessage(env, lineUserId, "ถาม หมวดไหนใช้เงินเยอะที่สุด", origin);
+check(
+  '"ถาม <คำถาม>" always goes to the AI, even when the question text also happens to match a hardcoded report phrase',
+  aiPhraseOverlapReply.includes("[mock AI answer]")
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

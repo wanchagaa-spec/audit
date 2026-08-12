@@ -1,5 +1,6 @@
 import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import { matchAiCommand } from "./aiCommands.ts";
 import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";
 import { matchCalendarCommand } from "./calendarCommands.ts";
 import { matchCommand } from "./commands.ts";
@@ -50,15 +51,17 @@ export interface Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   STATE_SIGNING_SECRET: string;
+  GEMINI_API_KEY: string;
 }
 
 const WELCOME_MESSAGE = [
-  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 4 เรื่องหลักๆ:",
+  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 5 เรื่องหลักๆ:",
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
   "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
+  "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
   "",
   "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
 ].join("\n");
@@ -200,6 +203,7 @@ export async function handleTextMessage(
     kv: env.ACCOUNTS,
     lineUserId,
     spreadsheetId: link.spreadsheetId,
+    geminiApiKey: env.GEMINI_API_KEY,
   });
 
   try {
@@ -242,6 +246,20 @@ export async function handleTextMessage(
         env,
         link.refreshToken,
         (accessToken) => diaryHandler(actionCtx(accessToken)),
+        tokenCache
+      );
+    }
+
+    // Checked before matchCommand's hardcoded report shortcuts below: e.g.
+    // "ถาม หมวดไหนใช้เงินเยอะที่สุด" should always go to the AI, not get
+    // reinterpreted as the plain "หมวดไหนใช้เงินเยอะที่สุด" report command
+    // just because that phrase happens to appear as a substring.
+    const aiHandler = await matchAiCommand(text);
+    if (aiHandler) {
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => aiHandler(actionCtx(accessToken)),
         tokenCache
       );
     }

@@ -4,9 +4,10 @@ compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 # Drains the trip-photo upload queue once a minute (see uploadQueue.ts and the
-# `scheduled` handler in src/index.ts). Only large batches (20+ files in one
-# LINE multi-select) ever go through this path — normal sends still upload and
-# confirm immediately.
+# `scheduled` handler in src/index.ts). Every media file, any batch size, goes
+# through this queue+drain path now (see DRAIN_BATCH_SIZE's comment in
+# src/index.ts for why) — this cron firing is the only place uploads actually
+# happen and confirmations get sent.
 [triggers]
 crons = ["* * * * *"]
 
@@ -22,3 +23,5 @@ id = "18630d0859b24d9591cd9025ab557cfe"
 #   GOOGLE_CLIENT_ID          - same OAuth client used by the web app
 #   GOOGLE_CLIENT_SECRET      - from the same OAuth client (Web application type)
 #   STATE_SIGNING_SECRET      - any random string, used to sign the OAuth state param
+#   GEMINI_API_KEY            - from https://aistudio.google.com/apikey (free tier) — powers
+#                               "ถาม <คำถาม>" / "วิเคราะห์" (see aiCommands.ts, PLAN.md 15.6)

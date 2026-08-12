@@ -20,7 +20,7 @@ layout**, so a spreadsheet stays compatible whichever interface you log from.
 3. Under **Response settings** (in the LINE Official Account Manager, not the Developers
    Console): turn the **"Chat"** feature off — this disables the human-readable chat inbox,
    so nobody but the webhook code ever sees raw messages (see PLAN.md 14.4).
-4. You'll set the actual webhook URL after deploying the Worker (step 4 below).
+4. You'll set the actual webhook URL after deploying the Worker (step 5 below).
 
 ### 2. Cloudflare account
 
@@ -55,7 +55,28 @@ must never reach a browser.
    replies with a fresh link when someone tries a calendar command — no action needed here,
    just know it'll ask once per already-linked person.
 
-### 4. Deploy — no terminal needed, everything runs on GitHub
+### 4. Get a free Gemini API key (powers "ถาม <คำถาม>" / "วิเคราะห์")
+
+This is the only piece of the bot that isn't Google Sheets/Drive/Calendar or LINE itself —
+see PLAN.md 15.10 for why this one feature deliberately breaks from the rest of the project's
+"no AI" design.
+
+1. Go to [Google AI Studio](https://aistudio.google.com/apikey) and sign in with any Google
+   account (doesn't need to be the same one as the OAuth client above).
+2. Click **Create API key**, choose or create a Google Cloud project, and copy the key
+   (starts with `AIza...`).
+3. **Know what you're sending before you set this up**: on the free tier, prompts/responses
+   sent to Gemini may be used by Google to improve their products (unlike the paid tier,
+   which doesn't do this) — and this feature's prompts include this month's spending and
+   diary entries (see `worker/src/aiCommands.ts`). If that's not acceptable for your data,
+   skip this step; every other feature in the bot works fine without `GEMINI_API_KEY` set,
+   "ถาม"/"วิเคราะห์" will just reply with the same fallback message a Gemini outage would
+   produce.
+4. The free tier has daily request quotas (varies by model — see `worker/src/gemini.ts` for
+   which model this uses and why). A single-user chat bot's Q&A feature is nowhere near
+   enough traffic to hit them under normal use.
+
+### 5. Deploy — no terminal needed, everything runs on GitHub
 
 Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
 
@@ -70,6 +91,7 @@ Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
    | `LINE_CHANNEL_ACCESS_TOKEN` | from step 1 |
    | `GOOGLE_CLIENT_SECRET` | from step 3 |
    | `STATE_SIGNING_SECRET` | any long random string you make up |
+   | `GEMINI_API_KEY` | from step 4 (optional — omit and "ถาม"/"วิเคราะห์" just always reply with the fallback message) |
 
 2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
    **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
@@ -94,11 +116,12 @@ npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
 npx wrangler secret put GOOGLE_CLIENT_ID          # same value as VITE_GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
 npx wrangler secret put STATE_SIGNING_SECRET
+npx wrangler secret put GEMINI_API_KEY            # optional — see step 4
 npx wrangler deploy
 ```
 </details>
 
-### 5. Point LINE's webhook at your Worker
+### 6. Point LINE's webhook at your Worker
 
 Back in LINE Developers Console → Messaging API tab → **Webhook URL**:
 `https://<your-worker>.workers.dev/webhook`, then click **Verify** (should succeed once
@@ -112,7 +135,7 @@ the *LIFF's own channel* — not the Messaging API channel that the webhook and 
 messages use — so linked accounts never matched later messages. The current design signs
 the id straight from the webhook event instead, which is always in the right scope.)
 
-### 6. Set up the rich menu (optional, but recommended)
+### 7. Set up the rich menu (optional, but recommended)
 
 Adds a persistent 6-button image menu under the chat input in LINE — tapping a button just
 sends its text as an ordinary message, so it's a shortcut into commands the bot already
@@ -120,7 +143,7 @@ understands, nothing new to build on the LINE side.
 
 1. Go to the repo's **Actions** tab → **"One-time - Set up LINE Rich Menu"** → **Run
    workflow**. It uploads `worker/assets/rich-menu.png` and sets it as the default menu for
-   everyone (needs `LINE_CHANNEL_ACCESS_TOKEN`, already a repo secret from step 4).
+   everyone (needs `LINE_CHANNEL_ACCESS_TOKEN`, already a repo secret from step 5).
 2. Open a chat with the bot in LINE — the menu shows up under the input within a minute or
    so (may need to close and reopen the chat once).
 3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
@@ -412,6 +435,31 @@ Diary entries live in a `Diary` tab that's created automatically on first use, i
 **personal** spreadsheet only — never a shared group-book spreadsheet (group books aren't
 wired up in the bot yet anyway; see Known limitations).
 
+### AI Q&A / analysis (PLAN.md 15.10)
+
+The one feature in this bot that isn't rule-based — see PLAN.md 15.10 for the full design
+rationale on why this is a deliberate, documented exception rather than a quiet drift away
+from the "free forever, no AI" approach everything else follows.
+
+- `ถาม <คำถาม>` — e.g. "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด" or "ถาม ช่วงนี้ใช้จ่ายเป็นยังไงบ้าง". Sends
+  the question, plus this month's transactions/diary entries and precomputed totals, to
+  Google Gemini (free tier) and replies with its answer.
+- `วิเคราะห์` (with or without extra text after it) — shortcut for an open-ended "analyze my
+  spending and diary this month" request, without having to phrase it as a question yourself.
+- **Money never gets computed by the AI.** Every number in the prompt (`aiCommands.ts`) is
+  computed first by the same plain arithmetic `commands.ts` uses for its own summaries, and
+  handed to Gemini pre-labeled as the only numbers it's allowed to quote — the raw
+  transaction/diary rows included alongside are for pattern questions ("ซื้อกาแฟกี่ครั้งแล้ว"),
+  not for the model to re-sum itself. A wrong total is structurally impossible this way, not
+  just unlikely.
+- If `GEMINI_API_KEY` isn't set, or Gemini's free-tier quota is exhausted, or the request
+  otherwise fails: replies with a plain apology instead of erroring or staying silent — see
+  `gemini.ts`/`aiCommands.ts`.
+- This is the only feature that sends your data (this month's spending/diary text) to a
+  third party outside the Google Sheets/Drive/Calendar/LINE ecosystem the rest of the bot
+  stays within — see setup step 4 above for the free-tier data-usage disclosure before
+  turning it on.
+
 ## Local development
 
 ```bash
@@ -432,7 +480,7 @@ class the LIFF removal above fixed.
 To tweak the rich menu's design, edit `assets/generate-rich-menu.py` (needs
 `pip install pillow`) and run it — it writes `assets/rich-menu.png` from scratch every
 time, so it's always reproducible from source rather than being an opaque binary someone
-has to redraw by hand. Then re-run the "One-time - Set up LINE Rich Menu" Action (step 6
+has to redraw by hand. Then re-run the "One-time - Set up LINE Rich Menu" Action (step 7
 above) to publish it.
 
 ## Known limitations (documented honestly, not blockers)
