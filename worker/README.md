@@ -200,6 +200,18 @@ and isn't tied to a token, so a reply is never silently lost. Message types this
 handle (e.g. LINE's `file` type, which some clips can arrive as) also now get an explicit "not
 supported yet" reply instead of falling through with no response at all.
 
+A longer video clip surfaced one more failure mode: it can be tens of MB, and the upload path
+used to fetch the whole thing from LINE into an `ArrayBuffer`, wrap it in a `Blob` with the
+Drive multipart metadata, and only then start uploading — doubling the total wait (download
+fully, then upload fully) and risking the Worker's memory limit for a big enough file. A real
+report matched this exactly: a 19-second clip uploaded fine, a same-batch ~1-minute clip that
+had already finished sending in LINE never got a bot reply at all. `uploadFileToFolder` in
+`src/drive.ts` now streams the file straight from the LINE response into the Drive request
+(`res.body` piped directly into `fetch`'s `body`, Drive's `uploadType=media` simple upload)
+instead of buffering it, with a small follow-up `PATCH` to set the filename and move it into
+the trip folder (simple upload has no room for metadata, so the file otherwise lands unnamed
+in the account's root).
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never

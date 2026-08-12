@@ -122,21 +122,29 @@ export function isUnsupportedMessageEvent(
   );
 }
 
-/** Fetches the raw bytes for any LINE message content — image, video, or
- * audio all use this same content API, keyed only by messageId. */
+/** Fetches the content stream for any LINE message content — image, video,
+ * or audio all use this same content API, keyed only by messageId. Returns
+ * the response body as a stream rather than buffering it into an ArrayBuffer
+ * here: a longer video clip can be tens of MB, and reading the whole thing
+ * into memory before even starting the Drive upload both risks the Worker's
+ * memory limit and roughly doubles the time before a reply can be sent
+ * (download fully, then upload fully, instead of both at once) — see the
+ * streaming-upload comment in drive.ts for the other half of this. */
 export async function fetchLineMediaContent(
   messageId: string,
   channelAccessToken: string
-): Promise<{ bytes: ArrayBuffer; contentType: string }> {
+): Promise<{ body: ReadableStream<Uint8Array>; contentType: string }> {
   const res = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
     headers: { Authorization: `Bearer ${channelAccessToken}` },
   });
   if (!res.ok) {
     throw new Error(`LINE content API error (${res.status}): ${await res.text()}`);
   }
+  if (!res.body) {
+    throw new Error("LINE content API returned an empty body");
+  }
   const contentType = res.headers.get("content-type") ?? "application/octet-stream";
-  const bytes = await res.arrayBuffer();
-  return { bytes, contentType };
+  return { body: res.body, contentType };
 }
 
 export async function replyToLine(

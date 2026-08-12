@@ -54,32 +54,46 @@ export async function getOrCreateAlbumRoot(accessToken: string): Promise<string>
   return created.id;
 }
 
+// Streams the file straight from its source into Drive instead of buffering
+// it into an ArrayBuffer/Blob first (the previous multipart approach, which
+// needed the whole file in memory to interleave it with the JSON metadata
+// part). A longer video clip is tens of MB, and holding the whole thing in
+// memory just to re-serialize it risked the Worker's memory limit and added
+// real latency — a real user report was a ~1 minute clip that uploaded fine
+// via LINE but never got a bot reply, while short clips worked. Simple
+// upload (uploadType=media) takes only raw bytes with no metadata, so name
+// and folder are set with a small follow-up PATCH instead of inline.
 export async function uploadFileToFolder(
   accessToken: string,
   folderId: string,
   filename: string,
-  bytes: ArrayBuffer,
+  body: ReadableStream<Uint8Array>,
   mimeType: string
 ): Promise<string> {
-  const boundary = `beq_${crypto.randomUUID()}`;
-  const metadata = JSON.stringify({ name: filename, parents: [folderId] });
-  const body = new Blob([
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
-    `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`,
-    bytes,
-    `\r\n--${boundary}--`,
-  ]);
-  const res = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id`, {
+  const uploadRes = await fetch(`${DRIVE_UPLOAD_BASE}/files?uploadType=media&fields=id`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": `multipart/related; boundary=${boundary}`,
+      "Content-Type": mimeType,
     },
     body,
-  });
-  if (!res.ok) {
-    throw new Error(`Google Drive upload error (${res.status}): ${await res.text()}`);
+    // Required by fetch implementations (e.g. Node/undici) whenever the
+    // request body is a stream rather than a buffer; Cloudflare Workers'
+    // fetch accepts it too.
+    duplex: "half",
+  } as RequestInit);
+  if (!uploadRes.ok) {
+    throw new Error(`Google Drive upload error (${uploadRes.status}): ${await uploadRes.text()}`);
   }
-  const data = (await res.json()) as { id: string };
-  return data.id;
+  const { id } = (await uploadRes.json()) as { id: string };
+
+  // A file created via simple/media upload has no name and lands in the
+  // account's root ("My Drive") by default, since no metadata was sent with
+  // it — this renames it and moves it into the trip folder in one call.
+  await driveFetch(accessToken, `/files/${id}?addParents=${folderId}&removeParents=root`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: filename }),
+  });
+
+  return id;
 }

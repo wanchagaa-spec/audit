@@ -104,7 +104,11 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://api-data.line.me/v2/bot/message/") && u.endsWith("/content")) {
     const isVideo = u.includes("vid-");
-    return new Response(new Uint8Array([1, 2, 3, 4]).buffer, {
+    // messageIds containing "big-" simulate a longer clip, to exercise the
+    // streaming upload path with something bigger than a few bytes.
+    const isBig = u.includes("big-");
+    const payload = isBig ? new Uint8Array(2 * 1024 * 1024).fill(7) : new Uint8Array([1, 2, 3, 4]);
+    return new Response(payload.buffer, {
       status: 200,
       headers: { "content-type": isVideo ? "video/mp4" : "image/jpeg" },
     });
@@ -126,24 +130,29 @@ globalThis.fetch = async (url, init = {}) => {
       driveFolders.push({ id, name: body.name, parentId: body.parents?.[0] ?? "root" });
       return new Response(JSON.stringify({ id }), { status: 200 });
     }
+    if (init.method === "PATCH") {
+      // The follow-up call after a streamed simple upload: sets the real
+      // filename and moves the file out of the default root parent.
+      const id = parsed.pathname.split("/").pop();
+      const body = JSON.parse(init.body);
+      const upload = driveUploads.find((f) => f.id === id);
+      if (upload) {
+        upload.name = body.name;
+        const addParents = parsed.searchParams.get("addParents");
+        if (addParents) upload.parentId = addParents;
+      }
+      return new Response(JSON.stringify({ id }), { status: 200 });
+    }
   }
   if (u.startsWith("https://www.googleapis.com/upload/drive/v3/files")) {
+    // Simple/media upload: no metadata in the body, just the raw bytes
+    // (streamed straight from the LINE content mock's response body). Name
+    // and parent folder get filled in by the PATCH branch above. Reading the
+    // stream's full size here proves the streaming path doesn't drop or
+    // truncate bytes along the way.
     const id = nextDriveId("file");
-    let name;
-    let parentId;
-    try {
-      const contentType = init.headers?.["Content-Type"] ?? "";
-      const boundary = contentType.match(/boundary=(.+)$/)?.[1];
-      const text = init.body && typeof init.body.text === "function" ? await init.body.text() : "";
-      const metaPart = boundary ? text.split(`--${boundary}`)[1] : null;
-      const metaJson = metaPart?.split("\r\n\r\n")[1]?.split("\r\n--")[0];
-      const meta = metaJson ? JSON.parse(metaJson) : {};
-      name = meta.name;
-      parentId = meta.parents?.[0];
-    } catch {
-      // best-effort parse for the test mock only
-    }
-    driveUploads.push({ id, name, parentId });
+    const uploadedBytes = init.body ? await new Response(init.body).arrayBuffer() : new ArrayBuffer(0);
+    driveUploads.push({ id, name: undefined, parentId: undefined, size: uploadedBytes.byteLength });
     return new Response(JSON.stringify({ id }), { status: 200 });
   }
   if (u.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
@@ -446,6 +455,19 @@ const videoReply = await handleVideoMessage(env, lineUserId, "vid-1", Date.now()
 check("video upload confirms the trip name", videoReply.includes('ทริป "ทะเล"'));
 check("a video upload was recorded", driveUploads.length === uploadsBeforeVideo + 1);
 check("the video also lands directly in the trip folder", driveUploads.at(-1).parentId === tripFolderId);
+
+// Regression test for a real report: a short (19s) clip uploaded fine, but a
+// longer (~1min) clip that had already finished sending in LINE never got a
+// bot reply at all — traced to the old buffer-then-upload path risking the
+// Worker's memory limit and doubling total latency for bigger files. Now
+// streamed straight through; this confirms a larger payload (2MB here,
+// standing in for "much bigger than 4 bytes") still uploads intact.
+const bigVideoReply = await handleVideoMessage(env, lineUserId, "vid-big-1", Date.now(), origin);
+check("a larger (streamed) clip also confirms the trip name", bigVideoReply.includes('ทริป "ทะเล"'));
+check(
+  "the large clip's full byte size made it through the streaming upload intact",
+  driveUploads.at(-1).size === 2 * 1024 * 1024
+);
 
 // A batch of many photos+videos sent together (bundled into one webhook
 // call, as LINE can do for a multi-select send) must not blow through
