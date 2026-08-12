@@ -1,5 +1,11 @@
 import { handleUserMessage } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import { InsufficientCalendarScopeError } from "./calendar.ts";
+import { matchCalendarCommand } from "./calendarCommands.ts";
+import { matchCommand } from "./commands.ts";
+import { resolveConfirmation } from "./confirmations.ts";
+import { matchDiaryCommand } from "./diaryCommands.ts";
+import { bangkokDateFolderName, findOrCreateFolder, uploadImageToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import {
   fetchLineImageContent,
@@ -10,18 +16,17 @@ import {
   type LineWebhookBody,
 } from "./line.ts";
 import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
+import { signState, verifyState } from "./signedState.ts";
 import {
   getAccountLink,
   getActiveTrip,
   getPending,
-  getPendingTripSwitch,
+  getPendingConfirmation,
   setAccountLink,
   setPending,
+  type ActionCtx,
 } from "./state.ts";
-import { signState, verifyState } from "./signedState.ts";
-import { matchCommand } from "./commands.ts";
-import { matchTripCommand, resolveTripSwitchConfirmation } from "./tripCommands.ts";
-import { bangkokDateFolderName, findOrCreateFolder, uploadImageToFolder } from "./drive.ts";
+import { matchTripCommand } from "./tripCommands.ts";
 
 export interface Env {
   ACCOUNTS: KVNamespace;
@@ -106,13 +111,27 @@ async function withFreshAccessToken<T>(
 async function buildUnlinkedPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
   // The state param embeds this exact webhook-scoped lineUserId, signed, so
   // /oauth/callback links the account to the same id future messages use.
+  const authorizeUrl = await buildAuthorizeUrl(env, lineUserId, origin);
+  return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
+}
+
+async function buildAuthorizeUrl(env: Env, lineUserId: string, origin: string): Promise<string> {
   const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
-  const authorizeUrl = buildGoogleAuthorizeUrl({
+  return buildGoogleAuthorizeUrl({
     clientId: env.GOOGLE_CLIENT_ID,
     redirectUri: `${origin}/oauth/callback`,
     state,
   });
-  return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
+}
+
+// Accounts linked before the calendar feature shipped only granted the
+// drive.file scope. A 401/403 from the Calendar API means that's the case —
+// send the same re-link link, worded for "add a permission" rather than
+// "connect for the first time" (setAccountLink overwrites the refresh token
+// in place, so existing data/spreadsheetId are untouched).
+async function buildCalendarRelinkPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
+  const authorizeUrl = await buildAuthorizeUrl(env, lineUserId, origin);
+  return `ต้องเชื่อมบัญชี Google ใหม่อีกครั้งเพื่อขอสิทธิ์ปฏิทินเพิ่ม (บัญชีเดิมยังไม่มีสิทธิ์นี้) กดลิงก์นี้แล้วเลือกบัญชีเดิมได้เลย ข้อมูลเก่าจะไม่หายนะ\n${authorizeUrl}`;
 }
 
 export async function handleTextMessage(
@@ -124,21 +143,45 @@ export async function handleTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
 
-  const pendingSwitch = await getPendingTripSwitch(env.ACCOUNTS, lineUserId);
-  if (pendingSwitch) {
-    const switchReply = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-      resolveTripSwitchConfirmation({ accessToken, kv: env.ACCOUNTS, lineUserId }, text, pendingSwitch)
-    );
-    if (switchReply) return switchReply;
-    // Not an affirmative reply — the switch prompt is cancelled, fall through
-    // and handle `text` as an ordinary message instead.
-  }
+  const actionCtx = (accessToken: string): ActionCtx => ({
+    accessToken,
+    kv: env.ACCOUNTS,
+    lineUserId,
+    spreadsheetId: link.spreadsheetId,
+  });
 
-  const tripHandler = await matchTripCommand(text);
-  if (tripHandler) {
-    return withFreshAccessToken(env, link.refreshToken, (accessToken) =>
-      tripHandler({ accessToken, kv: env.ACCOUNTS, lineUserId })
-    );
+  try {
+    const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, lineUserId);
+    if (pendingConfirmation) {
+      const reply = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+        resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation)
+      );
+      if (reply) return reply;
+      // Not an affirmative reply — the pending question is already cleared
+      // (see confirmations.ts), fall through and handle `text` normally.
+    }
+
+    const tripHandler = await matchTripCommand(text);
+    if (tripHandler) {
+      return await withFreshAccessToken(env, link.refreshToken, (accessToken) => tripHandler(actionCtx(accessToken)));
+    }
+
+    const calendarHandler = await matchCalendarCommand(text);
+    if (calendarHandler) {
+      return await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+        calendarHandler(actionCtx(accessToken))
+      );
+    }
+
+    const diaryHandler = await matchDiaryCommand(text);
+    if (diaryHandler) {
+      return await withFreshAccessToken(env, link.refreshToken, (accessToken) => diaryHandler(actionCtx(accessToken)));
+    }
+  } catch (err) {
+    if (err instanceof InsufficientCalendarScopeError) {
+      return buildCalendarRelinkPrompt(env, lineUserId, origin);
+    }
+    throw err;
   }
 
   const reportHandler = await matchCommand(text);

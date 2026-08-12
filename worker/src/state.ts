@@ -61,27 +61,43 @@ export async function setActiveTrip(
   await kv.put(key, JSON.stringify(trip));
 }
 
-export interface PendingTripSwitch {
-  newName: string;
-}
+// A single "waiting for ใช่/no" slot shared by every feature that needs a
+// confirm-before-you-do-it step (trip switching, calendar create/edit/delete,
+// diary entries — PLAN.md 15.3/15.4). One slot per user is enough since only
+// the most recent question is ever still relevant; see confirmations.ts for
+// how a reply resolves whichever kind is pending.
+export type PendingConfirmation =
+  | { kind: "tripSwitch"; newName: string }
+  | { kind: "calendarCreate"; title: string; dateKey: string; time: string }
+  | { kind: "calendarDelete"; eventId: string; title: string; dateKey: string; time: string }
+  | { kind: "calendarEdit"; eventId: string; title: string; dateKey: string; time: string }
+  | { kind: "diaryCreate"; category: string; text: string };
 
-export async function getPendingTripSwitch(
+export async function getPendingConfirmation(
   kv: KVNamespace,
   lineUserId: string
-): Promise<PendingTripSwitch | null> {
-  const raw = await kv.get(`trip-switch:${lineUserId}`);
-  return raw ? (JSON.parse(raw) as PendingTripSwitch) : null;
+): Promise<PendingConfirmation | null> {
+  const raw = await kv.get(`confirm:${lineUserId}`);
+  return raw ? (JSON.parse(raw) as PendingConfirmation) : null;
 }
 
-export async function setPendingTripSwitch(
+export async function setPendingConfirmation(
   kv: KVNamespace,
   lineUserId: string,
-  pending: PendingTripSwitch | null
+  pending: PendingConfirmation | null
 ): Promise<void> {
-  const key = `trip-switch:${lineUserId}`;
+  const key = `confirm:${lineUserId}`;
   if (pending === null) {
     await kv.delete(key);
     return;
   }
   await kv.put(key, JSON.stringify(pending), { expirationTtl: PENDING_TTL_SECONDS });
+}
+
+/** Shared context passed to trip/calendar/diary command handlers. */
+export interface ActionCtx {
+  accessToken: string;
+  kv: KVNamespace;
+  lineUserId: string;
+  spreadsheetId: string;
 }

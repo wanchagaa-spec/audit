@@ -45,6 +45,15 @@ must never reach a browser.
    bot (up to 100) — while the app is unverified/"Testing", only listed accounts can
    complete sign-in. See PLAN.md for the tradeoff against submitting the app for Google
    verification instead.
+5. Under **APIs & Services → Library**, make sure **Google Sheets API**, **Google Drive
+   API**, and **Google Calendar API** are all "Enabled" for this project (search each by
+   name, click it, click Enable if it isn't already) — a disabled API fails with a clear
+   `has not been used in this project` error from Google, so this is worth checking first
+   if something that used to work suddenly errors after adding the calendar feature.
+6. **If you already linked accounts before the calendar feature existed**: those refresh
+   tokens only cover `drive.file`, not `calendar.events`. The bot detects this itself and
+   replies with a fresh link when someone tries a calendar command — no action needed here,
+   just know it'll ask once per already-linked person.
 
 ### 4. Deploy — no terminal needed, everything runs on GitHub
 
@@ -143,6 +152,38 @@ Google consent step is needed for this feature. See the callout in PLAN.md 15.2 
 there's no "type a folder name alongside the photo" option — LINE doesn't attach captions
 to image messages, they always arrive as separate events.
 
+### Calendar (PLAN.md 15.3)
+
+Reminders are handled entirely by Google Calendar's own notifications — the bot never
+messages you proactively, it only creates/reads/edits/deletes events when you ask:
+
+- `นัด <เรื่อง> <วันที่> <เวลา>` — e.g. "นัด ประชุมทีม 12/1/2569 13:00" or "นัด ประชุมทีม
+  12 ม.ค. 13:00" (year optional, defaults to this year). Only understands explicit
+  dates/times like these, not phrases like "พรุ่งนี้บ่ายสอง" — see the note in
+  `src/thaiDate.ts` for why. Always asks to confirm ("ใช่") before actually creating
+  anything.
+- `มีนัดอะไรวันนี้` / `มีนัดอะไรพรุ่งนี้` / `มีนัดอะไรสัปดาห์นี้` — lists events in that range.
+- `ลบนัด <คำค้น>` / `แก้นัด <คำค้น> เป็น <วันที่/เวลาใหม่>` — searches your upcoming events by
+  title; if more than one matches, it lists them and asks you to be more specific instead
+  of guessing. Both also confirm before touching anything.
+
+Needs the extra `calendar.events` OAuth scope (see setup step 3.6 above) — accounts linked
+before this feature existed will get a one-time re-link prompt the first time they try a
+calendar command.
+
+### Diary (PLAN.md 15.4)
+
+- `ไดอารี่ <ข้อความ>` or `บันทึก <ข้อความ>` — e.g. "ไดอารี่ วันนี้อากาศดีมาก". Add `#หมวด` right
+  after the command to tag a category (e.g. "ไดอารี่ #งาน ประชุมเสร็จเร็ว"); otherwise it's
+  filed under "อื่นๆ". Confirms before saving, same as calendar.
+- `ไดอารี่เดือนนี้มีอะไรบ้าง` / `ค้นหาไดอารี่ <คำ>` — read entries back.
+- No edit/delete commands yet for diary entries (lower stakes than a wrong calendar event
+  or a lost transaction, so this was left out of v1 — see Known limitations below).
+
+Diary entries live in a `Diary` tab that's created automatically on first use, in your
+**personal** spreadsheet only — never a shared group-book spreadsheet (group books aren't
+wired up in the bot yet anyway; see Known limitations).
+
 ## Local development
 
 ```bash
@@ -174,3 +215,11 @@ class the LIFF removal above fixed.
   folder name to a single stray photo" fallback, since LINE doesn't support captions on
   image messages (see PLAN.md 15.2). No auto-timeout closes a forgotten trip either; use
   `ทริปตอนนี้` to check.
+- Calendar events are single occurrences only — no recurring/repeating events yet
+  (PLAN.md 15.3). Date/time parsing is rule-based and only understands explicit formats
+  ("12/1/2569 13:00", "12 ม.ค. 13.00"), not natural phrases like "พรุ่งนี้บ่ายสอง".
+- Diary entries have no edit/delete command yet, only create + monthly list + search
+  (PLAN.md 15.4).
+- Only one confirmation can be pending at a time (trip switch, calendar create/edit/delete,
+  diary create all share one slot per user) — asking a second thing before answering the
+  first silently drops whichever was asked first rather than queueing it.

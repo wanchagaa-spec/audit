@@ -121,3 +121,61 @@ export async function readBudgets(accessToken: string, spreadsheetId: string): P
       limitAmount: Number(r[3]),
     }));
 }
+
+// ---- Diary (PLAN.md 15.4) -----------------------------------------------
+// Personal-only tab: never used for shared group-book spreadsheets (PLAN.md
+// 15.5). Older spreadsheets (created before this feature existed) don't have
+// a Diary tab yet, so every write/read lazily creates it on first use.
+
+const DIARY_HEADERS = ["id", "date", "category", "text", "createdAt"];
+
+export interface DiaryRow {
+  id: string;
+  date: string;
+  category: string;
+  text: string;
+  createdAt: string;
+}
+
+async function ensureDiaryTab(accessToken: string, spreadsheetId: string): Promise<void> {
+  const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties.title`);
+  const titles: string[] = (meta.sheets ?? []).map((s: any) => s.properties.title);
+  if (titles.includes("Diary")) return;
+
+  await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Diary" } } }] }),
+  });
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A1?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values: [DIARY_HEADERS] }),
+  });
+}
+
+export async function appendDiaryEntry(
+  accessToken: string,
+  spreadsheetId: string,
+  entry: DiaryRow
+): Promise<void> {
+  await ensureDiaryTab(accessToken, spreadsheetId);
+  const values = [[entry.id, entry.date, entry.category, entry.text, entry.createdAt]];
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A1:append?valueInputOption=RAW`, {
+    method: "POST",
+    body: JSON.stringify({ values }),
+  });
+}
+
+export async function readAllDiaryEntries(accessToken: string, spreadsheetId: string): Promise<DiaryRow[]> {
+  await ensureDiaryTab(accessToken, spreadsheetId);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A2:E100000`);
+  const rows: string[][] = data.values ?? [];
+  return rows
+    .filter((r) => r[0])
+    .map((r) => ({
+      id: r[0],
+      date: r[1],
+      category: r[2] ?? "อื่นๆ",
+      text: r[3] ?? "",
+      createdAt: r[4] ?? "",
+    }));
+}

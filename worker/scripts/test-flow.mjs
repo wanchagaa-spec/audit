@@ -31,6 +31,13 @@ function nextDriveId(prefix) {
   return `${prefix}-${driveIdSeq}`;
 }
 
+const calendarEvents = []; // simulates Google Calendar: {id, summary, start:{dateTime}, end:{dateTime}}
+let calendarIdSeq = 0;
+let simulateInsufficientCalendarScope = false;
+
+let diaryTabExists = false;
+const diaryRows = []; // simulates the Diary tab
+
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
@@ -91,6 +98,60 @@ globalThis.fetch = async (url, init = {}) => {
     driveUploads.push({ id });
     return new Response(JSON.stringify({ id }), { status: 200 });
   }
+  if (u.startsWith("https://www.googleapis.com/calendar/v3/calendars/primary/events")) {
+    if (simulateInsufficientCalendarScope) return new Response("forbidden", { status: 403 });
+    const parsed = new URL(u);
+    if (parsed.pathname === "/calendar/v3/calendars/primary/events") {
+      if (!init.method || init.method === "GET") {
+        const timeMin = new Date(parsed.searchParams.get("timeMin")).getTime();
+        const timeMax = new Date(parsed.searchParams.get("timeMax")).getTime();
+        const keyword = parsed.searchParams.get("q");
+        let items = calendarEvents.filter((e) => {
+          const t = new Date(e.start.dateTime).getTime();
+          return t >= timeMin && t < timeMax;
+        });
+        if (keyword) items = items.filter((e) => e.summary.includes(keyword));
+        return new Response(JSON.stringify({ items }), { status: 200 });
+      }
+      if (init.method === "POST") {
+        const body = JSON.parse(init.body);
+        calendarIdSeq += 1;
+        const id = `evt-${calendarIdSeq}`;
+        calendarEvents.push({ id, summary: body.summary, start: body.start, end: body.end });
+        return new Response(JSON.stringify({ id }), { status: 200 });
+      }
+    } else {
+      const id = parsed.pathname.split("/").pop();
+      if (init.method === "PATCH") {
+        const body = JSON.parse(init.body);
+        const ev = calendarEvents.find((e) => e.id === id);
+        if (ev) Object.assign(ev, { summary: body.summary, start: body.start, end: body.end });
+        return new Response(JSON.stringify({ id }), { status: 200 });
+      }
+      if (init.method === "DELETE") {
+        const idx = calendarEvents.findIndex((e) => e.id === id);
+        if (idx >= 0) calendarEvents.splice(idx, 1);
+        return new Response(null, { status: 204 });
+      }
+    }
+  }
+  if (u.includes("?fields=sheets.properties.title")) {
+    return new Response(JSON.stringify({ sheets: diaryTabExists ? [{ properties: { title: "Diary" } }] : [] }), {
+      status: 200,
+    });
+  }
+  if (u.includes("Diary!A1?valueInputOption=RAW")) {
+    diaryTabExists = true;
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  if (u.includes("Diary!A1:append")) {
+    const body = JSON.parse(init.body);
+    diaryRows.push(...body.values);
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  if (u.includes("Diary!A2:E100000")) {
+    return new Response(JSON.stringify({ values: diaryRows }), { status: 200 });
+  }
 
   throw new Error(`unexpected fetch to ${u}`);
 };
@@ -98,6 +159,12 @@ globalThis.fetch = async (url, init = {}) => {
 const { handleTextMessage, handleImageMessage } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
+const { bangkokDateKey, addDaysToDateKey } = await import("../src/thaiDate.ts");
+
+function toSlashDate(dateKey) {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  return `${d}/${m}/${y + 543}`;
+}
 
 const kv = new FakeKV();
 const env = {
@@ -253,6 +320,94 @@ check("status reports no open trip after ending", statusAfterEnd.includes("ไ�
 
 const imageAfterEndReply = await handleImageMessage(env, lineUserId, "msg-3", Date.now(), origin);
 check("image after ending the trip asks to start one again", imageAfterEndReply.includes("เริ่มทริป"));
+
+// 8. Calendar (PLAN.md 15.3): format hint, confirm-before-create, decline,
+// list by day, search-based edit/delete, and the insufficient-scope re-link.
+const todayKey = bangkokDateKey();
+const tomorrowKey = addDaysToDateKey(todayKey, 1);
+const tomorrowSlash = toSlashDate(tomorrowKey);
+
+const noDateTimeReply = await handleTextMessage(env, lineUserId, "นัด ประชุมทีม", origin);
+check("calendar create without a date/time asks for the right format", noDateTimeReply.includes("นัด ประชุมทีม"));
+
+const createPromptReply = await handleTextMessage(env, lineUserId, `นัด ประชุมทีม ${tomorrowSlash} 13:00`, origin);
+check(
+  "calendar create asks to confirm before touching the calendar",
+  createPromptReply.includes("ประชุมทีม") && createPromptReply.includes("13:00") && calendarEvents.length === 0
+);
+
+const declineCreateReply = await handleTextMessage(env, lineUserId, "ไม่เอาดีกว่า", origin);
+check("declining calendar create falls through without creating anything", calendarEvents.length === 0);
+check("declined text still gets an ordinary reply", declineCreateReply.length > 0);
+
+await handleTextMessage(env, lineUserId, `นัด ประชุมทีม ${tomorrowSlash} 13:00`, origin);
+const confirmCreateReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("confirming creates the event", confirmCreateReply.includes("จดนัดแล้ว") && calendarEvents.length === 1);
+
+const listTodayReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรวันนี้", origin);
+check("today's list doesn't include tomorrow's event", !listTodayReply.includes("ประชุมทีม"));
+
+const listTomorrowReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรพรุ่งนี้", origin);
+check("tomorrow's list includes the created event", listTomorrowReply.includes("ประชุมทีม") && listTomorrowReply.includes("13:00"));
+
+const listWeekReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรสัปดาห์นี้", origin);
+check("week list doesn't error", listWeekReply.length > 0);
+
+const editPromptReply = await handleTextMessage(env, lineUserId, "แก้นัด ประชุมทีม เป็น 15:00", origin);
+check("edit asks to confirm the new time", editPromptReply.includes("15:00"));
+const editConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the edit updates the event time",
+  editConfirmReply.includes("15:00") && calendarEvents[0].start.dateTime.includes("15:00")
+);
+
+const deletePromptReply = await handleTextMessage(env, lineUserId, "ลบนัด ประชุมทีม", origin);
+check("delete asks to confirm first", deletePromptReply.includes("ประชุมทีม") && calendarEvents.length === 1);
+const deleteConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the delete removes the event",
+  deleteConfirmReply.includes("ลบนัด") && calendarEvents.length === 0
+);
+
+const deleteMissingReply = await handleTextMessage(env, lineUserId, "ลบนัด ไม่มีจริง", origin);
+check("deleting a non-existent event says so instead of erroring", deleteMissingReply.includes("ไม่พบนัด"));
+
+simulateInsufficientCalendarScope = true;
+const relinkReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรวันนี้", origin);
+check(
+  "a scope-less refresh token gets a re-link prompt, not a crash",
+  relinkReply.includes("สิทธิ์ปฏิทินเพิ่ม") && relinkReply.includes("accounts.google.com")
+);
+simulateInsufficientCalendarScope = false;
+
+// 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
+// category, monthly listing, and search.
+const diaryPromptReply = await handleTextMessage(env, lineUserId, "ไดอารี่ วันนี้อากาศดีมาก", origin);
+check(
+  "diary create defaults to the uncategorized bucket and asks to confirm",
+  diaryPromptReply.includes("อื่นๆ") && diaryPromptReply.includes("อากาศดีมาก") && diaryRows.length === 0
+);
+const diaryConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("confirming saves the diary entry", diaryConfirmReply.includes("บันทึกไดอารี่แล้ว") && diaryRows.length === 1);
+
+await handleTextMessage(env, lineUserId, "บันทึก #งาน ประชุมเสร็จเร็ว", origin);
+const diaryCatConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "explicit #category is picked up and saved",
+  diaryCatConfirmReply.includes('"งาน"') && diaryRows.length === 2 && diaryRows[1][2] === "งาน"
+);
+
+const diaryMonthReply = await handleTextMessage(env, lineUserId, "ไดอารี่เดือนนี้มีอะไรบ้าง", origin);
+check(
+  "monthly diary list shows both entries",
+  diaryMonthReply.includes("อากาศดีมาก") && diaryMonthReply.includes("ประชุมเสร็จเร็ว")
+);
+
+const diarySearchReply = await handleTextMessage(env, lineUserId, "ค้นหาไดอารี่ ประชุม", origin);
+check(
+  "diary search only matches the relevant entry",
+  diarySearchReply.includes("ประชุมเสร็จเร็ว") && !diarySearchReply.includes("อากาศดีมาก")
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
