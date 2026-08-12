@@ -52,7 +52,27 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.endsWith("/v4/spreadsheets")) {
     return new Response(JSON.stringify({ spreadsheetId: "fake-sheet-id" }), { status: 200 });
   }
+  if (u.includes("?fields=sheets.properties") && !u.includes(".title")) {
+    return new Response(
+      JSON.stringify({
+        sheets: [
+          { properties: { sheetId: 0, title: "Transactions" } },
+          { properties: { sheetId: 1, title: "Categories" } },
+          { properties: { sheetId: 2, title: "Budgets" } },
+        ],
+      }),
+      { status: 200 }
+    );
+  }
   if (u.includes(":batchUpdate")) {
+    const body = init.body ? JSON.parse(init.body) : {};
+    const deleteReq = (body.requests ?? []).find((r) => r.deleteDimension);
+    if (deleteReq) {
+      const { startIndex, endIndex } = deleteReq.deleteDimension.range;
+      // sheetRows holds only data rows (no header), matching the real sheet's
+      // row 2 = index 0 offset already applied by the real code under test.
+      sheetRows.splice(startIndex - 1, endIndex - startIndex);
+    }
     return new Response(JSON.stringify({}), { status: 200 });
   }
   if (u.includes("Transactions!A1:append")) {
@@ -72,9 +92,10 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response("{}", { status: 200 });
   }
   if (u.startsWith("https://api-data.line.me/v2/bot/message/") && u.endsWith("/content")) {
+    const isVideo = u.includes("vid-");
     return new Response(new Uint8Array([1, 2, 3, 4]).buffer, {
       status: 200,
-      headers: { "content-type": "image/jpeg" },
+      headers: { "content-type": isVideo ? "video/mp4" : "image/jpeg" },
     });
   }
   if (u.startsWith("https://www.googleapis.com/drive/v3/files")) {
@@ -172,7 +193,7 @@ globalThis.fetch = async (url, init = {}) => {
   throw new Error(`unexpected fetch to ${u}`);
 };
 
-const { handleTextMessage, handleImageMessage } = await import("../src/index.ts");
+const { handleTextMessage, handleImageMessage, handleVideoMessage } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
 const { bangkokDateKey, addDaysToDateKey } = await import("../src/thaiDate.ts");
@@ -275,6 +296,23 @@ check("search finds the matching transaction", searchReply.includes("40"));
 const recentReply = await handleTextMessage(env, lineUserId, "รายการล่าสุด", origin);
 check("recent transactions list is returned", recentReply.includes("5 รายการล่าสุด"));
 
+// Regression test for a real report: "ยกเลิกรายการล่าสุด" contains
+// "รายการล่าสุด" as a substring, which commands.ts's includesAny-based
+// report matcher used to catch first, just showing the list again instead
+// of deleting anything (there was no delete command at all). Must actually
+// delete now, with a confirm step first.
+const rowCountBeforeDelete = sheetRows.length;
+const deleteLastPromptReply = await handleTextMessage(env, lineUserId, "ยกเลิกรายการล่าสุด", origin);
+check(
+  "asks to confirm before deleting, doesn't just show the list again",
+  deleteLastPromptReply.includes("จะลบรายการล่าสุด") && sheetRows.length === rowCountBeforeDelete
+);
+const deleteLastConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming actually removes the row from the sheet",
+  deleteLastConfirmReply.includes("ลบรายการล่าสุดแล้ว") && sheetRows.length === rowCountBeforeDelete - 1
+);
+
 const helpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
 check(
   "help lists commands grouped by feature area",
@@ -349,6 +387,15 @@ check(
   driveFolders.filter((f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id).length ===
     dateFoldersBeforeSecondPhoto
 );
+
+// Video clips (LINE "video" message type) must upload just like photos —
+// regression test for a real report: a user sent both photos and video
+// clips to a trip, but only photos ever showed up in the Drive folder,
+// because the webhook only ever recognized image message events.
+const uploadsBeforeVideo = driveUploads.length;
+const videoReply = await handleVideoMessage(env, lineUserId, "vid-1", Date.now(), origin);
+check("video upload confirms the trip name", videoReply.includes('ทริป "ทะเล"'));
+check("a video upload was recorded", driveUploads.length === uploadsBeforeVideo + 1);
 
 const switchPromptReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
 check(
@@ -447,6 +494,39 @@ const decimalTitleConfirmReply = await handleTextMessage(env, lineUserId, "ใ�
 check(
   "the event is actually created at the real time, not the decimal in the title",
   decimalTitleConfirmReply.includes("15:30") && calendarEvents[0].start.dateTime.includes("15:30")
+);
+
+// Regression test for a real report: "4 กันยายน 2569 นัดฉีดวัคซีน" (date
+// first, "นัด" not at the start, no explicit time) used to match nothing in
+// calendarCommands and fall all the way through to the money parser, which
+// happily recorded a nonsense "4 บาท" health expense instead of telling the
+// user their appointment attempt was missing a time.
+const sheetRowsBeforeNadMisfire = sheetRows.length;
+const calendarEventsBeforeNadMisfire = calendarEvents.length;
+const nadMisfireReply = await handleTextMessage(env, lineUserId, "4 กันยายน 2569 นัดฉีดวัคซีน", origin);
+check(
+  "a date-first appointment attempt with no time gets the format hint, not a bogus expense",
+  nadMisfireReply.includes("นัด ประชุมทีม") && sheetRows.length === sheetRowsBeforeNadMisfire
+);
+check("no stray calendar event was created either", calendarEvents.length === calendarEventsBeforeNadMisfire);
+
+// A real expense that happens to contain "นัด" glued onto a preceding word
+// (no space before it, e.g. "ค่านัดหมอ") must NOT be hijacked into a
+// calendar-command attempt — the heuristic above only fires when "นัด" is a
+// standalone, whitespace-separated word.
+const doctorFeeReply = await handleTextMessage(env, lineUserId, "ค่านัดหมอ 500", origin);
+check(
+  "an expense with 'นัด' glued onto another word is still logged as money",
+  doctorFeeReply.includes("500") && sheetRows.length === sheetRowsBeforeNadMisfire + 1
+);
+
+// "นัดวันนี้" is a fixed alias for "list today's events" and must still work
+// now that the looser "นัด ... " create-match was added — it must not be
+// swallowed as an attempt to create an event titled "วันนี้".
+const nadTodayAliasReply = await handleTextMessage(env, lineUserId, "นัดวันนี้", origin);
+check(
+  "'นัดวันนี้' still lists today's events instead of being treated as a create attempt",
+  nadTodayAliasReply.includes("นัดช่วงวันนี้") || nadTodayAliasReply.includes("ไม่มีนัดช่วงวันนี้")
 );
 
 simulateInsufficientCalendarScope = true;

@@ -7,6 +7,7 @@
 import { applyCalendarCreate, applyCalendarDelete, applyCalendarEdit } from "./calendarCommands.ts";
 import { applyDiaryCreate } from "./diaryCommands.ts";
 import { setPendingConfirmation, type ActionCtx, type PendingConfirmation } from "./state.ts";
+import { applyTransactionDeleteLast } from "./transactionCommands.ts";
 import { applyTripSwitch } from "./tripCommands.ts";
 
 const AFFIRMATIVE = ["ใช่", "ยืนยัน", "ตกลง", "โอเค", "ok", "yes", "y"];
@@ -39,5 +40,7 @@ export async function resolveConfirmation(
       return applyCalendarEdit(ctx, pending);
     case "diaryCreate":
       return applyDiaryCreate(ctx, pending);
+    case "transactionDeleteLast":
+      return applyTransactionDeleteLast(ctx);
   }
 }

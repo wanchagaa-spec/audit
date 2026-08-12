@@ -42,6 +42,27 @@ function parseEventDraft(payload: string): EventDraft | null {
   return { title: title || "นัด", dateKey: date.dateKey, time: time.time };
 }
 
+/**
+ * Finds the "นัด" command word and returns everything else as the payload to
+ * parse — trying "นัด" at the very start first ("นัด ประชุมทีม 12/1 13:00"),
+ * then falling back to "นัด" appearing later in the message, as long as it's
+ * preceded by whitespace or the start of the string (so it still catches the
+ * natural "<date> นัด<เรื่อง>" phrasing, e.g. "4 ก.ย. 2569 นัดฉีดวัคซีน", but
+ * doesn't fire on "นัด" glued onto a preceding word like "ค่านัดหมอ 500" —
+ * that's a real expense, not an appointment). Returns null if "นัด" isn't
+ * found as a standalone word at all, so the message is free to fall through
+ * to the money parser as before.
+ */
+function extractNadPayload(text: string): string | null {
+  const atStart = text.match(/^นัด\s*(.*)$/s);
+  if (atStart) return atStart[1];
+  // Not at the start — only match "นัด" preceded by whitespace (not glued
+  // onto a preceding word), and only its first occurrence.
+  const later = text.match(/^(.*?)\s+นัด\s*(.*)$/s);
+  if (later) return `${later[2]} ${later[1]}`.trim();
+  return null;
+}
+
 function formatEventLines(events: Array<{ dateKey: string; time: string; title: string }>): string[] {
   return events.map((e) => `${e.time || "-"} ${e.title}`);
 }
@@ -72,18 +93,10 @@ async function findExactlyOne(
 export async function matchCalendarCommand(text: string): Promise<Handler | null> {
   const trimmed = text.trim();
 
-  const newEventMatch = trimmed.match(/^นัด\s+(.+)$/s);
-  if (newEventMatch) {
-    const draft = parseEventDraft(newEventMatch[1]);
-    if (!draft) {
-      return async () =>
-        'ไม่พบวันที่/เวลาในข้อความนะ ลองพิมพ์แบบ "นัด ประชุมทีม 12/1/2569 13:00" หรือ "นัด ประชุมทีม 12 ม.ค. 13:00" ดู';
-    }
-    return async (ctx) => {
-      await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "calendarCreate", ...draft });
-      return `จะสร้างนัด: "${draft.title}" วันที่ ${formatThaiDateLabel(draft.dateKey)} เวลา ${draft.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
-    };
-  }
+  // Fixed phrases and other "นัด"-glued-to-a-prefix commands (ลบนัด, แก้นัด)
+  // are checked first, ahead of the looser create-command match below, so
+  // e.g. "นัดวันนี้" still lists today's events instead of being swallowed
+  // as an attempt to create an event called "วันนี้".
 
   if (["มีนัดอะไรวันนี้", "นัดวันนี้", "วันนี้มีนัดอะไร"].includes(trimmed)) {
     return async (ctx) => {
@@ -145,6 +158,24 @@ export async function matchCalendarCommand(text: string): Promise<Handler | null
       };
       await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "calendarEdit", eventId: event.id, ...draft });
       return `จะแก้นัด "${event.title}" เป็นวันที่ ${formatThaiDateLabel(draft.dateKey)} เวลา ${draft.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+    };
+  }
+
+  // Loosest check last: catches both "นัด ประชุมทีม 12/1 13:00" and the
+  // natural "4 ก.ย. 2569 นัดฉีดวัคซีน" phrasing (date first). Without this,
+  // a message like the latter has no "นัด" at position 0, doesn't match
+  // anything above, and used to fall all the way through to the money
+  // parser — which happily (and wrongly) recorded "4" as an expense amount.
+  const nadPayload = extractNadPayload(trimmed);
+  if (nadPayload !== null) {
+    const draft = parseEventDraft(nadPayload);
+    if (!draft) {
+      return async () =>
+        'ไม่พบวันที่/เวลาในข้อความนะ ลองพิมพ์แบบ "นัด ประชุมทีม 12/1/2569 13:00" หรือ "นัด ประชุมทีม 12 ม.ค. 13:00" ดู';
+    }
+    return async (ctx) => {
+      await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "calendarCreate", ...draft });
+      return `จะสร้างนัด: "${draft.title}" วันที่ ${formatThaiDateLabel(draft.dateKey)} เวลา ${draft.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
     };
   }
 

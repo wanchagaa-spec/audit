@@ -1,11 +1,11 @@
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { readAllTransactions, readBudgets, type TransactionRow } from "./sheets.ts";
 
-function formatBaht(n: number): string {
+export function formatBaht(n: number): string {
   return n.toLocaleString("th-TH", { maximumFractionDigits: 2 });
 }
 
-function categoryLabel(categoryId: string): string {
+export function categoryLabel(categoryId: string): string {
   const cat = DEFAULT_CATEGORIES.find((c) => c.id === categoryId);
   return `${cat?.icon ?? "📦"} ${cat?.name ?? "อื่น ๆ"}`;
 }
@@ -101,9 +101,10 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
         "• เหลือเงินเท่าไหร่ / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่",
         "• วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด / เฉลี่ยใช้เงินต่อวันเท่าไหร่ / งบเหลือเท่าไหร่",
         "• ค้นหา <คำ> เช่น \"ค้นหากาแฟ\" / รายการล่าสุด",
+        "• ลบรายการล่าสุด (หรือ ยกเลิกรายการล่าสุด) ถ้าจดผิด",
         "",
         "📸 อัลบั้มรูปทริป",
-        "• เริ่มทริป <ชื่อ> แล้วส่งรูปเข้ามาได้เลย เก็บขึ้น Google Drive ให้อัตโนมัติ แยกโฟลเดอร์ตามวันที่ / จบทริป / ทริปตอนนี้",
+        "• เริ่มทริป <ชื่อ> แล้วส่งรูป/คลิปวิดีโอเข้ามาได้เลย เก็บขึ้น Google Drive ให้อัตโนมัติ แยกโฟลเดอร์ตามวันที่ / จบทริป / ทริปตอนนี้",
         "",
         "📅 ปฏิทิน (เตือนผ่าน Google Calendar)",
         "• นัด <เรื่อง> <วันที่> <เวลา> เช่น \"นัด ประชุมทีม 12/1/2569 13:00\"",
