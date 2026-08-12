@@ -144,6 +144,11 @@ export function bangkokYear(d: Date = new Date()): number {
   return Number(bangkokDateKey(d).slice(0, 4));
 }
 
+/** "YYYY-MM" for the current moment in Asia/Bangkok time. */
+export function bangkokMonthKey(d: Date = new Date()): string {
+  return bangkokDateKey(d).slice(0, 7);
+}
+
 /** Day-folder name like "1-1-2569" in Asia/Bangkok time with a Buddhist-era year. */
 export function bangkokDateFolderName(timestampMs: number): string {
   const bk = toBangkok(new Date(timestampMs));

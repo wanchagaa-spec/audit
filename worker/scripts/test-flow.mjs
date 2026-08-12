@@ -566,10 +566,32 @@ check(
   diaryCatConfirmReply.includes('"งาน"') && diaryRows.length === 2 && diaryRows[1][2] === "งาน"
 );
 
+// Monthly view is a category+date summary now, not a full text dump — a
+// user asked for this after realizing a long month of diary entries could
+// exceed LINE's 5,000-character reply limit and get silently cut off. The
+// full text for a given day comes from "ไดอารี่วันที่ <วันที่>" instead.
 const diaryMonthReply = await handleTextMessage(env, lineUserId, "ไดอารี่เดือนนี้มีอะไรบ้าง", origin);
 check(
-  "monthly diary list shows both entries",
-  diaryMonthReply.includes("อากาศดีมาก") && diaryMonthReply.includes("ประชุมเสร็จเร็ว")
+  "monthly diary summary shows a total, category breakdown, and a hint — not the raw text",
+  diaryMonthReply.includes("2 รายการ") &&
+    diaryMonthReply.includes("อื่นๆ: 1 รายการ") &&
+    diaryMonthReply.includes("งาน: 1 รายการ") &&
+    diaryMonthReply.includes("ไดอารี่วันที่") &&
+    !diaryMonthReply.includes("อากาศดีมาก") &&
+    !diaryMonthReply.includes("ประชุมเสร็จเร็ว")
+);
+
+const todaySlashForDiary = toSlashDate(bangkokDateKey());
+const diaryByDateReply = await handleTextMessage(env, lineUserId, `ไดอารี่วันที่ ${todaySlashForDiary}`, origin);
+check(
+  "viewing a specific date shows the full text for that day's entries",
+  diaryByDateReply.includes("อากาศดีมาก") && diaryByDateReply.includes("ประชุมเสร็จเร็ว") && diaryByDateReply.includes("2 รายการ")
+);
+
+const diaryByDateEmptyReply = await handleTextMessage(env, lineUserId, "ไดอารี่วันที่ 1/1/2500", origin);
+check(
+  "viewing a date with no entries says so instead of erroring",
+  diaryByDateEmptyReply.includes("ยังไม่มีบันทึกไดอารี่")
 );
 
 const diarySearchReply = await handleTextMessage(env, lineUserId, "ค้นหาไดอารี่ ประชุม", origin);
@@ -581,6 +603,20 @@ check(
 check(
   "the Diary tab's existence is only checked once, then cached in KV",
   diaryTabMetaCalls === 1
+);
+
+// Proves the actual scaling concern is fixed: writing a lot in a month used
+// to produce one giant reply that could exceed LINE's 5,000-character limit
+// and get silently truncated. Add a bunch more entries with long text and
+// confirm the monthly summary reply stays small regardless.
+for (let i = 0; i < 15; i++) {
+  await handleTextMessage(env, lineUserId, `ไดอารี่ วันนี้เป็นวันที่เหนื่อยมากเพราะทำงานหนักเรื่องที่ ${i} จนดึกดื่น`, origin);
+  await handleTextMessage(env, lineUserId, "ใช่", origin);
+}
+const diaryMonthReplyAfterMany = await handleTextMessage(env, lineUserId, "ไดอารี่เดือนนี้มีอะไรบ้าง", origin);
+check(
+  "the monthly summary stays short no matter how many entries exist",
+  diaryMonthReplyAfterMany.length < 1000 && diaryMonthReplyAfterMany.includes("17 รายการ")
 );
 
 // A message with an embedded newline (very normal to type in LINE) must

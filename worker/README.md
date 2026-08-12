@@ -202,7 +202,13 @@ calendar command.
 - `ไดอารี่ <ข้อความ>` or `บันทึก <ข้อความ>` — e.g. "ไดอารี่ วันนี้อากาศดีมาก". Add `#หมวด` right
   after the command to tag a category (e.g. "ไดอารี่ #งาน ประชุมเสร็จเร็ว"); otherwise it's
   filed under "อื่นๆ". Confirms before saving, same as calendar.
-- `ไดอารี่เดือนนี้มีอะไรบ้าง` / `ค้นหาไดอารี่ <คำ>` — read entries back.
+- `ไดอารี่เดือนนี้มีอะไรบ้าง` — a **summary**, not a full dump: total count, a breakdown by
+  category, and the list of days that have entries. Writing a lot in a month used to produce
+  one giant reply that could silently get cut off by LINE's 5,000-character text limit — this
+  keeps the reply small no matter how much was written.
+- `ไดอารี่วันที่ <วันที่>` — e.g. "ไดอารี่วันที่ 1/1/2569" — the full text for just that one day,
+  for when you want the detail the monthly summary leaves out.
+- `ค้นหาไดอารี่ <คำ>` — read entries back by keyword (capped at the 10 most recent matches).
 - No edit/delete commands yet for diary entries (lower stakes than a wrong calendar event
   or a lost transaction, so this was left out of v1 — see Known limitations below).
 

@@ -1,11 +1,13 @@
 // Diary chat commands (PLAN.md 15.4): "ไดอารี่ <ข้อความ>" (or "บันทึก ...") to
-// write, with an optional "#หมวด" prefix; "ไดอารี่เดือนนี้มีอะไรบ้าง" and
-// "ค้นหาไดอารี่ <คำ>" to read back. Entries always go to the personal
+// write, with an optional "#หมวด" prefix; "ไดอารี่เดือนนี้มีอะไรบ้าง" for a
+// monthly summary, "ไดอารี่วันที่ <วันที่>" for one day's entries in full, and
+// "ค้นหาไดอารี่ <คำ>" to search. Entries always go to the personal
 // spreadsheet passed in via ctx.spreadsheetId — never a shared group book
 // (PLAN.md 15.5). Edit/delete aren't in scope for v1 (see worker/README.md).
 
 import { appendDiaryEntry, readAllDiaryEntries } from "./sheets.ts";
 import { setPendingConfirmation, type ActionCtx } from "./state.ts";
+import { bangkokDateKey, bangkokMonthKey, bangkokYear, extractDate, formatThaiDateLabel } from "./thaiDate.ts";
 
 type Handler = (ctx: ActionCtx) => Promise<string>;
 
@@ -20,12 +22,28 @@ function parseNewDiary(text: string): { category: string; text: string } | null 
   return { category: DEFAULT_CATEGORY, text: payload };
 }
 
-function currentMonthKey(): string {
-  return new Date().toISOString().slice(0, 7);
-}
-
 export async function matchDiaryCommand(text: string): Promise<Handler | null> {
   const trimmed = text.trim();
+
+  // Checked ahead of the create-command match below: "ไดอารี่วันที่ 1/1/2569"
+  // would otherwise also match "ไดอารี่ <ข้อความ>" and get saved as a new
+  // entry whose text is literally "วันที่ 1/1/2569".
+  const viewDateMatch = trimmed.match(/^(?:แสดง|ดู)?ไดอารี่\s*วันที่\s*(.+)$/s);
+  if (viewDateMatch) {
+    const parsed = extractDate(viewDateMatch[1].trim(), bangkokYear());
+    if (!parsed) {
+      return async () =>
+        'ไม่พบวันที่ในข้อความนะ ลองพิมพ์แบบ "ไดอารี่วันที่ 1/1/2569" หรือ "ไดอารี่วันที่ 1 ม.ค." ดู';
+    }
+    return async (ctx) => {
+      const all = await readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv);
+      const rows = all.filter((r) => r.date === parsed.dateKey);
+      const label = formatThaiDateLabel(parsed.dateKey);
+      if (rows.length === 0) return `วันที่ ${label} ยังไม่มีบันทึกไดอารี่เลยนะ`;
+      const lines = rows.map((r) => `[${r.category}] ${r.text}`);
+      return [`ไดอารี่วันที่ ${label} (${rows.length} รายการ):`, ...lines].join("\n");
+    };
+  }
 
   const draft = parseNewDiary(trimmed);
   if (draft) {
@@ -37,12 +55,39 @@ export async function matchDiaryCommand(text: string): Promise<Handler | null> {
 
   if (["ไดอารี่เดือนนี้มีอะไรบ้าง", "ไดอารี่เดือนนี้"].includes(trimmed)) {
     return async (ctx) => {
-      const month = currentMonthKey();
+      const month = bangkokMonthKey();
       const all = await readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv);
       const rows = all.filter((r) => r.date?.startsWith(month));
       if (rows.length === 0) return "เดือนนี้ยังไม่มีบันทึกไดอารี่เลยนะ";
-      const lines = rows.map((r) => `${r.date} [${r.category}] ${r.text}`);
-      return [`ไดอารี่เดือนนี้ (${rows.length} รายการ):`, ...lines].join("\n");
+
+      // A summary, not a full dump: writing a lot in a month used to produce
+      // one giant reply that LINE's 5,000-character text limit would
+      // silently cut off partway through, with no indication anything was
+      // missing. Counts and a list of which days have entries stay small no
+      // matter how much was written; "ไดอารี่วันที่ <วันที่>" gets the detail.
+      const byCategory = new Map<string, number>();
+      const dates = new Set<string>();
+      for (const r of rows) {
+        byCategory.set(r.category, (byCategory.get(r.category) ?? 0) + 1);
+        dates.add(r.date);
+      }
+      const categoryLines = Array.from(byCategory.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([category, count]) => `• ${category}: ${count} รายการ`);
+      const dateLabels = Array.from(dates)
+        .sort()
+        .map((d) => formatThaiDateLabel(d));
+
+      return [
+        `ไดอารี่เดือนนี้ (${month}): ${rows.length} รายการ`,
+        "",
+        "แยกตามหมวด:",
+        ...categoryLines,
+        "",
+        `มีบันทึกวันที่: ${dateLabels.join(", ")}`,
+        "",
+        'พิมพ์ "ไดอารี่วันที่ <วันที่>" เพื่อดูรายละเอียดวันนั้น เช่น "ไดอารี่วันที่ 1/1/2569"',
+      ].join("\n");
     };
   }
 
@@ -68,13 +113,13 @@ export async function applyDiaryCreate(
   ctx: ActionCtx,
   pending: { category: string; text: string }
 ): Promise<string> {
-  const now = new Date().toISOString();
+  const now = new Date();
   await appendDiaryEntry(ctx.accessToken, ctx.spreadsheetId, ctx.kv, {
     id: crypto.randomUUID(),
-    date: now.slice(0, 10),
+    date: bangkokDateKey(now), // Bangkok-local, not UTC — matches how it's queried back
     category: pending.category,
     text: pending.text,
-    createdAt: now,
+    createdAt: now.toISOString(),
   });
   return `บันทึกไดอารี่แล้ว หมวด "${pending.category}"`;
 }
