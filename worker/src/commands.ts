@@ -82,7 +82,7 @@ function includesAny(text: string, phrases: string[]): boolean {
 }
 
 function searchMatch(text: string): string | null {
-  const m = text.trim().match(/^(?:ค้นหา|หา)\s*(.+)$/);
+  const m = text.trim().match(/^(?:ค้นหา|หา)\s*(.+)$/s);
   return m ? m[1].trim() : null;
 }
 

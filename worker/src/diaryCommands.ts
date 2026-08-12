@@ -12,10 +12,10 @@ type Handler = (ctx: ActionCtx) => Promise<string>;
 const DEFAULT_CATEGORY = "อื่นๆ";
 
 function parseNewDiary(text: string): { category: string; text: string } | null {
-  const m = text.trim().match(/^(?:ไดอารี่|บันทึก)\s+(.+)$/);
+  const m = text.trim().match(/^(?:ไดอารี่|บันทึก)\s+(.+)$/s);
   if (!m) return null;
   const payload = m[1].trim();
-  const withCategory = payload.match(/^#(\S+)\s+(.+)$/);
+  const withCategory = payload.match(/^#(\S+)\s+(.+)$/s);
   if (withCategory) return { category: withCategory[1], text: withCategory[2].trim() };
   return { category: DEFAULT_CATEGORY, text: payload };
 }
@@ -38,7 +38,7 @@ export async function matchDiaryCommand(text: string): Promise<Handler | null> {
   if (["ไดอารี่เดือนนี้มีอะไรบ้าง", "ไดอารี่เดือนนี้"].includes(trimmed)) {
     return async (ctx) => {
       const month = currentMonthKey();
-      const all = await readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId);
+      const all = await readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv);
       const rows = all.filter((r) => r.date?.startsWith(month));
       if (rows.length === 0) return "เดือนนี้ยังไม่มีบันทึกไดอารี่เลยนะ";
       const lines = rows.map((r) => `${r.date} [${r.category}] ${r.text}`);
@@ -46,11 +46,11 @@ export async function matchDiaryCommand(text: string): Promise<Handler | null> {
     };
   }
 
-  const searchMatch = trimmed.match(/^ค้นหาไดอารี่\s*(.+)$/);
+  const searchMatch = trimmed.match(/^ค้นหาไดอารี่\s*(.+)$/s);
   if (searchMatch) {
     const term = searchMatch[1].trim();
     return async (ctx) => {
-      const all = await readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId);
+      const all = await readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv);
       const matches = all.filter((r) => r.text.includes(term));
       if (matches.length === 0) return `ไม่พบบันทึกไดอารี่ที่มีคำว่า "${term}" เลยนะ`;
       const lines = matches
@@ -69,7 +69,7 @@ export async function applyDiaryCreate(
   pending: { category: string; text: string }
 ): Promise<string> {
   const now = new Date().toISOString();
-  await appendDiaryEntry(ctx.accessToken, ctx.spreadsheetId, {
+  await appendDiaryEntry(ctx.accessToken, ctx.spreadsheetId, ctx.kv, {
     id: crypto.randomUUID(),
     date: now.slice(0, 10),
     category: pending.category,

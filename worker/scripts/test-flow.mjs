@@ -36,6 +36,7 @@ let calendarIdSeq = 0;
 let simulateInsufficientCalendarScope = false;
 
 let diaryTabExists = false;
+let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
 
 const realFetch = fetch;
@@ -136,6 +137,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
   }
   if (u.includes("?fields=sheets.properties.title")) {
+    diaryTabMetaCalls += 1;
     return new Response(JSON.stringify({ sheets: diaryTabExists ? [{ properties: { title: "Diary" } }] : [] }), {
       status: 200,
     });
@@ -319,6 +321,21 @@ check(
   driveFolders.some((f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id)
 );
 
+// A second photo the same day should reuse the cached day-folder id (KV)
+// instead of searching/creating in Drive again — this is what shrinks the
+// duplicate-folder race window found in review.
+const dateFoldersBeforeSecondPhoto = driveFolders.filter(
+  (f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id
+).length;
+const photoReply2 = await handleImageMessage(env, lineUserId, "msg-2b", Date.now(), origin);
+check("second same-day photo also confirms the trip name", photoReply2.includes('ทริป "ทะเล"'));
+check("a second upload was recorded", driveUploads.length === uploadsBeforeTrip + 2);
+check(
+  "the cached day folder was reused, not recreated",
+  driveFolders.filter((f) => f.parentId === driveFolders.find((t) => t.name === "ทะเล").id).length ===
+    dateFoldersBeforeSecondPhoto
+);
+
 const switchPromptReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
 check(
   "starting a new trip while one is open asks to confirm first",
@@ -399,6 +416,25 @@ check(
 const deleteMissingReply = await handleTextMessage(env, lineUserId, "ลบนัด ไม่มีจริง", origin);
 check("deleting a non-existent event says so instead of erroring", deleteMissingReply.includes("ไม่พบนัด"));
 
+// A decimal number in the title (before the date) must not be misread as
+// the time — regression test for a bug found in review where extractTime
+// scanned the whole message and grabbed the first digit:digit-looking match.
+const decimalTitlePromptReply = await handleTextMessage(
+  env,
+  lineUserId,
+  `นัด ประชุมงบ 12.5 ล้าน ${tomorrowSlash} 15:30`,
+  origin
+);
+check(
+  "a decimal number in the title doesn't get mistaken for the time",
+  decimalTitlePromptReply.includes("15:30") && !decimalTitlePromptReply.includes("12:50")
+);
+const decimalTitleConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "the event is actually created at the real time, not the decimal in the title",
+  decimalTitleConfirmReply.includes("15:30") && calendarEvents[0].start.dateTime.includes("15:30")
+);
+
 simulateInsufficientCalendarScope = true;
 const relinkReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรวันนี้", origin);
 check(
@@ -434,6 +470,33 @@ const diarySearchReply = await handleTextMessage(env, lineUserId, "ค้นห�
 check(
   "diary search only matches the relevant entry",
   diarySearchReply.includes("ประชุมเสร็จเร็ว") && !diarySearchReply.includes("อากาศดีมาก")
+);
+
+check(
+  "the Diary tab's existence is only checked once, then cached in KV",
+  diaryTabMetaCalls === 1
+);
+
+// A message with an embedded newline (very normal to type in LINE) must
+// still be recognized as a command — regression test for a bug found in
+// review where the trip/calendar/diary regexes used `.+` without the
+// dotAll flag, so anything past a line break silently failed to match and
+// fell through to the money parser instead.
+const multilineDiaryPromptReply = await handleTextMessage(
+  env,
+  lineUserId,
+  "ไดอารี่ วันนี้อากาศดีมาก\nไปทะเลด้วย",
+  origin
+);
+check(
+  "a multi-line diary message is still recognized as a diary command",
+  multilineDiaryPromptReply.includes("ไปทะเลด้วย")
+);
+const multilineDiaryConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "the multi-line entry is saved with the line break intact",
+  multilineDiaryConfirmReply.includes("บันทึกไดอารี่แล้ว") &&
+    diaryRows.some((r) => r[3] === "วันนี้อากาศดีมาก\nไปทะเลด้วย")
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

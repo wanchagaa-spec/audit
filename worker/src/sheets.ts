@@ -137,27 +137,35 @@ export interface DiaryRow {
   createdAt: string;
 }
 
-async function ensureDiaryTab(accessToken: string, spreadsheetId: string): Promise<void> {
+// Cached per spreadsheetId in KV once confirmed, so normal reads/writes skip
+// the metadata check entirely instead of paying for a spreadsheets.get on
+// every single diary interaction (a tab, once created, doesn't go away).
+async function ensureDiaryTab(accessToken: string, spreadsheetId: string, kv: KVNamespace): Promise<void> {
+  const cacheKey = `diary-tab:${spreadsheetId}`;
+  if (await kv.get(cacheKey)) return;
+
   const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties.title`);
   const titles: string[] = (meta.sheets ?? []).map((s: any) => s.properties.title);
-  if (titles.includes("Diary")) return;
-
-  await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
-    method: "POST",
-    body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Diary" } } }] }),
-  });
-  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A1?valueInputOption=RAW`, {
-    method: "PUT",
-    body: JSON.stringify({ values: [DIARY_HEADERS] }),
-  });
+  if (!titles.includes("Diary")) {
+    await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Diary" } } }] }),
+    });
+    await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A1?valueInputOption=RAW`, {
+      method: "PUT",
+      body: JSON.stringify({ values: [DIARY_HEADERS] }),
+    });
+  }
+  await kv.put(cacheKey, "1");
 }
 
 export async function appendDiaryEntry(
   accessToken: string,
   spreadsheetId: string,
+  kv: KVNamespace,
   entry: DiaryRow
 ): Promise<void> {
-  await ensureDiaryTab(accessToken, spreadsheetId);
+  await ensureDiaryTab(accessToken, spreadsheetId, kv);
   const values = [[entry.id, entry.date, entry.category, entry.text, entry.createdAt]];
   await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A1:append?valueInputOption=RAW`, {
     method: "POST",
@@ -165,8 +173,12 @@ export async function appendDiaryEntry(
   });
 }
 
-export async function readAllDiaryEntries(accessToken: string, spreadsheetId: string): Promise<DiaryRow[]> {
-  await ensureDiaryTab(accessToken, spreadsheetId);
+export async function readAllDiaryEntries(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace
+): Promise<DiaryRow[]> {
+  await ensureDiaryTab(accessToken, spreadsheetId, kv);
   const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A2:E100000`);
   const rows: string[][] = data.values ?? [];
   return rows

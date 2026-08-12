@@ -5,7 +5,7 @@ import { matchCalendarCommand } from "./calendarCommands.ts";
 import { matchCommand } from "./commands.ts";
 import { resolveConfirmation } from "./confirmations.ts";
 import { matchDiaryCommand } from "./diaryCommands.ts";
-import { bangkokDateFolderName, findOrCreateFolder, uploadImageToFolder } from "./drive.ts";
+import { findOrCreateFolderCached, uploadImageToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import {
   fetchLineImageContent,
@@ -26,6 +26,7 @@ import {
   setPending,
   type ActionCtx,
 } from "./state.ts";
+import { bangkokDateFolderName } from "./thaiDate.ts";
 import { matchTripCommand } from "./tripCommands.ts";
 
 export interface Env {
@@ -256,7 +257,14 @@ export async function handleImageMessage(
   return withFreshAccessToken(env, link.refreshToken, async (accessToken) => {
     const { bytes, contentType } = await fetchLineImageContent(messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
     const dateFolder = bangkokDateFolderName(timestampMs);
-    const dayFolderId = await findOrCreateFolder(accessToken, dateFolder, trip.folderId);
+    const dayFolderCacheKey = `dayfolder:${lineUserId}:${trip.folderId}:${dateFolder}`;
+    const dayFolderId = await findOrCreateFolderCached(
+      accessToken,
+      env.ACCOUNTS,
+      dayFolderCacheKey,
+      dateFolder,
+      trip.folderId
+    );
     const ext = contentType.includes("png") ? "png" : "jpg";
     await uploadImageToFolder(accessToken, dayFolderId, `${messageId}.${ext}`, bytes, contentType);
     return `📸 เก็บรูปในทริป "${trip.name}" วันที่ ${dateFolder} แล้ว`;

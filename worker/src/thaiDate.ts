@@ -54,6 +54,7 @@ function christianYear(rawYear: number): number {
 export interface ParsedDate {
   dateKey: string; // YYYY-MM-DD
   matchedText: string;
+  index: number; // position of matchedText within the text that was searched
 }
 
 /** Extracts the first recognizable date in `text`. Returns null if none found. */
@@ -64,7 +65,7 @@ export function extractDate(text: string, defaultYear: number): ParsedDate | nul
     const month = Number(numeric[2]);
     const year = christianYear(Number(numeric[3]));
     const dateKey = toDateKey(year, month, day);
-    if (dateKey) return { dateKey, matchedText: numeric[0] };
+    if (dateKey) return { dateKey, matchedText: numeric[0], index: numeric.index ?? 0 };
   }
 
   const named = text.match(new RegExp(`(\\d{1,2})\\s*(${MONTH_PATTERN})\\s*(\\d{4})?`));
@@ -74,7 +75,7 @@ export function extractDate(text: string, defaultYear: number): ParsedDate | nul
     if (month) {
       const year = named[3] ? christianYear(Number(named[3])) : defaultYear;
       const dateKey = toDateKey(year, month, day);
-      if (dateKey) return { dateKey, matchedText: named[0] };
+      if (dateKey) return { dateKey, matchedText: named[0], index: named.index ?? 0 };
     }
   }
 
@@ -97,6 +98,27 @@ export function extractTime(text: string): ParsedTime | null {
   return { time: `${pad(hour)}:${pad(minute)}`, matchedText: m[0] };
 }
 
+/**
+ * Finds a date and a time together in `text`, preferring a time that appears
+ * right after the date (the "<title> <date> <time>" command shape) over one
+ * found anywhere in the string — otherwise a decimal number elsewhere in a
+ * free-text title (e.g. "ประชุมงบ 12.5 ล้าน") can get misread as a time
+ * before the real one is ever reached. Falls back to searching the text
+ * before the date if nothing follows it.
+ */
+export function extractDateAndTime(
+  text: string,
+  defaultYear: number
+): { date: ParsedDate; time: ParsedTime } | null {
+  const date = extractDate(text, defaultYear);
+  if (!date) return null;
+  const after = text.slice(date.index + date.matchedText.length);
+  const before = text.slice(0, date.index);
+  const time = extractTime(after) ?? extractTime(before);
+  if (!time) return null;
+  return { date, time };
+}
+
 /** "2026-01-12" -> "12 ม.ค. 2569" (Buddhist year, Bangkok-local by construction). */
 export function formatThaiDateLabel(dateKey: string): string {
   const [y, m, d] = dateKey.split("-").map(Number);
@@ -110,6 +132,22 @@ function toBangkok(d: Date): Date {
 /** "YYYY-MM-DD" for the current moment in Asia/Bangkok time. */
 export function bangkokDateKey(d: Date = new Date()): string {
   return toBangkok(d).toISOString().slice(0, 10);
+}
+
+/**
+ * Current year in Asia/Bangkok time (Christian era). Use this instead of
+ * `new Date().getUTCFullYear()` for anything date-related — the Worker runs
+ * in UTC, so for roughly the last 7 hours of every Bangkok year, plain UTC
+ * year is already the *next* year and would misdate an unqualified "1 ม.ค."
+ */
+export function bangkokYear(d: Date = new Date()): number {
+  return Number(bangkokDateKey(d).slice(0, 4));
+}
+
+/** Day-folder name like "1-1-2569" in Asia/Bangkok time with a Buddhist-era year. */
+export function bangkokDateFolderName(timestampMs: number): string {
+  const bk = toBangkok(new Date(timestampMs));
+  return `${bk.getUTCDate()}-${bk.getUTCMonth() + 1}-${bk.getUTCFullYear() + 543}`;
 }
 
 /** 0 = Monday .. 6 = Sunday, in Asia/Bangkok time. */

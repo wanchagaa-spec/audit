@@ -8,7 +8,7 @@ import { getActiveTrip, setActiveTrip, setPendingConfirmation, type ActionCtx, t
 type Handler = (ctx: ActionCtx) => Promise<string>;
 
 function parseStartTrip(text: string): string | null {
-  const m = text.trim().match(/^(?:เริ่มทริป|เปิดทริป)\s+(.+)$/);
+  const m = text.trim().match(/^(?:เริ่มทริป|เปิดทริป)\s+(.+)$/s);
   return m ? m[1].trim() : null;
 }
 

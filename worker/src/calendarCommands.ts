@@ -15,7 +15,9 @@ import {
   bangkokDateKey,
   bangkokStartOfDayIso,
   bangkokWeekdayIndex,
+  bangkokYear,
   extractDate,
+  extractDateAndTime,
   extractTime,
   formatThaiDateLabel,
 } from "./thaiDate.ts";
@@ -29,16 +31,15 @@ interface EventDraft {
 }
 
 function parseEventDraft(payload: string): EventDraft | null {
-  const currentYear = new Date().getUTCFullYear();
-  const dateMatch = extractDate(payload, currentYear);
-  const timeMatch = extractTime(payload);
-  if (!dateMatch || !timeMatch) return null;
+  const found = extractDateAndTime(payload, bangkokYear());
+  if (!found) return null;
+  const { date, time } = found;
   const title = payload
-    .replace(dateMatch.matchedText, "")
-    .replace(timeMatch.matchedText, "")
+    .replace(date.matchedText, "")
+    .replace(time.matchedText, "")
     .replace(/\s+/g, " ")
     .trim();
-  return { title: title || "นัด", dateKey: dateMatch.dateKey, time: timeMatch.time };
+  return { title: title || "นัด", dateKey: date.dateKey, time: time.time };
 }
 
 function formatEventLines(events: Array<{ dateKey: string; time: string; title: string }>): string[] {
@@ -71,7 +72,7 @@ async function findExactlyOne(
 export async function matchCalendarCommand(text: string): Promise<Handler | null> {
   const trimmed = text.trim();
 
-  const newEventMatch = trimmed.match(/^นัด\s+(.+)$/);
+  const newEventMatch = trimmed.match(/^นัด\s+(.+)$/s);
   if (newEventMatch) {
     const draft = parseEventDraft(newEventMatch[1]);
     if (!draft) {
@@ -106,7 +107,7 @@ export async function matchCalendarCommand(text: string): Promise<Handler | null
     };
   }
 
-  const deleteMatch = trimmed.match(/^ลบนัด\s+(.+)$/);
+  const deleteMatch = trimmed.match(/^ลบนัด\s+(.+)$/s);
   if (deleteMatch) {
     const keyword = deleteMatch[1].trim();
     return async (ctx) => {
@@ -124,7 +125,7 @@ export async function matchCalendarCommand(text: string): Promise<Handler | null
     };
   }
 
-  const editMatch = trimmed.match(/^แก้นัด\s+(.+?)\s+เป็น\s+(.+)$/);
+  const editMatch = trimmed.match(/^แก้นัด\s+(.+?)\s+เป็น\s+(.+)$/s);
   if (editMatch) {
     const keyword = editMatch[1].trim();
     const newInfoText = editMatch[2].trim();
@@ -132,8 +133,7 @@ export async function matchCalendarCommand(text: string): Promise<Handler | null
       const found = await findExactlyOne(ctx, keyword);
       if ("message" in found) return found.message;
       const { event } = found;
-      const currentYear = new Date().getUTCFullYear();
-      const newDate = extractDate(newInfoText, currentYear);
+      const newDate = extractDate(newInfoText, bangkokYear());
       const newTime = extractTime(newInfoText);
       if (!newDate && !newTime) {
         return 'ไม่พบวันที่หรือเวลาใหม่เลยนะ ลองพิมพ์แบบ "แก้นัด ประชุมทีม เป็น 13/1/2569 14:00" ดู';
