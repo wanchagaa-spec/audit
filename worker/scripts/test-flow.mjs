@@ -31,6 +31,23 @@ class FakeKV {
   }
 }
 
+// Minimal stand-in for Cloudflare's real ExecutionContext, just enough to
+// test the fetch handler's ctx.waitUntil(...) fast-ack behavior: collects
+// backgrounded promises so a test can explicitly wait for them after
+// checking that the response itself didn't wait.
+class FakeExecutionContext {
+  constructor() {
+    this.waitUntilPromises = [];
+  }
+  waitUntil(promise) {
+    this.waitUntilPromises.push(promise);
+  }
+  async drain() {
+    await Promise.all(this.waitUntilPromises);
+    this.waitUntilPromises = [];
+  }
+}
+
 const sheetRows = []; // simulates the Transactions tab
 const budgetRows = []; // simulates the Budgets tab
 const replies = []; // captures what would have been sent back to LINE
@@ -277,9 +294,14 @@ globalThis.fetch = async (url, init = {}) => {
   throw new Error(`unexpected fetch to ${u}`);
 };
 
-const { handleTextMessage, handleImageMessage, handleVideoMessage, handleWebhook, drainUploadQueue } = await import(
-  "../src/index.ts"
-);
+const {
+  handleTextMessage,
+  handleImageMessage,
+  handleVideoMessage,
+  handleWebhook,
+  drainUploadQueue,
+  default: worker,
+} = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
 const { bangkokDateKey, addDaysToDateKey } = await import("../src/thaiDate.ts");
@@ -672,6 +694,47 @@ check(
   "an unrelated text event in the same webhook call still gets its normal reply",
   replies.length > repliesBeforeTotalFailure &&
     replies.slice(repliesBeforeTotalFailure).some((r) => r.includes("4 เรื่องหลักๆ"))
+);
+
+// Regression test for a real report backed by Cloudflare's own request logs:
+// a webhook invocation was cut short with outcome "canceled" only ~2 seconds
+// in — LINE gave up waiting for a response and disconnected while the
+// Worker was still uploading/replying, well under any CPU or subrequest
+// limit. The fix moves the actual event processing into ctx.waitUntil() so
+// the real `fetch` handler (not handleWebhook, which stays fully
+// synchronous for tests) responds to LINE immediately. This exercises the
+// real default-exported fetch handler with a FakeExecutionContext and
+// checks the response comes back before any upload has happened, then
+// drains the backgrounded work and confirms it actually completes.
+const fastAckImageEvent = {
+  type: "message",
+  message: { type: "image", id: "fastack-img-1" },
+  source: { type: "user", userId: lineUserId },
+  replyToken: "reply-fastack-1",
+  timestamp: Date.now(),
+};
+const fastAckRawBody = JSON.stringify({ events: [fastAckImageEvent] });
+const fastAckSignature = await signLineBody(fastAckRawBody, env.LINE_CHANNEL_SECRET);
+const fastAckRequest = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": fastAckSignature },
+  body: fastAckRawBody,
+});
+const fastAckCtx = new FakeExecutionContext();
+const uploadsBeforeFastAck = driveUploads.length;
+const repliesBeforeFastAck = replies.length;
+const fastAckResponse = await worker.fetch(fastAckRequest, env, fastAckCtx);
+check("the fetch handler responds ok right away", fastAckResponse.status === 200);
+check(
+  "the response comes back before the upload has actually happened",
+  driveUploads.length === uploadsBeforeFastAck && replies.length === repliesBeforeFastAck
+);
+await fastAckCtx.drain();
+check(
+  "draining the backgrounded work actually uploads the file and sends the reply",
+  driveUploads.length === uploadsBeforeFastAck + 1 &&
+    replies.length === repliesBeforeFastAck + 1 &&
+    replies.at(-1).includes('ทริป "ทะเล"')
 );
 
 // Regression test for a real report: even after cutting Drive requests back

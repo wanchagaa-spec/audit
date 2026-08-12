@@ -319,6 +319,27 @@ message gets through if LINE's API is genuinely unreachable for both calls — b
 that failure stays contained to the one batch it happened to, instead of taking the rest of the
 webhook call down with it.
 
+The actual root cause behind this whole saga turned up in Cloudflare's own request logs (Workers
+dashboard → Observability → search `error`, click a row to expand the full event): a real
+invocation was recorded with `"outcome": "canceled"`, `"wallTimeMs": 1993`, `"cpuTimeMs": 7` — cut
+short only ~2 seconds in, nowhere near any CPU-time or subrequest ceiling this codebase had spent
+several rounds tuning against. `canceled` means the request's own client — LINE, in this case —
+disconnected before the Worker finished, and Cloudflare aborted the still-running code as a
+result. LINE, like most webhook senders, expects a fast acknowledgment; making it wait for the
+*entire* upload-and-reply pipeline to finish before responding meant a slow-enough batch could get
+its connection dropped out from under it, killing the Worker mid-execution with no chance for any
+of the error handling above to run at all. Every earlier fix in this section made the processing
+itself more reliable — none of them made the response come back to LINE fast enough to avoid the
+disconnect in the first place, which is why the symptom kept recurring even as its other causes
+got fixed one by one.
+
+The real fix: `handleWebhook` (still fully synchronous, used directly by tests) stays as-is, but
+the production `fetch` handler no longer calls it. Instead it verifies the signature, then hands
+the actual event processing (`processWebhookEvents`) to `ctx.waitUntil()` and returns `"ok"`
+immediately — Cloudflare keeps that promise running in the background after the response has
+already gone out, so LINE gets its fast acknowledgment regardless of how long the real work takes,
+and never has a reason to disconnect mid-request again.
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never
