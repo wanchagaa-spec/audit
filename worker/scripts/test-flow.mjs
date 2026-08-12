@@ -914,6 +914,28 @@ const wrongSignatureRequest = new Request("http://localhost:8787/webhook", {
 const wrongSignatureResponse = await handleWebhook(wrongSignatureRequest, env);
 check("an invalid LINE signature is still rejected", wrongSignatureResponse.status === 401);
 
+// Regression test for a review finding on the fast-ack PR: the invalid-
+// signature check above only exercised handleWebhook directly, not the
+// production fetch handler real LINE traffic actually hits — a future edit
+// to the fetch handler's /webhook branch (e.g. reordering the signature
+// check relative to ctx.waitUntil) could silently break 401-on-bad-signature
+// for real requests without any test catching it.
+const wrongSignatureRequestForFetch = new Request("http://localhost:8787/webhook", {
+  method: "POST",
+  headers: { "x-line-signature": "not-a-real-signature" },
+  body: rawWebhookBody,
+});
+const fetchCtxForBadSignature = new FakeExecutionContext();
+const wrongSignatureFetchResponse = await worker.fetch(wrongSignatureRequestForFetch, env, fetchCtxForBadSignature);
+check(
+  "the real fetch handler also rejects an invalid signature with 401, not just handleWebhook",
+  wrongSignatureFetchResponse.status === 401
+);
+check(
+  "no background work gets scheduled for a request that fails signature verification",
+  fetchCtxForBadSignature.waitUntilPromises.length === 0
+);
+
 // 8. Calendar (PLAN.md 15.3): format hint, confirm-before-create, decline,
 // list by day, search-based edit/delete, and the insufficient-scope re-link.
 const todayKey = bangkokDateKey();
