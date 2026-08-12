@@ -1252,6 +1252,49 @@ check(
   aiPhraseOverlapReply.includes("[mock AI answer]")
 );
 
+// Regression test for a real report: "ถาม นัดพรุ่งนี้มีไหม" got swallowed by
+// matchCalendarCommand's appointment-creation matcher (which matches "นัด"
+// as a standalone word anywhere in the text, not just at the very start —
+// see its own comment for why) before ever reaching the AI, producing the
+// calendar create-parser's "ไม่พบวันที่/เวลาในข้อความนะ..." error instead of
+// an AI answer. Fixed by checking matchAiCommand first, ahead of every other
+// matcher. Also exercises the fix for a second bug found in the same report:
+// the AI used to have zero access to real Calendar data, so it answered a
+// calendar question purely by pattern-matching a similarly-worded Diary
+// entry — this creates a real (mocked) Calendar event for tomorrow and
+// checks it actually reaches the prompt, not just Diary/money data.
+const aiCalendarEventDate = new Date(Date.now() + 24 * 60 * 60 * 1000); // tomorrow
+calendarEvents.push({
+  id: "evt-ai-test-1",
+  summary: "หาหมอฟัน",
+  start: { dateTime: aiCalendarEventDate.toISOString() },
+  end: { dateTime: aiCalendarEventDate.toISOString() },
+});
+const aiCalendarReply = await handleTextMessage(env, lineUserId, "ถาม นัดพรุ่งนี้มีไหม", origin);
+check(
+  '"ถาม นัดพรุ่งนี้มีไหม" reaches the AI instead of being swallowed by the calendar create-parser',
+  aiCalendarReply.includes("[mock AI answer]") && !aiCalendarReply.includes("ไม่พบวันที่/เวลาในข้อความนะ")
+);
+const lastCalendarGeminiRequest = geminiRequests.at(-1);
+check(
+  "the AI prompt includes the real calendar event, not just diary/money data",
+  lastCalendarGeminiRequest.systemInstruction.includes("หาหมอฟัน") &&
+    lastCalendarGeminiRequest.systemInstruction.includes("นัดหมายในปฏิทิน")
+);
+calendarEvents.length = 0; // clean up — nothing after this reads calendarEvents, but keep it tidy
+
+// If fetching Calendar data for the AI's context fails, it should degrade to
+// answering without it (and say so, per buildSystemInstruction) rather than
+// surfacing the calendar-disabled message that isn't relevant to an AI
+// question that may not even be about calendar at all.
+simulateCalendarApiDisabled = true;
+const aiCalendarFailReply = await handleTextMessage(env, lineUserId, "ถาม นัดพรุ่งนี้มีไหม", origin);
+check(
+  "a Calendar fetch failure while building AI context degrades gracefully instead of showing the calendar-disabled message",
+  aiCalendarFailReply.includes("[mock AI answer]") && !aiCalendarFailReply.includes("Google Cloud Console")
+);
+simulateCalendarApiDisabled = false;
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);
