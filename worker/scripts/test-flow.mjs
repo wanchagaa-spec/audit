@@ -463,6 +463,30 @@ check(
   deleteLastConfirmReply.includes("ลบรายการล่าสุดแล้ว") && sheetRows.length === rowCountBeforeDelete - 1
 );
 
+// Regression test for a real report: several items sent as one message, one
+// per line, used to be logged as a single transaction — extractAmount only
+// ever finds the first number in the whole text, so everything after the
+// first line's amount was silently dropped. Exercises the real
+// handleTextMessage entry point end to end, confirming every line becomes
+// its own row in the sheet, not just the first. Placed after every
+// exact-total report assertion above (today's summary, balance, top
+// category, etc.) so its own rows don't perturb numbers those already
+// checked against a known, fixed set of prior transactions.
+const rowCountBeforeMultiline = sheetRows.length;
+const multilineReply = await handleTextMessage(env, lineUserId, "อเมริกาโน่ 50\nลาเต้ 40\nเค้ก 80", origin);
+check("a 3-line batch writes 3 separate rows, not one", sheetRows.length === rowCountBeforeMultiline + 3);
+check(
+  "every amount made it into the sheet, not just the first line's",
+  sheetRows
+    .slice(rowCountBeforeMultiline)
+    .map((r) => r[3])
+    .join(",") === "50,40,80"
+);
+check(
+  "the combined reply mentions the item count and total instead of one line's worth",
+  multilineReply.includes("3 รายการ") && multilineReply.includes("170")
+);
+
 const helpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
 check(
   "help lists commands grouped by feature area",
@@ -1251,6 +1275,49 @@ check(
   '"ถาม <คำถาม>" always goes to the AI, even when the question text also happens to match a hardcoded report phrase',
   aiPhraseOverlapReply.includes("[mock AI answer]")
 );
+
+// Regression test for a real report: "ถาม นัดพรุ่งนี้มีไหม" got swallowed by
+// matchCalendarCommand's appointment-creation matcher (which matches "นัด"
+// as a standalone word anywhere in the text, not just at the very start —
+// see its own comment for why) before ever reaching the AI, producing the
+// calendar create-parser's "ไม่พบวันที่/เวลาในข้อความนะ..." error instead of
+// an AI answer. Fixed by checking matchAiCommand first, ahead of every other
+// matcher. Also exercises the fix for a second bug found in the same report:
+// the AI used to have zero access to real Calendar data, so it answered a
+// calendar question purely by pattern-matching a similarly-worded Diary
+// entry — this creates a real (mocked) Calendar event for tomorrow and
+// checks it actually reaches the prompt, not just Diary/money data.
+const aiCalendarEventDate = new Date(Date.now() + 24 * 60 * 60 * 1000); // tomorrow
+calendarEvents.push({
+  id: "evt-ai-test-1",
+  summary: "หาหมอฟัน",
+  start: { dateTime: aiCalendarEventDate.toISOString() },
+  end: { dateTime: aiCalendarEventDate.toISOString() },
+});
+const aiCalendarReply = await handleTextMessage(env, lineUserId, "ถาม นัดพรุ่งนี้มีไหม", origin);
+check(
+  '"ถาม นัดพรุ่งนี้มีไหม" reaches the AI instead of being swallowed by the calendar create-parser',
+  aiCalendarReply.includes("[mock AI answer]") && !aiCalendarReply.includes("ไม่พบวันที่/เวลาในข้อความนะ")
+);
+const lastCalendarGeminiRequest = geminiRequests.at(-1);
+check(
+  "the AI prompt includes the real calendar event, not just diary/money data",
+  lastCalendarGeminiRequest.systemInstruction.includes("หาหมอฟัน") &&
+    lastCalendarGeminiRequest.systemInstruction.includes("นัดหมายในปฏิทิน")
+);
+calendarEvents.length = 0; // clean up — nothing after this reads calendarEvents, but keep it tidy
+
+// If fetching Calendar data for the AI's context fails, it should degrade to
+// answering without it (and say so, per buildSystemInstruction) rather than
+// surfacing the calendar-disabled message that isn't relevant to an AI
+// question that may not even be about calendar at all.
+simulateCalendarApiDisabled = true;
+const aiCalendarFailReply = await handleTextMessage(env, lineUserId, "ถาม นัดพรุ่งนี้มีไหม", origin);
+check(
+  "a Calendar fetch failure while building AI context degrades gracefully instead of showing the calendar-disabled message",
+  aiCalendarFailReply.includes("[mock AI answer]") && !aiCalendarFailReply.includes("Google Cloud Console")
+);
+simulateCalendarApiDisabled = false;
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

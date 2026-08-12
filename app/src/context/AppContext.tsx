@@ -144,42 +144,60 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const result = handleUserMessage(trimmed, pending, categories);
       setPending(result.pending);
 
+      // transactionDrafts (plural) is set instead of transactionDraft when
+      // one message contained several separate items — see
+      // parseMultilineTransactions in chatEngine.ts. Both are saved the same
+      // way below, just looped for the plural case.
+      const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
       let transactionId: string | undefined;
-      let budgetWarning: string | null = null;
-      if (result.transactionDraft) {
-        const saved = await saveTransaction({
-          bookId: currentBookId,
-          date: todayKey(),
-          type: result.transactionDraft.type,
-          amount: result.transactionDraft.amount,
-          categoryId: result.transactionDraft.categoryId,
-          note: result.transactionDraft.note,
-          rawText: trimmed,
-          addedBy: currentUser.id,
-          addedByName: currentUser.name,
-        });
-        setTransactions((prev) => [...prev, saved]);
-        transactionId = saved.id;
+      const budgetWarnings: string[] = [];
+      if (drafts.length > 0) {
+        // Tracks running spend locally (existing state + everything saved so
+        // far in this batch) so two items in the same category within one
+        // multi-line message are checked against their combined total, not
+        // just each in isolation against pre-existing transactions.
+        let runningTransactions = transactions;
+        const seenBudgetCategories = new Set<string>();
 
-        if (saved.type === "expense") {
-          const month = saved.date.slice(0, 7);
-          const budget = budgets.find(
-            (b) => b.bookId === currentBookId && b.categoryId === saved.categoryId && b.month === month
-          );
-          if (budget) {
-            const spent = transactions
-              .filter(
-                (t) =>
-                  t.bookId === currentBookId &&
-                  t.categoryId === saved.categoryId &&
-                  t.date.slice(0, 7) === month
-              )
-              .reduce((s, t) => s + t.amount, 0) + saved.amount;
-            if (spent > budget.limitAmount) {
-              const category = categories.find((c) => c.id === saved.categoryId);
-              budgetWarning = `⚠️ ใช้จ่ายหมวด ${category?.icon ?? ""} ${category?.name ?? ""} เดือนนี้ไป ${spent.toLocaleString(
-                "th-TH"
-              )} บาท เกินงบที่ตั้งไว้ ${budget.limitAmount.toLocaleString("th-TH")} บาทแล้วนะ`;
+        for (const draft of drafts) {
+          const saved = await saveTransaction({
+            bookId: currentBookId,
+            date: todayKey(),
+            type: draft.type,
+            amount: draft.amount,
+            categoryId: draft.categoryId,
+            note: draft.note,
+            rawText: trimmed,
+            addedBy: currentUser.id,
+            addedByName: currentUser.name,
+          });
+          setTransactions((prev) => [...prev, saved]);
+          runningTransactions = [...runningTransactions, saved];
+          transactionId = saved.id; // only the last one, when there are several — see the botMsg comment below
+
+          if (saved.type === "expense" && !seenBudgetCategories.has(saved.categoryId)) {
+            seenBudgetCategories.add(saved.categoryId);
+            const month = saved.date.slice(0, 7);
+            const budget = budgets.find(
+              (b) => b.bookId === currentBookId && b.categoryId === saved.categoryId && b.month === month
+            );
+            if (budget) {
+              const spent = runningTransactions
+                .filter(
+                  (t) =>
+                    t.bookId === currentBookId &&
+                    t.categoryId === saved.categoryId &&
+                    t.date.slice(0, 7) === month
+                )
+                .reduce((s, t) => s + t.amount, 0);
+              if (spent > budget.limitAmount) {
+                const category = categories.find((c) => c.id === saved.categoryId);
+                budgetWarnings.push(
+                  `⚠️ ใช้จ่ายหมวด ${category?.icon ?? ""} ${category?.name ?? ""} เดือนนี้ไป ${spent.toLocaleString(
+                    "th-TH"
+                  )} บาท เกินงบที่ตั้งไว้ ${budget.limitAmount.toLocaleString("th-TH")} บาทแล้วนะ`
+                );
+              }
             }
           }
         }
@@ -193,12 +211,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         createdAt: new Date().toISOString(),
         authorId: "bot",
         authorName: "ผู้ช่วยจดบัญชี",
-        transactionId,
+        // Only meaningful for the single-item case — a summary message for
+        // several items doesn't correspond to any one of them, so the
+        // amount-badge decoration this powers (see ChatView.tsx) just won't
+        // show for a batch, which is correct (there's no single amount to
+        // badge it with).
+        transactionId: drafts.length === 1 ? transactionId : undefined,
       };
       await saveMessage(botMsg);
       setMessages((prev) => [...prev, botMsg]);
 
-      if (budgetWarning) {
+      for (const budgetWarning of budgetWarnings) {
         const warnMsg: ChatMessage = {
           id: generateId(),
           bookId: currentBookId,

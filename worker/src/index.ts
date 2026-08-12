@@ -220,6 +220,27 @@ export async function handleTextMessage(
       // (see confirmations.ts), fall through and handle `text` normally.
     }
 
+    // Checked before every other matcher below, not just matchCommand's
+    // report shortcuts: "ถาม"/"วิเคราะห์" is an explicit, unambiguous signal
+    // that this message is for the AI, and several other matchers key off
+    // a bare trigger *word* anywhere in the text rather than the message
+    // starting with it — matchCalendarCommand's "นัด" check in particular
+    // (see its own comment on why it can't just require the start) matches
+    // "นัด" anywhere it appears after whitespace, so "ถาม นัดพรุ่งนี้มีไหม"
+    // used to get swallowed as a failed appointment-creation attempt and
+    // never reached the AI at all. Checking this first means "ถาม"/
+    // "วิเคราะห์" always wins, regardless of what trigger words the rest of
+    // the question happens to contain.
+    const aiHandler = await matchAiCommand(text);
+    if (aiHandler) {
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => aiHandler(actionCtx(accessToken)),
+        tokenCache
+      );
+    }
+
     const tripHandler = await matchTripCommand(text);
     if (tripHandler) {
       return await withFreshAccessToken(
@@ -246,20 +267,6 @@ export async function handleTextMessage(
         env,
         link.refreshToken,
         (accessToken) => diaryHandler(actionCtx(accessToken)),
-        tokenCache
-      );
-    }
-
-    // Checked before matchCommand's hardcoded report shortcuts below: e.g.
-    // "ถาม หมวดไหนใช้เงินเยอะที่สุด" should always go to the AI, not get
-    // reinterpreted as the plain "หมวดไหนใช้เงินเยอะที่สุด" report command
-    // just because that phrase happens to appear as a substring.
-    const aiHandler = await matchAiCommand(text);
-    if (aiHandler) {
-      return await withFreshAccessToken(
-        env,
-        link.refreshToken,
-        (accessToken) => aiHandler(actionCtx(accessToken)),
         tokenCache
       );
     }
@@ -313,24 +320,33 @@ export async function handleTextMessage(
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, lineUserId, result.pending);
 
-  if (result.transactionDraft) {
+  // transactionDrafts (plural) is set instead of transactionDraft when one
+  // message contained several separate items — see parseMultilineTransactions
+  // in chatEngine.ts. Both are handled the same way here, just looped for
+  // the plural case, sharing one fetched access token for the whole batch.
+  const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
+  if (drafts.length > 0) {
     const now = new Date().toISOString();
     await withFreshAccessToken(
       env,
       link.refreshToken,
       (accessToken) =>
-        appendTransaction(accessToken, link.spreadsheetId, {
-          id: crypto.randomUUID(),
-          date: now.slice(0, 10),
-          type: result.transactionDraft!.type,
-          amount: result.transactionDraft!.amount,
-          categoryId: result.transactionDraft!.categoryId,
-          note: result.transactionDraft!.note,
-          rawText: text,
-          addedBy: lineUserId,
-          addedByName: "LINE",
-          createdAt: now,
-        }),
+        Promise.all(
+          drafts.map((draft) =>
+            appendTransaction(accessToken, link.spreadsheetId, {
+              id: crypto.randomUUID(),
+              date: now.slice(0, 10),
+              type: draft.type,
+              amount: draft.amount,
+              categoryId: draft.categoryId,
+              note: draft.note,
+              rawText: text,
+              addedBy: lineUserId,
+              addedByName: "LINE",
+              createdAt: now,
+            })
+          )
+        ),
       tokenCache
     );
   }

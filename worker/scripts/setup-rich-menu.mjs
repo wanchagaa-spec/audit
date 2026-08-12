@@ -18,23 +18,27 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const imagePath = join(__dirname, "..", "assets", "rich-menu.png");
 
 // Tap area texts must exactly match phrases the bot already understands
-// (see src/commands.ts, tripCommands.ts, calendarCommands.ts, diaryCommands.ts)
-// — a rich menu tap sends the text as an ordinary message, nothing special.
+// (see src/commands.ts, tripCommands.ts, calendarCommands.ts, diaryCommands.ts,
+// aiCommands.ts) — a rich menu tap sends the text as an ordinary message,
+// nothing special. Bounds must stay in sync with the 4x2 grid drawn in
+// assets/generate-rich-menu.py (625x843 per tile) — only 7 of the 8 tiles
+// get an area here; the 8th (bottom-right) is a non-tappable brand tile.
 const richMenuDefinition = {
   size: { width: 2500, height: 1686 },
   selected: true,
   name: "expense-tracker-main-menu",
   chatBarText: "เมนู",
   areas: [
-    { bounds: { x: 0, y: 0, width: 834, height: 843 }, action: { type: "message", text: "วิธีใช้" } },
-    { bounds: { x: 834, y: 0, width: 833, height: 843 }, action: { type: "message", text: "สรุปเดือนนี้" } },
-    { bounds: { x: 1667, y: 0, width: 833, height: 843 }, action: { type: "message", text: "รายการล่าสุด" } },
-    { bounds: { x: 0, y: 843, width: 834, height: 843 }, action: { type: "message", text: "ทริปตอนนี้" } },
-    { bounds: { x: 834, y: 843, width: 833, height: 843 }, action: { type: "message", text: "มีนัดอะไรวันนี้" } },
+    { bounds: { x: 0, y: 0, width: 625, height: 843 }, action: { type: "message", text: "วิธีใช้" } },
+    { bounds: { x: 625, y: 0, width: 625, height: 843 }, action: { type: "message", text: "สรุปเดือนนี้" } },
+    { bounds: { x: 1250, y: 0, width: 625, height: 843 }, action: { type: "message", text: "รายการล่าสุด" } },
+    { bounds: { x: 1875, y: 0, width: 625, height: 843 }, action: { type: "message", text: "ทริปตอนนี้" } },
+    { bounds: { x: 0, y: 843, width: 625, height: 843 }, action: { type: "message", text: "มีนัดอะไรวันนี้" } },
     {
-      bounds: { x: 1667, y: 843, width: 833, height: 843 },
+      bounds: { x: 625, y: 843, width: 625, height: 843 },
       action: { type: "message", text: "ไดอารี่เดือนนี้มีอะไรบ้าง" },
     },
+    { bounds: { x: 1250, y: 843, width: 625, height: 843 }, action: { type: "message", text: "วิเคราะห์" } },
   ],
 };
 

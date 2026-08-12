@@ -10,11 +10,18 @@
 // natural language, it never sums a column itself. See gemini.ts for the
 // other half of that guarantee.
 
+import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
 import { readAllDiaryEntries, readAllTransactions, type DiaryRow, type TransactionRow } from "./sheets.ts";
-import { bangkokMonthKey } from "./thaiDate.ts";
+import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokStartOfDayIso, formatThaiDateLabel } from "./thaiDate.ts";
 import type { ActionCtx } from "./state.ts";
+
+// How far ahead of today to pull real Calendar events for — calendar
+// questions ("นัดพรุ่งนี้มีไหม", "เช็คนัดวันที่ ...") are inherently
+// forward-looking, unlike money/diary which are scoped to the current month,
+// so this uses its own today-relative window instead of bangkokMonthKey.
+const CALENDAR_LOOKAHEAD_DAYS = 30;
 
 type Handler = (ctx: ActionCtx) => Promise<string>;
 
@@ -68,9 +75,19 @@ function topCategories(rows: TransactionRow[], limit = 5): string[] {
 
 // Builds the whole prompt Gemini sees: authoritative precomputed numbers
 // first (explicitly labeled as the only numbers it should quote back), then
-// a capped raw row list for pattern/qualitative questions the totals alone
+// capped raw row lists for pattern/qualitative questions the totals alone
 // can't answer (e.g. "ซื้อกาแฟกี่ครั้งแล้ว", "ช่วงนี้อารมณ์เป็นยังไงบ้าง").
-function buildSystemInstruction(month: string, txRows: TransactionRow[], diaryRows: DiaryRow[]): string {
+// `calendarEvents` is `null` rather than `[]` when the fetch itself failed
+// (see matchAiCommand) — kept distinct from "fetched fine, zero events" so
+// the prompt can say "couldn't check" instead of implying a confirmed empty
+// calendar, which would otherwise read as "you have no appointments."
+function buildSystemInstruction(
+  month: string,
+  txRows: TransactionRow[],
+  diaryRows: DiaryRow[],
+  calendarEvents: CalendarEventSummary[] | null,
+  calendarRangeLabel: string
+): string {
   const { income, expense } = totals(txRows);
   const top = topCategories(txRows);
   const txLines = txRows
@@ -79,10 +96,15 @@ function buildSystemInstruction(month: string, txRows: TransactionRow[], diaryRo
   const diaryLines = diaryRows
     .slice(-MAX_ROWS_IN_PROMPT)
     .map((r) => `${r.date} [${r.category}] ${r.text}`);
+  const calendarLines = (calendarEvents ?? [])
+    .slice(-MAX_ROWS_IN_PROMPT)
+    .map((e) => `${e.dateKey} ${e.time || "(ไม่ระบุเวลา)"} ${e.title}`);
 
   return [
-    "คุณเป็นผู้ช่วยส่วนตัวในแชท LINE ที่ช่วยตอบคำถามเกี่ยวกับการเงินและไดอารี่ของผู้ใช้คนเดียว",
+    "คุณเป็นผู้ช่วยส่วนตัวในแชท LINE ที่ช่วยตอบคำถามเกี่ยวกับการเงิน นัดหมาย และไดอารี่ของผู้ใช้คนเดียว",
     "ตอบเป็นภาษาไทย น้ำเสียงเป็นกันเอง กระชับ ความยาวพอเหมาะสำหรับข้อความแชท (ไม่เกินสองสามย่อหน้าสั้นๆ)",
+    "ข้อมูลสามชุดด้านล่าง (ตัวเลขการเงิน/นัดหมายในปฏิทิน/ไดอารี่) เป็นคนละแหล่งกัน ห้ามใช้ปนกัน — เช่น",
+    "ห้ามหยิบข้อความในไดอารี่มาตอบคำถามว่ามีนัดหมายในปฏิทินจริงหรือไม่ ให้ใช้เฉพาะรายการนัดหมายที่ให้มา",
     "",
     `ตัวเลขที่คำนวณไว้แล้วสำหรับเดือน ${month} (ใช้ตัวเลขชุดนี้เท่านั้นเวลาตอบคำถามเกี่ยวกับยอดเงิน ห้ามคำนวณหรือเดาตัวเลขเอง):`,
     `- รายรับรวม: ${formatBaht(income)} บาท`,
@@ -93,10 +115,17 @@ function buildSystemInstruction(month: string, txRows: TransactionRow[], diaryRo
     `รายการรายรับ-รายจ่ายเดือนนี้ (ล่าสุด ${txLines.length} รายการ ใช้ดูรูปแบบ/พฤติกรรม ไม่ใช่ใช้คำนวณยอดรวมเอง):`,
     txLines.length > 0 ? txLines.join("\n") : "(ไม่มีรายการ)",
     "",
+    `นัดหมายในปฏิทิน (Google Calendar) ช่วง ${calendarRangeLabel}:`,
+    calendarEvents === null
+      ? "(ไม่สามารถดึงข้อมูลปฏิทินได้ตอนนี้ — ถ้าคำถามเกี่ยวกับนัดหมาย ให้บอกตรงๆ ว่าตอนนี้เช็คปฏิทินไม่ได้ แทนที่จะเดาว่ามีหรือไม่มีนัด)"
+      : calendarLines.length > 0
+        ? calendarLines.join("\n")
+        : "(ไม่มีนัดหมายในช่วงนี้ — เป็นข้อมูลจริงจากปฏิทิน ไม่ใช่ไม่มีข้อมูล)",
+    "",
     `บันทึกไดอารี่เดือนนี้ (ล่าสุด ${diaryLines.length} รายการ):`,
     diaryLines.length > 0 ? diaryLines.join("\n") : "(ไม่มีบันทึก)",
     "",
-    "ถ้าคำถามต้องการข้อมูลที่ไม่มีในนี้ ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ แทนที่จะเดา",
+    "ถ้าคำถามต้องการข้อมูลที่ไม่มีในนี้ (เช่น นัดหมายนอกช่วงที่ให้มา) ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ แทนที่จะเดา",
   ].join("\n");
 }
 
@@ -110,13 +139,38 @@ export async function matchAiCommand(text: string): Promise<Handler | null> {
 
   return async (ctx) => {
     const month = bangkokMonthKey();
+    const today = bangkokDateKey();
+    const rangeEndExclusive = addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS);
+    const calendarRangeLabel = `${formatThaiDateLabel(today)} ถึง ${formatThaiDateLabel(
+      addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS - 1)
+    )}`;
+
     const [allTx, allDiary] = await Promise.all([
       readAllTransactions(ctx.accessToken, ctx.spreadsheetId),
       readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv),
     ]);
+    // Calendar access needs its own OAuth scope some already-linked accounts
+    // never granted, and can fail for other transient reasons too — fetched
+    // separately (not in the Promise.all above) and caught locally so a
+    // calendar hiccup degrades to "couldn't check calendar" instead of
+    // blocking money/diary questions that don't even need it, the way it
+    // would if this threw uncaught up to handleTextMessage's calendar-scope
+    // handling (which would show a relink prompt instead of any AI answer).
+    let calendarEvents: CalendarEventSummary[] | null;
+    try {
+      calendarEvents = await listCalendarEvents(
+        ctx.accessToken,
+        bangkokStartOfDayIso(today),
+        bangkokStartOfDayIso(rangeEndExclusive)
+      );
+    } catch (err) {
+      console.error("askGemini: fetching calendar events failed, continuing without them", err);
+      calendarEvents = null;
+    }
+
     const monthTx = allTx.filter((r) => r.date?.startsWith(month));
     const monthDiary = allDiary.filter((r) => r.date?.startsWith(month));
-    const systemInstruction = buildSystemInstruction(month, monthTx, monthDiary);
+    const systemInstruction = buildSystemInstruction(month, monthTx, monthDiary, calendarEvents, calendarRangeLabel);
 
     try {
       return await askGemini(ctx.geminiApiKey, systemInstruction, request.question);

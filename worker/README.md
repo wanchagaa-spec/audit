@@ -137,7 +137,7 @@ the id straight from the webhook event instead, which is always in the right sco
 
 ### 7. Set up the rich menu (optional, but recommended)
 
-Adds a persistent 6-button image menu under the chat input in LINE — tapping a button just
+Adds a persistent image menu under the chat input in LINE — tapping a button just
 sends its text as an ordinary message, so it's a shortcut into commands the bot already
 understands, nothing new to build on the LINE side.
 
@@ -149,11 +149,13 @@ understands, nothing new to build on the LINE side.
 3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
    the previous menu of the same name first, so it's safe to run repeatedly.
 
-The six buttons: วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด (recent
-transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar), ไดอารี่เดือนนี้มี
-อะไรบ้าง (this month's diary). They're all read/status commands on purpose — commands that
-need more input from you (`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`) can't be a
-single tap, so those stay as typed commands (see `วิธีใช้` for the full list).
+A 4x2 grid: 7 tappable buttons — วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด
+(recent transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar),
+ไดอารี่เดือนนี้มีอะไรบ้าง (this month's diary), วิเคราะห์ (AI analysis, PLAN.md 15.10) — plus a
+non-tappable 8th "ผู้ช่วยการเงิน" brand tile filling out the grid. All 7 real buttons are
+read/status commands on purpose — commands that need more input from you (`เริ่มทริป <ชื่อ>`,
+`นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`, `ถาม <คำถาม>`) can't be a single tap, so those stay as
+typed commands (see `วิธีใช้` for the full list).
 
 ## Try it
 
@@ -441,9 +443,10 @@ The one feature in this bot that isn't rule-based — see PLAN.md 15.10 for the 
 rationale on why this is a deliberate, documented exception rather than a quiet drift away
 from the "free forever, no AI" approach everything else follows.
 
-- `ถาม <คำถาม>` — e.g. "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด" or "ถาม ช่วงนี้ใช้จ่ายเป็นยังไงบ้าง". Sends
-  the question, plus this month's transactions/diary entries and precomputed totals, to
-  Google Gemini (free tier) and replies with its answer.
+- `ถาม <คำถาม>` — e.g. "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด" or "ถาม นัดพรุ่งนี้มีไหม". Sends the
+  question, plus this month's transactions/diary entries (with precomputed totals) and
+  upcoming Calendar events (today through 30 days ahead), to Google Gemini (free tier) and
+  replies with its answer.
 - `วิเคราะห์` (with or without extra text after it) — shortcut for an open-ended "analyze my
   spending and diary this month" request, without having to phrase it as a question yourself.
 - **Money never gets computed by the AI.** Every number in the prompt (`aiCommands.ts`) is
@@ -451,14 +454,22 @@ from the "free forever, no AI" approach everything else follows.
   handed to Gemini pre-labeled as the only numbers it's allowed to quote — the raw
   transaction/diary rows included alongside are for pattern questions ("ซื้อกาแฟกี่ครั้งแล้ว"),
   not for the model to re-sum itself. A wrong total is structurally impossible this way, not
-  just unlikely.
-- If `GEMINI_API_KEY` isn't set, or Gemini's free-tier quota is exhausted, or the request
-  otherwise fails: replies with a plain apology instead of erroring or staying silent — see
-  `gemini.ts`/`aiCommands.ts`.
-- This is the only feature that sends your data (this month's spending/diary text) to a
-  third party outside the Google Sheets/Drive/Calendar/LINE ecosystem the rest of the bot
-  stays within — see setup step 4 above for the free-tier data-usage disclosure before
-  turning it on.
+  just unlikely. Similarly, the prompt tells Gemini its three data sources (money, diary,
+  calendar) are separate and must not be mixed — an earlier bug had it answering "any
+  appointments?" by pattern-matching a similarly-worded Diary entry instead of using real
+  Calendar data, since at the time it had no Calendar data at all.
+- Checked ahead of every other command matcher in `handleTextMessage`, not just the
+  hardcoded report shortcuts: `matchCalendarCommand` in particular matches "นัด" anywhere in
+  the text, not just at the start, so "ถาม นัด...มีไหม" used to get swallowed as a failed
+  appointment-creation attempt and never reach the AI at all.
+- If `GEMINI_API_KEY` isn't set, Gemini's free-tier quota is exhausted, or Calendar access
+  fails for whatever reason (including an older-linked account missing the `calendar.events`
+  scope) — degrades gracefully (a plain apology, or answering without Calendar data and
+  saying so) instead of erroring or staying silent — see `gemini.ts`/`aiCommands.ts`.
+- This is the only feature that sends your data (this month's spending/diary text, upcoming
+  Calendar events) to a third party outside the Google Sheets/Drive/Calendar/LINE ecosystem
+  the rest of the bot stays within — see setup step 4 above for the free-tier data-usage
+  disclosure before turning it on.
 
 ## Local development
 
