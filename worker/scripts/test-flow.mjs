@@ -463,6 +463,30 @@ check(
   deleteLastConfirmReply.includes("ลบรายการล่าสุดแล้ว") && sheetRows.length === rowCountBeforeDelete - 1
 );
 
+// Regression test for a real report: several items sent as one message, one
+// per line, used to be logged as a single transaction — extractAmount only
+// ever finds the first number in the whole text, so everything after the
+// first line's amount was silently dropped. Exercises the real
+// handleTextMessage entry point end to end, confirming every line becomes
+// its own row in the sheet, not just the first. Placed after every
+// exact-total report assertion above (today's summary, balance, top
+// category, etc.) so its own rows don't perturb numbers those already
+// checked against a known, fixed set of prior transactions.
+const rowCountBeforeMultiline = sheetRows.length;
+const multilineReply = await handleTextMessage(env, lineUserId, "อเมริกาโน่ 50\nลาเต้ 40\nเค้ก 80", origin);
+check("a 3-line batch writes 3 separate rows, not one", sheetRows.length === rowCountBeforeMultiline + 3);
+check(
+  "every amount made it into the sheet, not just the first line's",
+  sheetRows
+    .slice(rowCountBeforeMultiline)
+    .map((r) => r[3])
+    .join(",") === "50,40,80"
+);
+check(
+  "the combined reply mentions the item count and total instead of one line's worth",
+  multilineReply.includes("3 รายการ") && multilineReply.includes("170")
+);
+
 const helpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
 check(
   "help lists commands grouped by feature area",

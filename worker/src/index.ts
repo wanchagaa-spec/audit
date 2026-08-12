@@ -320,24 +320,33 @@ export async function handleTextMessage(
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, lineUserId, result.pending);
 
-  if (result.transactionDraft) {
+  // transactionDrafts (plural) is set instead of transactionDraft when one
+  // message contained several separate items — see parseMultilineTransactions
+  // in chatEngine.ts. Both are handled the same way here, just looped for
+  // the plural case, sharing one fetched access token for the whole batch.
+  const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
+  if (drafts.length > 0) {
     const now = new Date().toISOString();
     await withFreshAccessToken(
       env,
       link.refreshToken,
       (accessToken) =>
-        appendTransaction(accessToken, link.spreadsheetId, {
-          id: crypto.randomUUID(),
-          date: now.slice(0, 10),
-          type: result.transactionDraft!.type,
-          amount: result.transactionDraft!.amount,
-          categoryId: result.transactionDraft!.categoryId,
-          note: result.transactionDraft!.note,
-          rawText: text,
-          addedBy: lineUserId,
-          addedByName: "LINE",
-          createdAt: now,
-        }),
+        Promise.all(
+          drafts.map((draft) =>
+            appendTransaction(accessToken, link.spreadsheetId, {
+              id: crypto.randomUUID(),
+              date: now.slice(0, 10),
+              type: draft.type,
+              amount: draft.amount,
+              categoryId: draft.categoryId,
+              note: draft.note,
+              rawText: text,
+              addedBy: lineUserId,
+              addedByName: "LINE",
+              createdAt: now,
+            })
+          )
+        ),
       tokenCache
     );
   }
