@@ -7,11 +7,14 @@
 // sums a column itself, so a wrong total is structurally impossible here,
 // not just unlikely.
 //
-// Model: gemini-2.5-flash-lite — of the three models on Gemini's free tier
-// (flash-lite, flash, pro), it has the most generous daily quota, which
-// matters more than raw quality for a single-user chat bot's Q&A feature.
-// Swapping models later only means changing this one constant.
-const GEMINI_MODEL = "gemini-2.5-flash-lite";
+// Model: gemini-3.5-flash-lite. The 2.5 series (originally used here) got
+// blocked for newly created API keys ahead of its official shutdown —
+// Google returns a 404 "no longer available to new users" for every request
+// from a fresh key, which is exactly the failure a real key hit right after
+// this feature shipped. 3.5-flash-lite is the current free-tier-eligible,
+// low-cost replacement Google points migrators to. Swapping models later
+// (Google's lineup moves fast) only means changing this one constant.
+const GEMINI_MODEL = "gemini-3.5-flash-lite";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 export class GeminiError extends Error {}
