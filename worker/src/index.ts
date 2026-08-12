@@ -16,6 +16,8 @@ import {
   pushToLine,
   replyToLine,
   verifyLineSignature,
+  type LineImageMessageEvent,
+  type LineVideoMessageEvent,
   type LineWebhookBody,
 } from "./line.ts";
 import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
@@ -32,6 +34,13 @@ import {
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand } from "./transactionCommands.ts";
 import { matchTripCommand } from "./tripCommands.ts";
+import {
+  countQueuedForUser,
+  deleteQueueEntry,
+  enqueueUploads,
+  listQueueBatch,
+  type QueuedUpload,
+} from "./uploadQueue.ts";
 
 export interface Env {
   ACCOUNTS: KVNamespace;
@@ -435,6 +444,65 @@ async function processWithConcurrencyLimit<T>(
   }
 }
 
+// Even with bounded concurrency, a genuinely large batch (a real report: 50
+// photos in one LINE multi-select) can still spend enough of one webhook
+// invocation's subrequest/CPU budget to silently lose a file or two — there's
+// only so much budget in a single invocation, no matter how it's spent. At or
+// above this many media files in one webhook call, the whole batch is queued
+// (see uploadQueue.ts) instead of processed immediately, and a scheduled
+// invocation drains it a safe amount at a time — each drain gets its own
+// completely fresh budget, so a batch of any size gets through eventually
+// instead of losing files. Below this, media still uploads immediately with
+// a per-file reply, same as always — most sends are a handful of photos, and
+// there's no reason to make those wait on a once-a-minute cron.
+const IMMEDIATE_MEDIA_BATCH_LIMIT = 20;
+
+// Kept comfortably under the ~50 external-subrequest budget a single
+// invocation gets: each queued item needs up to 2 (fetch from LINE, upload
+// to Drive), leaving headroom for the summary push message(s) at the end.
+const DRAIN_BATCH_SIZE = 20;
+
+async function handleQueuedMediaBatch(
+  env: Env,
+  lineUserId: string,
+  events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
+  origin: string
+): Promise<void> {
+  const link = await getAccountLink(env.ACCOUNTS, lineUserId);
+  if (!link) {
+    await replyOrPush(events[0], await buildUnlinkedPrompt(env, lineUserId, origin), env.LINE_CHANNEL_ACCESS_TOKEN);
+    return;
+  }
+  const trip = await getActiveTrip(env.ACCOUNTS, lineUserId);
+  if (!trip) {
+    await replyOrPush(
+      events[0],
+      'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูป/คลิปตามมาได้เลย',
+      env.LINE_CHANNEL_ACCESS_TOKEN
+    );
+    return;
+  }
+
+  const jobs: QueuedUpload[] = events.map((event) => ({
+    lineUserId,
+    kind: isImageMessageEvent(event) ? "image" : "video",
+    messageId: event.message.id,
+    timestampMs: event.timestamp,
+    tripFolderId: trip.folderId,
+    tripName: trip.name,
+  }));
+  await enqueueUploads(env.ACCOUNTS, jobs);
+
+  // Only one reply for the whole batch — the other events' reply tokens are
+  // simply left unused (LINE tokens that never get used just expire quietly
+  // on their own; there's no cost to skipping them).
+  await replyOrPush(
+    events[0],
+    `📥 รับไว้ ${events.length} ไฟล์แล้ว กำลังทยอยอัปโหลดเข้าทริป "${trip.name}" อยู่นะ จะแจ้งเมื่อเสร็จ`,
+    env.LINE_CHANNEL_ACCESS_TOKEN
+  );
+}
+
 export async function handleWebhook(request: Request, env: Env): Promise<Response> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-line-signature");
@@ -447,6 +515,37 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
   // TokenCache comment on withFreshAccessToken for why.
   const tokenCache: TokenCache = new Map();
 
+  const mediaEvents = body.events.filter(
+    (event): event is LineImageMessageEvent | LineVideoMessageEvent =>
+      isImageMessageEvent(event) || isVideoMessageEvent(event)
+  );
+  const isBigMediaBatch = mediaEvents.length >= IMMEDIATE_MEDIA_BATCH_LIMIT;
+
+  if (isBigMediaBatch) {
+    // Grouped by sender — a webhook call is almost always one person's send,
+    // but handling it generally costs nothing extra.
+    const eventsByUser = new Map<string, Array<LineImageMessageEvent | LineVideoMessageEvent>>();
+    for (const event of mediaEvents) {
+      const forUser = eventsByUser.get(event.source.userId) ?? [];
+      forUser.push(event);
+      eventsByUser.set(event.source.userId, forUser);
+    }
+    await Promise.all(
+      [...eventsByUser.entries()].map(([lineUserId, events]) =>
+        handleQueuedMediaBatch(env, lineUserId, events, origin)
+      )
+    );
+  }
+
+  // Below the threshold, every event (including media) is processed
+  // immediately below, same as always. At/above it, the media events were
+  // already queued above, so only whatever's left (text, unsupported types)
+  // goes through the immediate path.
+  const mediaEventSet = new Set<LineWebhookBody["events"][number]>(mediaEvents);
+  const eventsToProcessNow = isBigMediaBatch
+    ? body.events.filter((event) => !mediaEventSet.has(event))
+    : body.events;
+
   // Processed with bounded concurrency rather than one-at-a-time or all at
   // once — see WEBHOOK_EVENT_CONCURRENCY above for why neither extreme
   // works: a batch of photos/clips used to be handled fully sequentially,
@@ -455,7 +554,7 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
   // token's short window (see replyOrPush); running the whole batch fully
   // concurrently instead fixed that but could spike too many subrequests in
   // flight at once for a large batch.
-  await processWithConcurrencyLimit(body.events, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
+  await processWithConcurrencyLimit(eventsToProcessNow, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
     try {
       if (isTextMessageEvent(event)) {
         const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
@@ -507,6 +606,66 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
   return new Response("ok");
 }
 
+interface DrainUserSummary {
+  tripName: string;
+  succeeded: number;
+  failed: number;
+}
+
+// Called on the cron trigger configured in wrangler.toml (see
+// IMMEDIATE_MEDIA_BATCH_LIMIT/DRAIN_BATCH_SIZE above for the full story of
+// why this exists). Each firing is its own Worker invocation with its own
+// fresh subrequest/CPU budget, so working through a big backlog a bounded
+// amount at a time — rather than trying to force it all through one webhook
+// call's budget — is what actually gets every file uploaded reliably.
+export async function drainUploadQueue(env: Env): Promise<void> {
+  const entries = await listQueueBatch(env.ACCOUNTS, DRAIN_BATCH_SIZE);
+  if (entries.length === 0) return;
+
+  const tokenCache: TokenCache = new Map();
+  const summaries = new Map<string, DrainUserSummary>();
+
+  for (const { key, job } of entries) {
+    const summary = summaries.get(job.lineUserId) ?? { tripName: job.tripName, succeeded: 0, failed: 0 };
+    try {
+      const link = await getAccountLink(env.ACCOUNTS, job.lineUserId);
+      if (link) {
+        await withFreshAccessToken(
+          env,
+          link.refreshToken,
+          async (accessToken) => {
+            const { body, contentType } = await fetchLineMediaContent(job.messageId, env.LINE_CHANNEL_ACCESS_TOKEN);
+            const ext = extensionForContentType(contentType, job.kind);
+            const filename = `${bangkokDateKey(new Date(job.timestampMs))}_${job.messageId}.${ext}`;
+            await uploadFileToFolder(accessToken, job.tripFolderId, filename, body, contentType);
+          },
+          tokenCache
+        );
+      }
+      summary.succeeded++;
+    } catch (err) {
+      console.error("upload queue drain failed", key, err);
+      summary.failed++;
+    } finally {
+      await deleteQueueEntry(env.ACCOUNTS, key);
+    }
+    summary.tripName = job.tripName; // keep whichever job was processed most recently
+    summaries.set(job.lineUserId, summary);
+  }
+
+  for (const [lineUserId, summary] of summaries) {
+    const remaining = await countQueuedForUser(env.ACCOUNTS, lineUserId);
+    const parts = [`✅ อัปโหลดเพิ่ม ${summary.succeeded} ไฟล์เข้าทริป "${summary.tripName}" แล้ว`];
+    if (summary.failed > 0) {
+      parts.push(`(อีก ${summary.failed} ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`);
+    }
+    parts.push(remaining > 0 ? `เหลืออีก ${remaining} ไฟล์ กำลังทยอยอัปโหลดต่อ` : `อัปโหลดครบทุกไฟล์แล้ว`);
+    await pushToLine(lineUserId, parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN).catch((err) =>
+      console.error("drain summary push failed", err)
+    );
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -516,5 +675,8 @@ export default {
     if (url.pathname === "/health") return new Response("ok");
 
     return new Response("not found", { status: 404 });
+  },
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(drainUploadQueue(env));
   },
 };

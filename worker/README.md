@@ -236,6 +236,27 @@ one-at-a-time (which caused the earlier reply-token-expiry problem) or fully con
 caused this one) — capping how many subrequests are ever in flight together while still
 processing much faster than sequentially.
 
+Bounding concurrency shrinks the problem but can't remove it: even a modest, bounded number of
+concurrent uploads still eventually adds up to the same total subrequest/CPU spend for one
+webhook call, and Cloudflare's Workers Free plan caps that at roughly 50 external subrequests and
+10ms of CPU time *per invocation*, however that budget gets spent. A real report of 50 photos
+still lost up to 4 files with the bound in place, and there's no per-file tuning that fixes a
+budget that's simply too small for a big enough batch in one invocation.
+
+The actual fix: **very large batches don't get processed in the webhook invocation at all.**
+`src/uploadQueue.ts` adds a simple KV-backed queue (one KV key per queued file, so concurrent
+enqueues can't race each other on a read-modify-write). At/above `IMMEDIATE_MEDIA_BATCH_LIMIT`
+(20) media files in one webhook call, `handleWebhook` queues the whole batch instead of uploading
+anything immediately, and replies once with a "queued, will confirm when done" message instead of
+one reply per file. A `scheduled` handler (wired to a once-a-minute cron trigger in
+`wrangler.toml`) calls `drainUploadQueue`, which works through up to `DRAIN_BATCH_SIZE` (20)
+queued files at a time — **and each cron firing is its own Worker invocation, with its own fresh
+subrequest/CPU budget**, so a batch of any size eventually gets through completely instead of
+losing files to a shared budget. Each drain sends one push message per user summarizing what
+just uploaded and how many files are still queued, ending with a final "all done" message once
+the queue for that user is empty. Smaller, everyday sends (below the threshold) are unaffected —
+they still upload and confirm immediately, exactly as before.
+
 ### Calendar (PLAN.md 15.3)
 
 Reminders are handled entirely by Google Calendar's own notifications — the bot never
