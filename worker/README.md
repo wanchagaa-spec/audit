@@ -576,16 +576,18 @@ using one shared Google account for the whole group instead of everyone's own pe
   to the webhook, mentioned or not — there's no server-side filtering, so the bot checks
   `message.mention.mentionees[].isSelf === true` itself and ignores everything else without
   touching any state.
-- **Command set (PLAN.md 17.4/17.6/17.7)**: near-full parity with personal mode — money logging
+- **Command set (PLAN.md 17.4/17.6/17.7/17.8)**: full parity with personal mode — money logging
   (natural language + "ลบรายการล่าสุด"), the read-only report shortcuts ("สรุปเดือนนี้" etc.),
   "ถาม <คำถาม>"/"วิเคราะห์" (AI Q&A), "ตั้งจังหวัด", calendar create/confirm, diary create/confirm,
-  and trip start/end/status ("เริ่มทริป"/"จบทริป"/"ทริปตอนนี้") — all reuse their personal-mode
-  matchers/handlers unchanged, since they already key off whatever subject id `ActionCtx` hands
-  them (PLAN.md 17.3). Pending confirmations (calendar/diary/delete-last, same as the money
-  clarification above) are answerable by any group member. Gemini's free-tier quota is one shared
+  trip start/end/status ("เริ่มทริป"/"จบทริป"/"ทริปตอนนี้"), and "เปิดเว็บดูข้อมูล" (web viewer) — all
+  reuse their personal-mode matchers/handlers unchanged, since they already key off whatever
+  subject id `ActionCtx` (or, for the web viewer, the signed token) hands them (PLAN.md 17.3).
+  Pending confirmations (calendar/diary/delete-last, same as the money clarification above) are
+  answerable by any group member. The web viewer's reply text and its "not linked" error page both
+  read differently in group mode — a group's reply posts into the shared chat, so the link is
+  visible to whoever's in the group, not just whoever asked. Gemini's free-tier quota is one shared
   pool for the whole bot, not per-group or per-person, so a busy group asking the AI a lot eats
-  into what's left for everyone else. Only the web viewer ("เปิดเว็บดูข้อมูล") stays personal-only —
-  its view-token model isn't built for a shared account yet.
+  into what's left for everyone else.
 - **Trip photos (PLAN.md 17.7)**: LINE's @-mention only exists on text messages, never on
   photos/videos, so there's no way to gate a photo the same way text is gated. Instead: once a
   trip is active in the group (started via a mentioned text command), every photo/video any
