@@ -22,6 +22,7 @@ const MONTHS: Array<{ month: number; keywords: string[] }> = [
 ];
 
 const MONTH_ABBR = MONTHS.map((m) => m.keywords[2]);
+const MONTH_FULL = MONTHS.map((m) => m.keywords[0]);
 
 const MONTH_LOOKUP = new Map<string, number>();
 for (const { month, keywords } of MONTHS) {
@@ -123,6 +124,12 @@ export function extractDateAndTime(
 export function formatThaiDateLabel(dateKey: string): string {
   const [y, m, d] = dateKey.split("-").map(Number);
   return `${d} ${MONTH_ABBR[m - 1]} ${y + 543}`;
+}
+
+/** "2026-01-12" -> "12 มกราคม 2569" — full month name, used where the abbreviated form (formatThaiDateLabel) reads too terse (e.g. a finance-news report header). */
+export function formatThaiDateLabelFull(dateKey: string): string {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  return `${d} ${MONTH_FULL[m - 1]} ${y + 543}`;
 }
 
 function toBangkok(d: Date): Date {
