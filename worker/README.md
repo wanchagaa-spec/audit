@@ -601,6 +601,29 @@ using one shared Google account for the whole group instead of everyone's own pe
   a generic "สมาชิกกลุ่ม" label if that lookup fails or LINE didn't include a sender id at all
   (both treated as cosmetic-detail failures, never worth blocking the save over).
 
+### AI persona + confirm-every-save (PLAN.md 17.9)
+
+Two things, requested together:
+
+- **Every reply is restyled by Gemini** into a fixed character voice (a cute, pink-loving
+  23-year-old studying Japanese, `persona.ts`) right before it's actually sent to LINE
+  (`replyOrPush` and `drainUploadQueue`'s summary push) — never inside `handleTextMessage`/
+  `handleGroupTextMessage` themselves, which still compute and return the exact same
+  deterministic text as before (numbers, dates, and confirmations are never touched by AI, only
+  *how* the already-decided message is phrased). Falls back to the original unstyled text on any
+  failure or after a short timeout, so persona styling can never break, delay significantly, or
+  silence a reply. This does mean Gemini now fires on every single reply, not just "ถาม"/
+  "วิเคราะห์" — a real increase in shared free-tier quota usage and per-reply latency, accepted
+  knowingly when this was requested.
+- **Money logging always asks to confirm before saving now**, even for a perfectly unambiguous
+  message — previously an unambiguous entry ("ซื้อกาแฟ 60") saved immediately; now it always asks
+  "จะบันทึก...ใช่ไหม?" first, same as calendar/diary/delete already did. A `"transactionCreate"`
+  `PendingConfirmation` (`state.ts`) holds the drafts until confirmed; in group mode, attribution
+  is fixed to whoever actually completed the draft, not whoever happens to type "ใช่". The
+  confirmation-word check (`isAffirmative`, `confirmations.ts`) strips common polite particles
+  ("ครับ"/"ค่ะ"/"จ้า"/etc.) before matching, since a natural "ใช่ครับ" used to fail the old
+  exact-match check and silently discard the pending save.
+
 ## Local development
 
 ```bash

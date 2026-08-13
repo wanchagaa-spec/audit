@@ -26,7 +26,8 @@ interface GeminiResponse {
 export async function askGemini(
   apiKey: string,
   systemInstruction: string,
-  userQuestion: string
+  userQuestion: string,
+  signal?: AbortSignal
 ): Promise<string> {
   const res = await fetch(GEMINI_ENDPOINT, {
     method: "POST",
@@ -41,6 +42,7 @@ export async function askGemini(
       // relying on the model to police its own length.
       generationConfig: { maxOutputTokens: 800 },
     }),
+    signal,
   });
   if (!res.ok) {
     throw new GeminiError(`Gemini API error (${res.status}): ${await res.text()}`);

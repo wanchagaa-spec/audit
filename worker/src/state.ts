@@ -1,4 +1,4 @@
-import type { PendingClarification } from "../../app/src/lib/chatEngine.ts";
+import type { PendingClarification, TransactionDraft } from "../../app/src/lib/chatEngine.ts";
 
 export interface AccountLink {
   spreadsheetId: string;
@@ -61,18 +61,35 @@ export async function setActiveTrip(
   await kv.put(key, JSON.stringify(trip));
 }
 
+// Who a transaction gets credited to — always {addedBy: lineUserId,
+// addedByName: "LINE"} in personal mode (meaningless in a 1:1 chat, it's
+// always just "you"), and whoever actually sent the message in group mode
+// (PLAN.md 17), via getGroupMemberProfile. Lives here (not index.ts) so
+// state.ts's PendingConfirmation type can reference it below.
+export interface TransactionAttribution {
+  addedBy: string;
+  addedByName: string;
+}
+
 // A single "waiting for ใช่/no" slot shared by every feature that needs a
 // confirm-before-you-do-it step (trip switching, calendar create/edit/delete,
-// diary entries — PLAN.md 15.3/15.4). One slot per user is enough since only
-// the most recent question is ever still relevant; see confirmations.ts for
-// how a reply resolves whichever kind is pending.
+// diary entries, transaction logging — PLAN.md 15.3/15.4/17.9). One slot per
+// user is enough since only the most recent question is ever still relevant;
+// see confirmations.ts for how a reply resolves whichever kind is pending.
 export type PendingConfirmation =
   | { kind: "tripSwitch"; newName: string }
   | { kind: "calendarCreate"; title: string; dateKey: string; time: string }
   | { kind: "calendarDelete"; eventId: string; title: string; dateKey: string; time: string }
   | { kind: "calendarEdit"; eventId: string; title: string; dateKey: string; time: string }
   | { kind: "diaryCreate"; category: string; text: string }
-  | { kind: "transactionDeleteLast" };
+  | { kind: "transactionDeleteLast" }
+  // PLAN.md 17.9: money logging no longer saves immediately, even for an
+  // unambiguous message — always confirms first, same as every other
+  // create/delete action already did. `attribution` is resolved once, at
+  // the moment this prompt is built (whoever actually typed the entry, via
+  // the sender of the message that completed the draft), and stays fixed
+  // even if a different group member ends up confirming it.
+  | { kind: "transactionCreate"; drafts: TransactionDraft[]; rawText: string; attribution: TransactionAttribution };
 
 export async function getPendingConfirmation(
   kv: KVNamespace,
