@@ -9,6 +9,12 @@ import { matchDiaryCommand } from "./diaryCommands.ts";
 import { uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import {
+  buildMorningBriefing,
+  buildReturnGreeting,
+  classifyGreeting,
+  matchProvinceCommand,
+} from "./greetingCommands.ts";
+import {
   fetchLineMediaContent,
   isImageMessageEvent,
   isTextMessageEvent,
@@ -55,13 +61,14 @@ export interface Env {
 }
 
 const WELCOME_MESSAGE = [
-  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 5 เรื่องหลักๆ:",
+  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 6 เรื่องหลักๆ:",
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
   "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
+  "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
   "",
   "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
 ].join("\n");
@@ -271,6 +278,15 @@ export async function handleTextMessage(
       );
     }
 
+    // No withFreshAccessToken here on purpose — setting a province only
+    // touches KV and Open-Meteo (no Google auth needed at all), so wrapping
+    // it the same way as the handlers above would fetch a Google access
+    // token this command has no use for.
+    const provinceHandler = matchProvinceCommand(text);
+    if (provinceHandler) {
+      return await provinceHandler(env.ACCOUNTS, lineUserId);
+    }
+
     // Checked before reportHandler below: "ลบรายการล่าสุด"/"ยกเลิกรายการล่าสุด"
     // contain "รายการล่าสุด" as a substring, which commands.ts's report
     // matcher would otherwise catch first (includesAny is substring-based),
@@ -312,9 +328,17 @@ export async function handleTextMessage(
   // instead of being shadowed by this shorter welcome blurb — and only when
   // there's no dangling money clarification, so a stray greeting mid-flow
   // still cancels it properly via chatEngine's own greeting handling instead
-  // of leaving `pending` stuck in KV.
+  // of leaving `pending` stuck in KV. The very first greeting this account
+  // has ever sent still gets the original feature-list welcome (no context
+  // yet for a weather/news briefing); the first greeting of each Bangkok
+  // calendar day after that gets the full morning briefing (PLAN.md 15.11);
+  // any later greeting the same day just gets a short prompt instead of
+  // repeating it.
   if (!pending && isGreeting(text)) {
-    return WELCOME_MESSAGE;
+    const greetingKind = await classifyGreeting(env.ACCOUNTS, lineUserId);
+    if (greetingKind === "welcome") return WELCOME_MESSAGE;
+    if (greetingKind === "briefing") return buildMorningBriefing(env, env.ACCOUNTS, lineUserId);
+    return buildReturnGreeting();
   }
 
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);

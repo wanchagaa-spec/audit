@@ -79,6 +79,11 @@ let simulatePushFailureToo = false; // one-shot: fails the next push too (pair w
 let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to the upload queue, to exercise handleQueuedMediaBatch's outer catch
 let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
+let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
+let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
+const GEOCODE_RESULTS = {
+  เชียงใหม่: { name: "เชียงใหม่", latitude: 18.7883, longitude: 98.9853 },
+};
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
@@ -314,6 +319,38 @@ globalThis.fetch = async (url, init = {}) => {
     );
   }
 
+  if (u.includes("geocoding-api.open-meteo.com/v1/search")) {
+    const parsed = new URL(u);
+    const found = GEOCODE_RESULTS[parsed.searchParams.get("name")];
+    return new Response(JSON.stringify({ results: found ? [found] : [] }), { status: 200 });
+  }
+  if (u.includes("api.open-meteo.com/v1/forecast")) {
+    if (simulateWeatherFetchFailure) {
+      simulateWeatherFetchFailure = false;
+      return new Response("simulated weather service failure", { status: 500 });
+    }
+    return new Response(
+      JSON.stringify({
+        current: { temperature_2m: 32.5, weather_code: 1 },
+        daily: { temperature_2m_max: [35.2], temperature_2m_min: [26.1] },
+      }),
+      { status: 200 }
+    );
+  }
+  if (u.includes("bangkokpost.com/rss/data/topstories.xml")) {
+    if (simulateNewsFetchFailure) {
+      simulateNewsFetchFailure = false;
+      return new Response("simulated RSS fetch failure", { status: 500 });
+    }
+    const rss = [
+      "<?xml version=\"1.0\"?><rss><channel>",
+      "<item><title><![CDATA[Test headline one]]></title></item>",
+      "<item><title>Test headline two</title></item>",
+      "</channel></rss>",
+    ].join("");
+    return new Response(rss, { status: 200 });
+  }
+
   throw new Error(`unexpected fetch to ${u}`);
 };
 
@@ -327,8 +364,9 @@ const {
 } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
-const { bangkokDateKey, addDaysToDateKey } = await import("../src/thaiDate.ts");
+const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
+const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
 
 async function signLineBody(rawBody, secret) {
   const key = await crypto.subtle.importKey(
@@ -506,7 +544,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("5 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("6 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -516,12 +554,66 @@ await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // tr
 const greetingWhilePendingReply = await handleTextMessage(env, lineUserId, "หวัดดีครับ", origin);
 check(
   "a greeting mid-clarification cancels it via chatEngine, not the rich welcome",
-  !greetingWhilePendingReply.includes("5 เรื่องหลักๆ")
+  !greetingWhilePendingReply.includes("6 เรื่องหลักๆ")
 );
 const afterGreetingReply = await handleTextMessage(env, lineUserId, "ข้าว 30", origin);
 check(
   "the next real message after that isn't misread as answering the stale question",
   afterGreetingReply.includes("30")
+);
+
+// Morning briefing (PLAN.md 15.11): the first greeting of a Bangkok calendar
+// day (that isn't the account's very first-ever greeting, already covered
+// above) gets a full briefing instead of the welcome message or the short
+// return-greeting. Forces this by writing an old date directly into the
+// same KV key classifyGreeting itself reads/writes, since the test can't
+// actually change what day it is.
+await env.ACCOUNTS.put(`last-greeting:${lineUserId}`, "2000-01-01");
+const briefingNoProvinceReply = await handleTextMessage(env, lineUserId, "มอนิ่ง", origin);
+check(
+  "a first-greeting-of-the-day (not first-ever) gets the morning briefing, not the welcome message",
+  !briefingNoProvinceReply.includes("6 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
+);
+check(
+  "with no province set, the briefing suggests setting one instead of showing weather",
+  briefingNoProvinceReply.includes("ตั้งจังหวัด")
+);
+check(
+  "the briefing includes an AI-summarized news section",
+  briefingNoProvinceReply.includes("ข่าวเช้านี้") && briefingNoProvinceReply.includes("headline")
+);
+const returnGreetingReply = await handleTextMessage(env, lineUserId, "หวัดดี", origin);
+check(
+  "a second greeting the same day gets the short return-greeting instead of another briefing",
+  returnGreetingReply === buildReturnGreeting()
+);
+
+const provinceNotFoundReply = await handleTextMessage(env, lineUserId, "ตั้งจังหวัด Atlantis", origin);
+check("setting an unrecognized province says so instead of silently accepting it", provinceNotFoundReply.includes("ไม่เจอ"));
+
+const provinceSetReply = await handleTextMessage(env, lineUserId, "ตั้งจังหวัด เชียงใหม่", origin);
+check("setting a real province confirms it", provinceSetReply.includes("เชียงใหม่"));
+
+await env.ACCOUNTS.put(`last-greeting:${lineUserId}`, "2000-01-02");
+const briefingWithProvinceReply = await handleTextMessage(env, lineUserId, "กู๊ดมอร์นิ่ง", origin);
+check(
+  "once a province is set, the next briefing includes real weather instead of the setup hint",
+  briefingWithProvinceReply.includes("เชียงใหม่") &&
+    briefingWithProvinceReply.includes("°C") &&
+    briefingWithProvinceReply.includes("35") && // daily max from the mocked forecast
+    !briefingWithProvinceReply.includes('พิมพ์ "ตั้งจังหวัด')
+);
+
+// Weather and news are independent best-effort additions — either failing
+// must never take the other down, or block the greeting itself from going
+// out at all.
+await env.ACCOUNTS.put(`last-greeting:${lineUserId}`, "2000-01-03");
+simulateWeatherFetchFailure = true;
+simulateNewsFetchFailure = true;
+const briefingBothFailReply = await handleTextMessage(env, lineUserId, "อรุณสวัสดิ์", origin);
+check(
+  "if both weather and news fail, the briefing still goes out with at least the date",
+  briefingBothFailReply.includes(formatThaiDateLabel(bangkokDateKey()))
 );
 
 // 7. Trip photo album (PLAN.md 15.2): image with no active trip is rejected,
@@ -756,9 +848,14 @@ check(
   totalFailureResponse.status === 200
 );
 check(
+  // A plain "return" greeting by this point in the test — this account
+  // already greeted once earlier (the "a plain greeting gets the..."
+  // check above), consuming the once-per-day welcome/briefing state — so
+  // the expected reply here is the short return-greeting, not the rich
+  // welcome message.
   "an unrelated text event in the same webhook call still gets its normal reply",
   replies.length > repliesBeforeTotalFailure &&
-    replies.slice(repliesBeforeTotalFailure).some((r) => r.includes("5 เรื่องหลักๆ"))
+    replies.slice(repliesBeforeTotalFailure).some((r) => r.includes(buildReturnGreeting()))
 );
 
 // Regression test for a real report backed by Cloudflare's own request logs:
@@ -1235,10 +1332,11 @@ check(
 // Gemini, a Gemini failure surfaces a friendly fallback instead of crashing,
 // and the prompt sent to Gemini only ever contains precomputed totals for
 // money questions, never raw arithmetic left for the model to do itself.
+const geminiRequestsBeforeNoQuestion = geminiRequests.length;
 const aiNoQuestionReply = await handleTextMessage(env, lineUserId, "ถาม", origin);
 check(
   "asking with no question text gets a usage hint instead of calling Gemini",
-  aiNoQuestionReply.includes("ถาม เดือนนี้") && geminiRequests.length === 0
+  aiNoQuestionReply.includes("ถาม เดือนนี้") && geminiRequests.length === geminiRequestsBeforeNoQuestion
 );
 
 const geminiRequestsBeforeAsk = geminiRequests.length;
@@ -1255,6 +1353,16 @@ check(
   lastGeminiRequest.systemInstruction.includes("รายรับรวม") &&
     lastGeminiRequest.systemInstruction.includes("รายจ่ายรวม") &&
     lastGeminiRequest.systemInstruction.includes("ห้ามคำนวณหรือเดาตัวเลขเอง")
+);
+// Regression test for a real report: asked "วันนี้วันที่" (what's today's
+// date), Gemini answered a day off — it was never actually told today's
+// date, only handed a calendar range that started from it, so it had to
+// infer "today" itself instead of being given the fact outright, same
+// mistake the money guardrail above already exists to prevent.
+check(
+  "the prompt states today's actual date explicitly, not left for Gemini to infer",
+  lastGeminiRequest.systemInstruction.includes(`วันนี้คือวันที่ ${formatThaiDateLabel(bangkokDateKey())}`) &&
+    lastGeminiRequest.systemInstruction.includes("ห้ามเดาหรือคำนวณเอง")
 );
 
 const aiAnalyzeReply = await handleTextMessage(env, lineUserId, "วิเคราะห์", origin);

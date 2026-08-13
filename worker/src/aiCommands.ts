@@ -82,6 +82,7 @@ function topCategories(rows: TransactionRow[], limit = 5): string[] {
 // the prompt can say "couldn't check" instead of implying a confirmed empty
 // calendar, which would otherwise read as "you have no appointments."
 function buildSystemInstruction(
+  todayLabel: string,
   month: string,
   txRows: TransactionRow[],
   diaryRows: DiaryRow[],
@@ -105,6 +106,13 @@ function buildSystemInstruction(
     "ตอบเป็นภาษาไทย น้ำเสียงเป็นกันเอง กระชับ ความยาวพอเหมาะสำหรับข้อความแชท (ไม่เกินสองสามย่อหน้าสั้นๆ)",
     "ข้อมูลสามชุดด้านล่าง (ตัวเลขการเงิน/นัดหมายในปฏิทิน/ไดอารี่) เป็นคนละแหล่งกัน ห้ามใช้ปนกัน — เช่น",
     "ห้ามหยิบข้อความในไดอารี่มาตอบคำถามว่ามีนัดหมายในปฏิทินจริงหรือไม่ ให้ใช้เฉพาะรายการนัดหมายที่ให้มา",
+    "",
+    // A model has no reliable notion of "now" on its own — without this, a
+    // real user asked "วันนี้วันที่" and got a date one day off, since
+    // Gemini was left to guess instead of being told outright. Same
+    // guardrail principle as the money numbers below: never let it infer
+    // something this code already knows for certain.
+    `วันนี้คือวันที่ ${todayLabel} (ใช้วันที่นี้เท่านั้นเวลาตอบคำถามเกี่ยวกับ "วันนี้"/"พรุ่งนี้"/วันที่ปัจจุบัน ห้ามเดาหรือคำนวณเอง)`,
     "",
     `ตัวเลขที่คำนวณไว้แล้วสำหรับเดือน ${month} (ใช้ตัวเลขชุดนี้เท่านั้นเวลาตอบคำถามเกี่ยวกับยอดเงิน ห้ามคำนวณหรือเดาตัวเลขเอง):`,
     `- รายรับรวม: ${formatBaht(income)} บาท`,
@@ -170,7 +178,14 @@ export async function matchAiCommand(text: string): Promise<Handler | null> {
 
     const monthTx = allTx.filter((r) => r.date?.startsWith(month));
     const monthDiary = allDiary.filter((r) => r.date?.startsWith(month));
-    const systemInstruction = buildSystemInstruction(month, monthTx, monthDiary, calendarEvents, calendarRangeLabel);
+    const systemInstruction = buildSystemInstruction(
+      formatThaiDateLabel(today),
+      month,
+      monthTx,
+      monthDiary,
+      calendarEvents,
+      calendarRangeLabel
+    );
 
     try {
       return await askGemini(ctx.geminiApiKey, systemInstruction, request.question);
