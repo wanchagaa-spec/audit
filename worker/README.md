@@ -576,12 +576,23 @@ using one shared Google account for the whole group instead of everyone's own pe
   to the webhook, mentioned or not — there's no server-side filtering, so the bot checks
   `message.mention.mentionees[].isSelf === true` itself and ignores everything else without
   touching any state.
-- **Deliberately smaller command set for this first pass**: money logging (natural language +
-  "ลบรายการล่าสุด") and the read-only report shortcuts ("สรุปเดือนนี้" etc. — pure reads, no
-  per-user state, essentially free to include). AI/calendar/diary/trip/province/web-viewer stay
-  personal-only for now; each raises questions worth thinking through separately in a
-  shared-account context (who can create/delete a shared Calendar event, whether different
-  members' trip photos should land in the same folder) rather than being enabled by default.
+- **Command set (PLAN.md 17.4/17.6/17.7)**: near-full parity with personal mode — money logging
+  (natural language + "ลบรายการล่าสุด"), the read-only report shortcuts ("สรุปเดือนนี้" etc.),
+  "ถาม <คำถาม>"/"วิเคราะห์" (AI Q&A), "ตั้งจังหวัด", calendar create/confirm, diary create/confirm,
+  and trip start/end/status ("เริ่มทริป"/"จบทริป"/"ทริปตอนนี้") — all reuse their personal-mode
+  matchers/handlers unchanged, since they already key off whatever subject id `ActionCtx` hands
+  them (PLAN.md 17.3). Pending confirmations (calendar/diary/delete-last, same as the money
+  clarification above) are answerable by any group member. Gemini's free-tier quota is one shared
+  pool for the whole bot, not per-group or per-person, so a busy group asking the AI a lot eats
+  into what's left for everyone else. Only the web viewer ("เปิดเว็บดูข้อมูล") stays personal-only —
+  its view-token model isn't built for a shared account yet.
+- **Trip photos (PLAN.md 17.7)**: LINE's @-mention only exists on text messages, never on
+  photos/videos, so there's no way to gate a photo the same way text is gated. Instead: once a
+  trip is active in the group (started via a mentioned text command), every photo/video any
+  member sends afterward auto-uploads with **no mention needed** — mirroring how personal 1:1
+  chat already never needed a per-photo trigger. When there's no active trip, or the group isn't
+  linked at all, the bot stays **completely silent** on photos (unlike personal mode's explicit
+  prompt) so it doesn't spam a group's ordinary, unrelated photo-sharing.
 - Transactions logged in group mode are attributed to whoever actually sent them (`addedBy`/
   `addedByName`), fetched via `GET /v2/bot/group/{groupId}/member/{userId}` — unlike the general
   profile API, this works even for members who've never added the OA as a friend. Falls back to

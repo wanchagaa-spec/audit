@@ -95,6 +95,7 @@ const GEOCODE_RESULTS = {
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
+let simulateSpreadsheetAccessDeniedOnce = false; // makes the next canAccessSpreadsheet check (group OAuth relink) fail, to simulate a different Google account than the one that owns the group's spreadsheet
 
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
@@ -116,6 +117,13 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response(JSON.stringify(body), { status: 200 });
   }
   if (u.endsWith("/v4/spreadsheets")) {
+    return new Response(JSON.stringify({ spreadsheetId: "fake-sheet-id" }), { status: 200 });
+  }
+  if (u.includes("?fields=spreadsheetId")) {
+    if (simulateSpreadsheetAccessDeniedOnce) {
+      simulateSpreadsheetAccessDeniedOnce = false;
+      return new Response(JSON.stringify({ error: { message: "The caller does not have permission" } }), { status: 403 });
+    }
     return new Response(JSON.stringify({ spreadsheetId: "fake-sheet-id" }), { status: 200 });
   }
   if (u.includes("?fields=sheets.properties") && !u.includes(".title")) {
@@ -1951,16 +1959,23 @@ check(
   groupDeleteConfirmReply.includes("ลบ") && sheetRows.length === groupSheetRowsBeforeDelete - 1
 );
 
-// 7. AI/calendar/diary/trip/province/view-link commands are deliberately
-// NOT wired into group mode yet — "ถาม ..." should fall through to the
-// natural-language parser (which won't recognize it as a transaction
-// either) rather than reaching Gemini.
+// 7. AI Q&A/analysis (PLAN.md 17.6) — opened up to group mode too, reusing
+// matchAiCommand exactly as-is (no group-specific code needed, since it
+// was already generic over whatever ActionCtx it's handed). Calendar/
+// diary/trip/province/view-link *writes* stay personal-only still.
 const groupAiRequestsBefore = geminiRequests.length;
-const groupAiAttemptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+const groupAiReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
 check(
-  "AI commands don't reach Gemini in group mode yet — held back deliberately for this first pass",
-  geminiRequests.length === groupAiRequestsBefore && !groupAiAttemptReply.includes("[mock AI answer]")
+  "\"ถาม <คำถาม>\" reaches Gemini in group mode, same as personal mode",
+  geminiRequests.length === groupAiRequestsBefore + 1 && groupAiReply.includes("[mock AI answer]")
 );
+const lastGroupAiRequest = geminiRequests.at(-1);
+check(
+  "the AI prompt in group mode is built from the group's own shared spreadsheet, not any individual's",
+  lastGroupAiRequest.systemInstruction.includes("รายรับรวม")
+);
+const groupAnalyzeReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิเคราะห์", origin);
+check("\"วิเคราะห์\" (no question text) also works in group mode", groupAnalyzeReply.includes("[mock AI answer]"));
 
 // 8. Full webhook-level mention gating: every message in a group the bot
 // belongs to reaches the webhook whether the bot was addressed or not —
@@ -2070,6 +2085,9 @@ check(
 const linkAfterA = await getAccountLink(kv, raceSubjectId);
 check("the group's refresh token matches person A's completed exchange", linkAfterA?.refreshToken === "fake-refresh-token-for-code-person-a");
 
+// Person B's access token can't reach person A's spreadsheet — a different
+// Google account, exactly the race this guard exists for.
+simulateSpreadsheetAccessDeniedOnce = true;
 const oauthCallbackB = await worker.fetch(
   new Request(`${origin}/oauth/callback?code=code-person-b&state=${encodeURIComponent(raceState)}`),
   env,
@@ -2083,6 +2101,274 @@ const linkAfterB = await getAccountLink(kv, raceSubjectId);
 check(
   "the group's refresh token is still person A's after a second, different person's completion attempt",
   linkAfterB?.refreshToken === "fake-refresh-token-for-code-person-a" && linkAfterB?.spreadsheetId === linkAfterA?.spreadsheetId
+);
+
+// Regression test for the fix to the above guard: it must not also block a
+// *legitimate* rescope by person A themselves (e.g. re-consenting after
+// InsufficientCalendarScopeError). person A's new token can still reach the
+// group's existing spreadsheet (canAccessSpreadsheet succeeds, the default
+// mock behavior), so this completion should update the refresh token in
+// place rather than being treated as a no-op.
+const oauthCallbackRescope = await worker.fetch(
+  new Request(`${origin}/oauth/callback?code=code-person-a-rescope&state=${encodeURIComponent(raceState)}`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "the same Google account re-consenting with broader scope actually updates the group's refresh token",
+  oauthCallbackRescope.status === 200 && (await oauthCallbackRescope.text()).includes("เชื่อมบัญชีกลุ่มสำเร็จ")
+);
+const linkAfterRescope = await getAccountLink(kv, raceSubjectId);
+check(
+  "the rescoped refresh token replaced the old one, spreadsheetId unchanged",
+  linkAfterRescope?.refreshToken === "fake-refresh-token-for-code-person-a-rescope" &&
+    linkAfterRescope?.spreadsheetId === linkAfterA?.spreadsheetId
+);
+
+// Group mode, second pass (PLAN.md 17.7): province/calendar/diary/trip
+// opened up to near-full parity with personal mode, using the same
+// "group:<groupId>" subject id trick as money/AI already did. Reuses the
+// group linked earlier in this file (groupId/groupSenderA/groupSenderB).
+
+const groupProvinceReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ตั้งจังหวัด เชียงใหม่", origin);
+check("\"ตั้งจังหวัด\" works in group mode", groupProvinceReply.includes("เชียงใหม่"));
+
+const groupCalendarPromptReply = await handleGroupTextMessage(
+  env,
+  groupId,
+  groupSenderA,
+  `นัด ประชุมกลุ่ม ${tomorrowSlash} 13:00`,
+  origin
+);
+check(
+  "calendar create asks to confirm in group mode, same as personal mode",
+  groupCalendarPromptReply.includes("ประชุมกลุ่ม") && groupCalendarPromptReply.includes("13:00")
+);
+const calendarEventsBeforeGroupConfirm = calendarEvents.length;
+const groupCalendarConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
+check(
+  "any group member can confirm the shared pending calendar create, same as the money/delete confirmations above",
+  groupCalendarConfirmReply.includes("จดนัดแล้ว") && calendarEvents.length === calendarEventsBeforeGroupConfirm + 1
+);
+
+const groupDiaryPromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ไดอารี่ ทริปกลุ่มสนุกมาก", origin);
+check("diary create asks to confirm in group mode", groupDiaryPromptReply.includes("ใช่ไหม"));
+const groupDiaryConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
+check("confirming saves the diary entry in group mode, attributed to the group's own shared diary", groupDiaryConfirmReply.includes("บันทึกไดอารี่แล้ว"));
+
+// Trip start/status via the real webhook path (mentioned, since these are
+// text commands) — sets up the group's active trip for the photo
+// auto-upload tests below, which specifically must NOT require a mention.
+const groupTripStartBody = JSON.stringify({
+  events: [groupTextEvent({ text: "@BotName เริ่มทริป ทริปกลุ่ม", mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] } })],
+});
+const groupTripStartSignature = await signLineBody(groupTripStartBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeGroupTripStart = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": groupTripStartSignature }, body: groupTripStartBody }),
+  env
+);
+check(
+  "starting a trip in a group works the same as personal mode, via a mentioned text command",
+  replies.length === repliesBeforeGroupTripStart + 1 && replies.at(-1).includes('ทริป "ทริปกลุ่ม"')
+);
+check("the group's trip folder was created under the shared album root", driveFolders.some((f) => f.name === "ทริปกลุ่ม"));
+const groupTripFolderId = driveFolders.find((f) => f.name === "ทริปกลุ่ม").id;
+
+// Photos in a group can never be @mentioned (LINE's mention feature only
+// exists on text), so the whole design here hinges on the active-trip
+// check itself being the signal — see resolveMediaBatchContext's comment.
+function groupImageEvent({ messageId, userId = groupSenderA, replyToken = "reply-group-img" }) {
+  return {
+    type: "message",
+    message: { type: "image", id: messageId },
+    source: { type: "group", groupId, userId },
+    replyToken,
+    timestamp: Date.now(),
+  };
+}
+
+// A group that was never linked at all must stay completely silent on a
+// random photo — same reasoning as "no active trip" below, just the other
+// missing precondition.
+const unlinkedGroupId = "Cgroupunlinked1";
+const unlinkedGroupImageBody = JSON.stringify({
+  events: [
+    {
+      type: "message",
+      message: { type: "image", id: "unlinked-group-img-1" },
+      source: { type: "group", groupId: unlinkedGroupId, userId: groupSenderA },
+      replyToken: "reply-unlinked-group-img",
+      timestamp: Date.now(),
+    },
+  ],
+});
+const unlinkedGroupImageSignature = await signLineBody(unlinkedGroupImageBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeUnlinkedGroupImage = replies.length;
+const pushesBeforeUnlinkedGroupImage = pushes.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": unlinkedGroupImageSignature }, body: unlinkedGroupImageBody }),
+  env
+);
+check(
+  "a photo in a group with no linked account at all gets total silence, not a link prompt",
+  replies.length === repliesBeforeUnlinkedGroupImage && pushes.length === pushesBeforeUnlinkedGroupImage
+);
+check("nothing was queued for the unlinked group either", (await countQueuedForUser(kv, `group:${unlinkedGroupId}`)) === 0);
+
+// The already-linked group (from earlier in this section), but before any
+// trip has been started — a photo sent now must be pure ambient
+// group chatter, not something to react to.
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin); // close the trip opened above, for this check
+const noTripGroupImageBody = JSON.stringify({ events: [groupImageEvent({ messageId: "no-trip-group-img-1" })] });
+const noTripGroupImageSignature = await signLineBody(noTripGroupImageBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeNoTripGroupImage = replies.length;
+const pushesBeforeNoTripGroupImage = pushes.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": noTripGroupImageSignature }, body: noTripGroupImageBody }),
+  env
+);
+check(
+  "a photo in a linked group with no active trip also gets total silence, not the personal-mode 'start a trip first' reply",
+  replies.length === repliesBeforeNoTripGroupImage && pushes.length === pushesBeforeNoTripGroupImage
+);
+check("nothing was queued without an active trip", (await countQueuedForUser(kv, `group:${groupId}`)) === 0);
+
+// Re-open the trip, then send a photo with NO mention at all — this is the
+// actual point of the feature: once a trip is active, mention-gating
+// doesn't apply to photos anymore, the active trip itself is consent.
+await handleGroupTextMessage(env, groupId, groupSenderA, "เริ่มทริป ทริปกลุ่ม", origin);
+const driveUploadsBeforeGroupPhoto = driveUploads.length;
+const groupPhotoBody = JSON.stringify({ events: [groupImageEvent({ messageId: "group-trip-img-1", userId: groupSenderB })] });
+const groupPhotoSignature = await signLineBody(groupPhotoBody, env.LINE_CHANNEL_SECRET);
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": groupPhotoSignature }, body: groupPhotoBody }),
+  env
+);
+check(
+  "an unmentioned photo from any member queues silently once the group's trip is active",
+  driveUploads.length === driveUploadsBeforeGroupPhoto && (await countQueuedForUser(kv, `group:${groupId}`)) === 1
+);
+
+const pushesBeforeGroupDrain = pushes.length;
+await drainUploadQueue(env);
+check("the drain actually uploads the group's queued photo into the trip's own folder", driveUploads.at(-1).parentId === groupTripFolderId);
+check(
+  "the drain confirmation pushes to the group itself, not to whichever member happened to send the photo",
+  pushes.length === pushesBeforeGroupDrain + 1 && pushes.at(-1).to === groupId && pushes.at(-1).text.includes("ทริปกลุ่ม")
+);
+
+// Regression test for a real bug caught in code review: media events used
+// to be fully processed *before* any text event in the same webhook call —
+// so a mentioned "เริ่มทริป" bundled into the same LINE webhook body as a
+// multi-selected photo send (a real, not just theoretical, case LINE can
+// deliver) would see "no active trip yet" for the photo and, in group
+// mode, silently drop it, even though the trip got created moments later
+// in that very call. Text now always runs first.
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin); // back to a clean "no active trip" state
+const sameBatchBody = JSON.stringify({
+  events: [
+    groupTextEvent({
+      text: "@BotName เริ่มทริป ทริปพร้อมกัน",
+      mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] },
+    }),
+    groupImageEvent({ messageId: "same-batch-img-1", userId: groupSenderB }),
+  ],
+});
+const sameBatchSignature = await signLineBody(sameBatchBody, env.LINE_CHANNEL_SECRET);
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": sameBatchSignature }, body: sameBatchBody }),
+  env
+);
+check(
+  "a photo bundled in the same webhook call as the mentioned trip-start command still queues, not silently dropped",
+  (await countQueuedForUser(kv, `group:${groupId}`)) === 1
+);
+const sameBatchTripFolderId = driveFolders.find((f) => f.name === "ทริปพร้อมกัน")?.id;
+await drainUploadQueue(env);
+check(
+  "the drain uploads that photo into the trip that was started in the very same webhook call",
+  driveUploads.at(-1).parentId === sameBatchTripFolderId
+);
+
+// Regression test for a real bug caught in code review: drainUploadQueue
+// used to key its per-drain summary by subject id alone, so a batch
+// spanning two different trips for the same subject collapsed both
+// succeeded counts into one summary labeled with whichever job happened to
+// be processed last — silently mislabeling which trip some of the
+// uploaded files actually went into. Summaries are now keyed by
+// (subject, tripFolderId), so this must produce two separate, correctly
+// labeled pushes instead of one.
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin);
+const tripOneStartBody = JSON.stringify({
+  events: [groupTextEvent({ text: "@BotName เริ่มทริป ทริปหนึ่ง", mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] } })],
+});
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripOneStartBody, env.LINE_CHANNEL_SECRET) }, body: tripOneStartBody }),
+  env
+);
+const tripOnePhotoBody = JSON.stringify({ events: [groupImageEvent({ messageId: "two-trip-img-1" })] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripOnePhotoBody, env.LINE_CHANNEL_SECRET) }, body: tripOnePhotoBody }),
+  env
+);
+const tripOneFolderId = driveFolders.find((f) => f.name === "ทริปหนึ่ง")?.id;
+
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin);
+const tripTwoStartBody = JSON.stringify({
+  events: [groupTextEvent({ text: "@BotName เริ่มทริป ทริปสอง", mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] } })],
+});
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripTwoStartBody, env.LINE_CHANNEL_SECRET) }, body: tripTwoStartBody }),
+  env
+);
+const tripTwoPhotoBody = JSON.stringify({ events: [groupImageEvent({ messageId: "two-trip-img-2" })] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripTwoPhotoBody, env.LINE_CHANNEL_SECRET) }, body: tripTwoPhotoBody }),
+  env
+);
+const tripTwoFolderId = driveFolders.find((f) => f.name === "ทริปสอง")?.id;
+
+check("both trips' photos are queued going into the shared-summary drain", (await countQueuedForUser(kv, `group:${groupId}`)) === 2);
+const pushesBeforeTwoTripDrain = pushes.length;
+await drainUploadQueue(env);
+const twoTripPushes = pushes.slice(pushesBeforeTwoTripDrain);
+check(
+  "draining a batch spanning two trips for the same group sends two separate, correctly labeled pushes",
+  twoTripPushes.length === 2 &&
+    twoTripPushes.some((p) => p.text.includes('"ทริปหนึ่ง"')) &&
+    twoTripPushes.some((p) => p.text.includes('"ทริปสอง"'))
+);
+check(
+  "each trip's photo landed in its own trip folder, not mixed up",
+  driveUploads.some((u) => u.parentId === tripOneFolderId && u.name.includes("two-trip-img-1")) &&
+    driveUploads.some((u) => u.parentId === tripTwoFolderId && u.name.includes("two-trip-img-2"))
+);
+
+// Migration safety: a queue entry written before pushTarget existed (the
+// field is new, but the KV queue persists across deploys) must still get
+// its completion push delivered, falling back to lineUserId — which was
+// always the correct push target for every job before group mode split
+// the two apart.
+const legacyJob = {
+  lineUserId,
+  kind: "image",
+  messageId: "legacy-msg-1",
+  timestampMs: Date.now(),
+  tripFolderId,
+  tripName: "ทะเล",
+};
+await env.ACCOUNTS.put(`upload-queue:legacy-1`, JSON.stringify(legacyJob), {
+  metadata: { lineUserId },
+});
+const pushesBeforeLegacyDrain = pushes.length;
+const driveUploadsBeforeLegacyDrain = driveUploads.length;
+await drainUploadQueue(env);
+check(
+  "a pre-migration queue entry with no pushTarget field still uploads and pushes its confirmation to lineUserId",
+  driveUploads.length === driveUploadsBeforeLegacyDrain + 1 &&
+    pushes.length === pushesBeforeLegacyDrain + 1 &&
+    pushes.at(-1).to === lineUserId
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

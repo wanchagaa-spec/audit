@@ -28,7 +28,7 @@ export interface LineMessageEvent {
 export interface LineImageMessageEvent {
   type: "message";
   message: { type: "image"; id: string };
-  source: { type: "user"; userId: string };
+  source: LineEventSource;
   replyToken: string;
   timestamp: number;
 }
@@ -36,7 +36,7 @@ export interface LineImageMessageEvent {
 export interface LineVideoMessageEvent {
   type: "message";
   message: { type: "video"; id: string };
-  source: { type: "user"; userId: string };
+  source: LineEventSource;
   replyToken: string;
   timestamp: number;
 }
@@ -117,35 +117,38 @@ export function stripSelfMention(text: string, mention: MentionSpan): string {
   return (text.slice(0, mention.index) + text.slice(mention.index + mention.length)).trim();
 }
 
-// isImageMessageEvent/isVideoMessageEvent/isUnsupportedMessageEvent below
-// still require source.type === "user" — deliberate, not an oversight:
-// LINE's @mention feature only exists on text messages, so there's no way
-// for a group member to "address" a photo/sticker/other non-text message
-// to the bot the way findSelfMention lets them address a text one.
-// Responding to every non-text message any group member sends (the only
-// alternative to requiring "user" source here) would defeat the entire
-// point of gating group mode on being addressed — so these stay silently
-// excluded from group chats for now, same as trip/calendar/diary/AI (see
-// PLAN.md 17.4), rather than picked up as a partial, inconsistent case.
+// isImageMessageEvent/isVideoMessageEvent accept group sources too (PLAN.md
+// 17.7) — LINE's @mention feature only exists on text messages, so a group
+// member can never "address" a photo to the bot the way findSelfMention
+// lets them address text, but trip photos don't need that: once a trip is
+// active (started via an explicit *mentioned* text command), every photo
+// sent in that group is unambiguously meant for the album, mention or not
+// — the active-trip check itself is the signal, same as it already is in
+// personal 1:1 chat (see resolveMediaBatchContext in index.ts for the
+// group-specific "stay silent if there's no active trip" behavior this
+// depends on, so a group's ordinary unrelated photo-sharing doesn't get a
+// reply every time).
 export function isImageMessageEvent(
   event: LineWebhookBody["events"][number]
 ): event is LineImageMessageEvent {
+  const sourceType = (event as LineImageMessageEvent).source?.type;
   return (
     event.type === "message" &&
     "message" in event &&
     (event as LineImageMessageEvent).message?.type === "image" &&
-    (event as LineImageMessageEvent).source?.type === "user"
+    (sourceType === "user" || sourceType === "group")
   );
 }
 
 export function isVideoMessageEvent(
   event: LineWebhookBody["events"][number]
 ): event is LineVideoMessageEvent {
+  const sourceType = (event as LineVideoMessageEvent).source?.type;
   return (
     event.type === "message" &&
     "message" in event &&
     (event as LineVideoMessageEvent).message?.type === "video" &&
-    (event as LineVideoMessageEvent).source?.type === "user"
+    (sourceType === "user" || sourceType === "group")
   );
 }
 
@@ -154,7 +157,13 @@ export function isVideoMessageEvent(
  * still send *something* back instead of silently dropping the event — a
  * user sending a batch of clips can have some of them arrive as a type LINE
  * doesn't call "video" (e.g. "file" for some clip formats), and getting no
- * reply at all looks identical to a crash from the user's side. */
+ * reply at all looks identical to a crash from the user's side.
+ *
+ * Still requires source.type === "user", unlike image/video above —
+ * there's no "collect this automatically once a trip is active" behavior
+ * for stickers/audio/files the way there is for photos, so there's no
+ * unambiguous signal that would justify replying to one of these in a
+ * group (see the image/video comment above for that reasoning in full). */
 export function isUnsupportedMessageEvent(
   event: LineWebhookBody["events"][number]
 ): event is LineUnsupportedMessageEvent {

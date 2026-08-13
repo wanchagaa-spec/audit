@@ -32,7 +32,7 @@ import {
   type LineVideoMessageEvent,
   type LineWebhookBody,
 } from "./line.ts";
-import { appendTransaction, createBookSpreadsheet } from "./sheets.ts";
+import { appendTransaction, canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
 import { signState, verifyState } from "./signedState.ts";
 import {
   getAccountLink,
@@ -168,11 +168,29 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   // clicking the same still-valid link with their own separate Google
   // account. Overwriting refreshToken in that case would silently break
   // every future read/write — the new token has no access to the old
-  // token's spreadsheet, since two different Google accounts made it. A
-  // group that's already linked treats further completions as a no-op
-  // rather than risking that.
+  // token's spreadsheet, since two different Google accounts made it.
+  //
+  // But blocking *every* further completion outright also permanently
+  // dead-ends buildCalendarRelinkPrompt's rescope flow for groups (e.g.
+  // when Calendar scope was never granted) — there'd be no way back in.
+  // Distinguish the two cases the only way available (no LINE API exposes
+  // "who clicked this"): try the new access token against the group's
+  // existing spreadsheet. The same Google account re-consenting with
+  // broader scope can still read it; a different member's own account
+  // can't, since it's a different person's Drive. Only the former is
+  // allowed to update the refreshToken in place — spreadsheetId always
+  // stays the group's original one either way.
   if (groupId && existing) {
-    return html("กลุ่มนี้เชื่อมบัญชีไว้แล้ว ✅ ไม่ต้องเชื่อมซ้ำอีก ปิดหน้าต่างนี้แล้วกลับไปที่กลุ่มได้เลย");
+    const sameAccount = await canAccessSpreadsheet(tokens.access_token, existing.spreadsheetId);
+    if (!sameAccount) {
+      return html("กลุ่มนี้เชื่อมบัญชีไว้แล้ว ✅ ไม่ต้องเชื่อมซ้ำอีก ปิดหน้าต่างนี้แล้วกลับไปที่กลุ่มได้เลย");
+    }
+    await setAccountLink(env.ACCOUNTS, subjectId, {
+      spreadsheetId: existing.spreadsheetId,
+      refreshToken: tokens.refresh_token,
+      displayName: existing.displayName,
+    });
+    return html(renderLinkedPage(true));
   }
 
   const defaultName = groupId ? await buildGroupSpreadsheetName(env, groupId) : "สมุดส่วนตัว";
@@ -264,26 +282,36 @@ async function buildCalendarRelinkPrompt(env: Env, lineUserId: string, origin: s
 const CALENDAR_API_DISABLED_MESSAGE =
   'ปฏิทินยังใช้ไม่ได้ เพราะ "Google Calendar API" ยังไม่ได้เปิดใช้งานในโปรเจกต์ Google Cloud (คนละเรื่องกับสิทธิ์ของบัญชีที่เชื่อมไว้ เชื่อมบัญชีใหม่ไม่ช่วย) ผู้ดูแลต้องไปที่ Google Cloud Console → APIs & Services → Library → ค้นหา "Google Calendar API" → กด Enable แล้วลองพิมพ์คำสั่งปฏิทินใหม่อีกครั้ง';
 
-export async function handleTextMessage(
+// The full matcher-dispatch chain shared by personal mode (handleTextMessage)
+// and group mode (handleGroupTextMessage) below — every command that both
+// modes support, in the exact precedence order both rely on. Used to be two
+// hand-copied ~90-line blocks that had to be kept in sync by hand on every
+// change (a real risk: a fix or a new matcher applied to only one of the two
+// silently makes the modes diverge, with no compiler or test signal beyond
+// whichever mode someone happens to add a test for). Returns null when
+// nothing matched, meaning "fall through to the pending-clarification /
+// chatEngine handling", which is genuinely different between the two modes
+// (personal mode's greeting handling in particular has no group equivalent)
+// and stays in each caller rather than being forced into this shared shape.
+async function dispatchCoreCommands(
   env: Env,
-  lineUserId: string,
+  subjectId: string,
+  link: AccountLink,
   text: string,
   origin: string,
-  tokenCache?: TokenCache
-): Promise<string> {
-  const link = await getAccountLink(env.ACCOUNTS, lineUserId);
-  if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
-
+  tokenCache: TokenCache | undefined,
+  allowViewLink: boolean
+): Promise<string | null> {
   const actionCtx = (accessToken: string): ActionCtx => ({
     accessToken,
     kv: env.ACCOUNTS,
-    lineUserId,
+    lineUserId: subjectId,
     spreadsheetId: link.spreadsheetId,
     geminiApiKey: env.GEMINI_API_KEY,
   });
 
   try {
-    const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, lineUserId);
+    const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, subjectId);
     if (pendingConfirmation) {
       const reply = await withFreshAccessToken(
         env,
@@ -353,13 +381,16 @@ export async function handleTextMessage(
     // token this command has no use for.
     const provinceHandler = matchProvinceCommand(text);
     if (provinceHandler) {
-      return await provinceHandler(env.ACCOUNTS, lineUserId);
+      return await provinceHandler(env.ACCOUNTS, subjectId);
     }
 
-    // Same reasoning as the province handler above — minting a view-link
+    // Personal mode only (allowViewLink=false in group mode) — the web
+    // viewer's data model (PLAN.md 16) is built around a single linked
+    // account's own data, not a shared one. Same reasoning as the province
+    // handler above for skipping withFreshAccessToken: minting a view-link
     // token only needs STATE_SIGNING_SECRET, no Google auth at all.
-    if (matchViewLinkCommand(text)) {
-      return await buildViewLinkReply(env, lineUserId, origin);
+    if (allowViewLink && matchViewLinkCommand(text)) {
+      return await buildViewLinkReply(env, subjectId, origin);
     }
 
     // Checked before reportHandler below: "ลบรายการล่าสุด"/"ยกเลิกรายการล่าสุด"
@@ -381,7 +412,7 @@ export async function handleTextMessage(
       return CALENDAR_API_DISABLED_MESSAGE;
     }
     if (err instanceof InsufficientCalendarScopeError) {
-      return buildCalendarRelinkPrompt(env, lineUserId, origin);
+      return buildCalendarRelinkPrompt(env, subjectId, origin);
     }
     throw err;
   }
@@ -395,6 +426,22 @@ export async function handleTextMessage(
       tokenCache
     );
   }
+
+  return null;
+}
+
+export async function handleTextMessage(
+  env: Env,
+  lineUserId: string,
+  text: string,
+  origin: string,
+  tokenCache?: TokenCache
+): Promise<string> {
+  const link = await getAccountLink(env.ACCOUNTS, lineUserId);
+  if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
+
+  const coreReply = await dispatchCoreCommands(env, lineUserId, link, text, origin, tokenCache, true);
+  if (coreReply !== null) return coreReply;
 
   const pending = await getPending(env.ACCOUNTS, lineUserId);
 
@@ -474,16 +521,22 @@ async function saveTransactionDrafts(
   );
 }
 
-// Group mode (PLAN.md 17) — a deliberately smaller command set than
-// personal mode's handleTextMessage: money logging (natural-language
-// parsing + "ลบรายการล่าสุด") and the read-only report shortcuts
-// (matchCommand — "สรุปเดือนนี้" etc., pure reads, no per-user state, so
-// there's no reason to hold them back). AI/calendar/diary/trip/province/
-// view-link stay personal-only for now — held back deliberately, not
-// forgotten, since they need more thought in a shared-account context
-// (e.g. who can trigger a Calendar write, whether "ทริป" photos from
-// different members should even land in the same folder) than this first
-// pass was worth risking.
+// Group mode (PLAN.md 17) — now at near-full parity with personal mode's
+// handleTextMessage (PLAN.md 17.7): money logging, the read-only report
+// shortcuts, AI Q&A/analysis, calendar, diary, trip start/end/status, and
+// ตั้งจังหวัด all use the exact same command matchers as personal mode,
+// pointed at the group's own linked Google account via the same
+// generalized subject-id trick (groupSubjectId) — none of them needed
+// group-specific code beyond just being wired in here, since state.ts's
+// functions and every matcher's ActionCtx parameter were already generic.
+// The one thing that's genuinely different from personal mode: trip
+// *photos*. LINE's @mention feature only exists on text messages, so a
+// group member can never address a photo to the bot the way they can
+// address text — see the media-event handling in processWebhookEvents for
+// how that's actually solved (auto-upload while a trip is active, no
+// mention needed, silence otherwise). view-link ("เปิดเว็บดูข้อมูล") stays
+// personal-only — the web viewer's data model (PLAN.md 16) was built
+// entirely around a single linked account's own data, not a shared one.
 export async function handleGroupTextMessage(
   env: Env,
   groupId: string,
@@ -496,46 +549,8 @@ export async function handleGroupTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, subjectId);
   if (!link) return buildGroupUnlinkedPrompt(env, groupId, origin);
 
-  const actionCtx = (accessToken: string): ActionCtx => ({
-    accessToken,
-    kv: env.ACCOUNTS,
-    lineUserId: subjectId,
-    spreadsheetId: link.spreadsheetId,
-    geminiApiKey: env.GEMINI_API_KEY,
-  });
-
-  const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, subjectId);
-  if (pendingConfirmation) {
-    const reply = await withFreshAccessToken(
-      env,
-      link.refreshToken,
-      (accessToken) => resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation),
-      tokenCache
-    );
-    if (reply) return reply;
-    // Not an affirmative reply — falls through and handles `text` normally,
-    // same as personal mode.
-  }
-
-  const transactionHandler = await matchTransactionCommand(text);
-  if (transactionHandler) {
-    return await withFreshAccessToken(
-      env,
-      link.refreshToken,
-      (accessToken) => transactionHandler(actionCtx(accessToken)),
-      tokenCache
-    );
-  }
-
-  const reportHandler = await matchCommand(text);
-  if (reportHandler) {
-    return withFreshAccessToken(
-      env,
-      link.refreshToken,
-      (accessToken) => reportHandler(accessToken, link.spreadsheetId),
-      tokenCache
-    );
-  }
+  const coreReply = await dispatchCoreCommands(env, subjectId, link, text, origin, tokenCache, false);
+  if (coreReply !== null) return coreReply;
 
   // Pending clarifications (PENDING_TTL_SECONDS in state.ts) are shared by
   // the whole group, not just whoever the bot originally asked — anyone
@@ -698,6 +713,14 @@ function pushTargetId(source: LineEventSource): string {
   return source.type === "group" ? source.groupId : source.userId;
 }
 
+// The KV/account-state key for an event's sender — a real personal LINE
+// userId for 1:1 chat, or the synthesized group subject id for a group
+// (see groupSubjectId's own comment), so a photo batch groups by "whose
+// shared trip is this" rather than by individual sender.
+function mediaSubjectId(source: LineEventSource): string {
+  return source.type === "group" ? groupSubjectId(source.groupId) : source.userId;
+}
+
 // LINE reply tokens are single-use and short-lived. Sending several photos
 // or clips together bundles many events into one webhook call, and each
 // Drive upload takes real network time — replying to event N only after
@@ -781,11 +804,21 @@ const DRAIN_BATCH_SIZE = 10;
 // either is missing so the caller knows to stop.
 async function resolveMediaBatchContext(
   env: Env,
-  lineUserId: string,
+  subjectId: string,
   events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
   origin: string
 ): Promise<{ refreshToken: string; trip: ActiveTrip } | null> {
-  const link = await getAccountLink(env.ACCOUNTS, lineUserId);
+  // Group mode (PLAN.md 17.7): unlike personal chat, where every photo is
+  // unambiguously meant for the bot, a group has ordinary unrelated
+  // photo-sharing all the time, and LINE's @mention feature can't be
+  // attached to a photo the way it can to text — there's no signal to gate
+  // a reply on the way findSelfMention gates text commands. So neither
+  // "not linked" nor "no active trip" gets a reply in a group; only a
+  // genuinely active trip (started via an explicit *mentioned* text
+  // command) is treated as consent to auto-collect what gets sent next.
+  const isGroup = groupIdFromSubject(subjectId) !== null;
+
+  const link = await getAccountLink(env.ACCOUNTS, subjectId);
   if (!link) {
     // .catch here (and on every other replyOrPush call in this file's media
     // handling) is deliberate: replyOrPush itself throws if BOTH the reply
@@ -796,20 +829,24 @@ async function resolveMediaBatchContext(
     // webhook call too. A real report matched this exactly: one batch got no
     // reply at all while an unrelated batch in a different webhook call
     // succeeded normally.
-    await replyOrPush(
-      events[0],
-      await buildUnlinkedPrompt(env, lineUserId, origin),
-      env.LINE_CHANNEL_ACCESS_TOKEN
-    ).catch(() => undefined);
+    if (!isGroup) {
+      await replyOrPush(
+        events[0],
+        await buildUnlinkedPrompt(env, subjectId, origin),
+        env.LINE_CHANNEL_ACCESS_TOKEN
+      ).catch(() => undefined);
+    }
     return null;
   }
-  const trip = await getActiveTrip(env.ACCOUNTS, lineUserId);
+  const trip = await getActiveTrip(env.ACCOUNTS, subjectId);
   if (!trip) {
-    await replyOrPush(
-      events[0],
-      'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูป/คลิปตามมาได้เลย',
-      env.LINE_CHANNEL_ACCESS_TOKEN
-    ).catch(() => undefined);
+    if (!isGroup) {
+      await replyOrPush(
+        events[0],
+        'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูป/คลิปตามมาได้เลย',
+        env.LINE_CHANNEL_ACCESS_TOKEN
+      ).catch(() => undefined);
+    }
     return null;
   }
   return { refreshToken: link.refreshToken, trip };
@@ -817,17 +854,19 @@ async function resolveMediaBatchContext(
 
 async function handleQueuedMediaBatch(
   env: Env,
-  lineUserId: string,
+  subjectId: string,
   events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
   origin: string
 ): Promise<void> {
   try {
-    const ctx = await resolveMediaBatchContext(env, lineUserId, events, origin);
+    const ctx = await resolveMediaBatchContext(env, subjectId, events, origin);
     if (!ctx) return;
     const { trip } = ctx;
 
+    const pushTarget = pushTargetId(events[0].source);
     const jobs: QueuedUpload[] = events.map((event) => ({
-      lineUserId,
+      lineUserId: subjectId,
+      pushTarget,
       kind: isImageMessageEvent(event) ? "image" : "video",
       messageId: event.message.id,
       timestampMs: event.timestamp,
@@ -884,40 +923,20 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
   // TokenCache comment on withFreshAccessToken for why.
   const tokenCache: TokenCache = new Map();
 
-  // Media events (image/video) are always queued (uploadQueue.ts) and never
-  // uploaded inline here — grouped by sender, one combined reply per sender.
-  // See DRAIN_BATCH_SIZE's comment for why every media file goes through the
-  // queue unconditionally now, rather than small batches uploading inline
-  // for a faster reply the way an earlier version did.
+  // Text/unsupported events are processed *before* media below — a text
+  // command that starts a trip (e.g. group mode's mentioned "เริ่มทริป")
+  // must land before any photos bundled into the same webhook call are
+  // checked against the active trip, or those photos see "no active trip
+  // yet" and, in group mode, get silently dropped with zero reply (see
+  // resolveMediaBatchContext's isGroup handling) even though the trip
+  // gets created moments later in this very call. LINE can bundle a
+  // multi-select photo send together with a preceding text message into
+  // one webhook body, so this ordering is a real, not just theoretical,
+  // race.
   const mediaEvents = body.events.filter(
     (event): event is LineImageMessageEvent | LineVideoMessageEvent =>
       isImageMessageEvent(event) || isVideoMessageEvent(event)
   );
-  if (mediaEvents.length > 0) {
-    // Grouped by sender — a webhook call is almost always one person's send,
-    // but handling it generally costs nothing extra.
-    const eventsByUser = new Map<string, Array<LineImageMessageEvent | LineVideoMessageEvent>>();
-    for (const event of mediaEvents) {
-      const forUser = eventsByUser.get(event.source.userId) ?? [];
-      forUser.push(event);
-      eventsByUser.set(event.source.userId, forUser);
-    }
-    // allSettled, not all: handleQueuedMediaBatch already catches everything
-    // internally (see its own try/catch), but this is defense in depth —
-    // one sender's batch throwing must never take down every other sender's
-    // batch (or the rest of handleWebhook below) in the same webhook call.
-    const results = await Promise.allSettled(
-      [...eventsByUser.entries()].map(([lineUserId, events]) =>
-        handleQueuedMediaBatch(env, lineUserId, events, origin)
-      )
-    );
-    for (const result of results) {
-      if (result.status === "rejected") console.error("media batch handling failed unexpectedly", result.reason);
-    }
-  }
-
-  // Everything else (text, unsupported message types) is processed
-  // individually with bounded concurrency, same as always.
   const mediaEventSet = new Set<LineWebhookBody["events"][number]>(mediaEvents);
   const otherEvents = body.events.filter((event) => !mediaEventSet.has(event));
 
@@ -966,6 +985,40 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
       console.error("webhook handling failed", err);
     }
   });
+
+  // Media events (image/video) are always queued (uploadQueue.ts) and never
+  // uploaded inline here — grouped by sender, one combined reply per sender.
+  // See DRAIN_BATCH_SIZE's comment for why every media file goes through the
+  // queue unconditionally now, rather than small batches uploading inline
+  // for a faster reply the way an earlier version did. Runs after the text
+  // events above finish, not concurrently with them — see the comment where
+  // mediaEvents/otherEvents are split out for why the ordering matters.
+  if (mediaEvents.length > 0) {
+    // Grouped by subject (personal userId, or the whole group for a
+    // group-sourced event — see mediaSubjectId) — a webhook call is almost
+    // always one sender's send, but handling it generally costs nothing
+    // extra, and a group needs everyone's photos pooled into the same
+    // batch/trip regardless of which member actually sent each one.
+    const eventsBySubject = new Map<string, Array<LineImageMessageEvent | LineVideoMessageEvent>>();
+    for (const event of mediaEvents) {
+      const subjectId = mediaSubjectId(event.source);
+      const forSubject = eventsBySubject.get(subjectId) ?? [];
+      forSubject.push(event);
+      eventsBySubject.set(subjectId, forSubject);
+    }
+    // allSettled, not all: handleQueuedMediaBatch already catches everything
+    // internally (see its own try/catch), but this is defense in depth —
+    // one sender's batch throwing must never take down every other sender's
+    // batch in the same webhook call.
+    const results = await Promise.allSettled(
+      [...eventsBySubject.entries()].map(([subjectId, events]) =>
+        handleQueuedMediaBatch(env, subjectId, events, origin)
+      )
+    );
+    for (const result of results) {
+      if (result.status === "rejected") console.error("media batch handling failed unexpectedly", result.reason);
+    }
+  }
 }
 
 // Fully synchronous: verifies, processes every event, and only then returns
@@ -982,7 +1035,9 @@ export async function handleWebhook(request: Request, env: Env): Promise<Respons
 }
 
 interface DrainUserSummary {
+  lineUserId: string;
   tripName: string;
+  pushTarget: string;
   succeeded: number;
   failed: number;
 }
@@ -998,10 +1053,27 @@ export async function drainUploadQueue(env: Env): Promise<void> {
   if (entries.length === 0) return;
 
   const tokenCache: TokenCache = new Map();
+  // Keyed by lineUserId *and* tripFolderId, not lineUserId alone — a batch
+  // can span two different trips for the same person/group (e.g. a group
+  // closes one trip and opens another between drains, or right around the
+  // same drain), and collapsing them into one summary would both merge
+  // unrelated succeeded/failed counts and report the wrong trip name for
+  // whichever files didn't belong to the last-processed job.
   const summaries = new Map<string, DrainUserSummary>();
 
   for (const { key, job } of entries) {
-    const summary = summaries.get(job.lineUserId) ?? { tripName: job.tripName, succeeded: 0, failed: 0 };
+    const summaryKey = `${job.lineUserId} ${job.tripFolderId}`;
+    const summary = summaries.get(summaryKey) ?? {
+      lineUserId: job.lineUserId,
+      tripName: job.tripName,
+      // Jobs queued before this deploy have no pushTarget field at all
+      // (KV queue entries persist across deploys) — lineUserId was always
+      // the correct push target for every job before group mode split the
+      // two, so it's the right fallback for that pre-existing data.
+      pushTarget: job.pushTarget ?? job.lineUserId,
+      succeeded: 0,
+      failed: 0,
+    };
     try {
       const link = await getAccountLink(env.ACCOUNTS, job.lineUserId);
       if (link) {
@@ -1020,18 +1092,26 @@ export async function drainUploadQueue(env: Env): Promise<void> {
     } finally {
       await deleteQueueEntry(env.ACCOUNTS, key);
     }
-    summary.tripName = job.tripName; // keep whichever job was processed most recently
-    summaries.set(job.lineUserId, summary);
+    summaries.set(summaryKey, summary);
   }
 
-  for (const [lineUserId, summary] of summaries) {
-    const remaining = await countQueuedForUser(env.ACCOUNTS, lineUserId);
+  // One push per (subject, trip) summary — a batch spanning two trips for
+  // the same subject now sends two separate confirmations instead of one
+  // mislabeled combined one. "remaining" is a whole-subject queue depth
+  // (not trip-specific — countQueuedForUser doesn't filter by trip), so it
+  // reads the same across both pushes in that rare case, which is a minor
+  // cosmetic wrinkle next to reporting the wrong trip name outright.
+  for (const summary of summaries.values()) {
+    const remaining = await countQueuedForUser(env.ACCOUNTS, summary.lineUserId);
     const parts = [`✅ อัปโหลดเพิ่ม ${summary.succeeded} ไฟล์เข้าทริป "${summary.tripName}" แล้ว`];
     if (summary.failed > 0) {
       parts.push(`(อีก ${summary.failed} ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`);
     }
     parts.push(remaining > 0 ? `เหลืออีก ${remaining} ไฟล์ กำลังทยอยอัปโหลดต่อ` : `อัปโหลดครบทุกไฟล์แล้ว`);
-    await pushToLine(lineUserId, parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN).catch((err) =>
+    // pushTarget, not lineUserId — a group's push target is the real
+    // groupId, not the synthesized "group:<groupId>" subject id lineUserId
+    // holds in that case (see QueuedUpload's own comment).
+    await pushToLine(summary.pushTarget, parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN).catch((err) =>
       console.error("drain summary push failed", err)
     );
   }

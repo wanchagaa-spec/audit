@@ -44,6 +44,20 @@ export async function createBookSpreadsheet(accessToken: string, bookName: strin
   return spreadsheetId;
 }
 
+/** Lightweight check for whether an access token can read a given
+ * spreadsheet — used by group mode's OAuth relink flow (PLAN.md 17) to
+ * tell "the same Google account re-consenting with broader scope" (can
+ * still access the group's existing spreadsheet) apart from "a different
+ * group member completing the link with their own separate account"
+ * (can't), since there's no LINE API to verify who actually clicked the
+ * link. */
+export async function canAccessSpreadsheet(accessToken: string, spreadsheetId: string): Promise<boolean> {
+  const res = await fetch(`${SHEETS_BASE}/${spreadsheetId}?fields=spreadsheetId`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return res.ok;
+}
+
 export interface TransactionRow {
   id: string;
   date: string;
