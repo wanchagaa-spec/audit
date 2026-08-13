@@ -2092,6 +2092,165 @@ check(
   linkAfterB?.refreshToken === "fake-refresh-token-for-code-person-a" && linkAfterB?.spreadsheetId === linkAfterA?.spreadsheetId
 );
 
+// Group mode, second pass (PLAN.md 17.7): province/calendar/diary/trip
+// opened up to near-full parity with personal mode, using the same
+// "group:<groupId>" subject id trick as money/AI already did. Reuses the
+// group linked earlier in this file (groupId/groupSenderA/groupSenderB).
+
+const groupProvinceReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ตั้งจังหวัด เชียงใหม่", origin);
+check("\"ตั้งจังหวัด\" works in group mode", groupProvinceReply.includes("เชียงใหม่"));
+
+const groupCalendarPromptReply = await handleGroupTextMessage(
+  env,
+  groupId,
+  groupSenderA,
+  `นัด ประชุมกลุ่ม ${tomorrowSlash} 13:00`,
+  origin
+);
+check(
+  "calendar create asks to confirm in group mode, same as personal mode",
+  groupCalendarPromptReply.includes("ประชุมกลุ่ม") && groupCalendarPromptReply.includes("13:00")
+);
+const calendarEventsBeforeGroupConfirm = calendarEvents.length;
+const groupCalendarConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
+check(
+  "any group member can confirm the shared pending calendar create, same as the money/delete confirmations above",
+  groupCalendarConfirmReply.includes("จดนัดแล้ว") && calendarEvents.length === calendarEventsBeforeGroupConfirm + 1
+);
+
+const groupDiaryPromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ไดอารี่ ทริปกลุ่มสนุกมาก", origin);
+check("diary create asks to confirm in group mode", groupDiaryPromptReply.includes("ใช่ไหม"));
+const groupDiaryConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
+check("confirming saves the diary entry in group mode, attributed to the group's own shared diary", groupDiaryConfirmReply.includes("บันทึกไดอารี่แล้ว"));
+
+// Trip start/status via the real webhook path (mentioned, since these are
+// text commands) — sets up the group's active trip for the photo
+// auto-upload tests below, which specifically must NOT require a mention.
+const groupTripStartBody = JSON.stringify({
+  events: [groupTextEvent({ text: "@BotName เริ่มทริป ทริปกลุ่ม", mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] } })],
+});
+const groupTripStartSignature = await signLineBody(groupTripStartBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeGroupTripStart = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": groupTripStartSignature }, body: groupTripStartBody }),
+  env
+);
+check(
+  "starting a trip in a group works the same as personal mode, via a mentioned text command",
+  replies.length === repliesBeforeGroupTripStart + 1 && replies.at(-1).includes('ทริป "ทริปกลุ่ม"')
+);
+check("the group's trip folder was created under the shared album root", driveFolders.some((f) => f.name === "ทริปกลุ่ม"));
+const groupTripFolderId = driveFolders.find((f) => f.name === "ทริปกลุ่ม").id;
+
+// Photos in a group can never be @mentioned (LINE's mention feature only
+// exists on text), so the whole design here hinges on the active-trip
+// check itself being the signal — see resolveMediaBatchContext's comment.
+function groupImageEvent({ messageId, userId = groupSenderA, replyToken = "reply-group-img" }) {
+  return {
+    type: "message",
+    message: { type: "image", id: messageId },
+    source: { type: "group", groupId, userId },
+    replyToken,
+    timestamp: Date.now(),
+  };
+}
+
+// A group that was never linked at all must stay completely silent on a
+// random photo — same reasoning as "no active trip" below, just the other
+// missing precondition.
+const unlinkedGroupId = "Cgroupunlinked1";
+const unlinkedGroupImageBody = JSON.stringify({
+  events: [
+    {
+      type: "message",
+      message: { type: "image", id: "unlinked-group-img-1" },
+      source: { type: "group", groupId: unlinkedGroupId, userId: groupSenderA },
+      replyToken: "reply-unlinked-group-img",
+      timestamp: Date.now(),
+    },
+  ],
+});
+const unlinkedGroupImageSignature = await signLineBody(unlinkedGroupImageBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeUnlinkedGroupImage = replies.length;
+const pushesBeforeUnlinkedGroupImage = pushes.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": unlinkedGroupImageSignature }, body: unlinkedGroupImageBody }),
+  env
+);
+check(
+  "a photo in a group with no linked account at all gets total silence, not a link prompt",
+  replies.length === repliesBeforeUnlinkedGroupImage && pushes.length === pushesBeforeUnlinkedGroupImage
+);
+check("nothing was queued for the unlinked group either", (await countQueuedForUser(kv, `group:${unlinkedGroupId}`)) === 0);
+
+// The already-linked group (from earlier in this section), but before any
+// trip has been started — a photo sent now must be pure ambient
+// group chatter, not something to react to.
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin); // close the trip opened above, for this check
+const noTripGroupImageBody = JSON.stringify({ events: [groupImageEvent({ messageId: "no-trip-group-img-1" })] });
+const noTripGroupImageSignature = await signLineBody(noTripGroupImageBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeNoTripGroupImage = replies.length;
+const pushesBeforeNoTripGroupImage = pushes.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": noTripGroupImageSignature }, body: noTripGroupImageBody }),
+  env
+);
+check(
+  "a photo in a linked group with no active trip also gets total silence, not the personal-mode 'start a trip first' reply",
+  replies.length === repliesBeforeNoTripGroupImage && pushes.length === pushesBeforeNoTripGroupImage
+);
+check("nothing was queued without an active trip", (await countQueuedForUser(kv, `group:${groupId}`)) === 0);
+
+// Re-open the trip, then send a photo with NO mention at all — this is the
+// actual point of the feature: once a trip is active, mention-gating
+// doesn't apply to photos anymore, the active trip itself is consent.
+await handleGroupTextMessage(env, groupId, groupSenderA, "เริ่มทริป ทริปกลุ่ม", origin);
+const driveUploadsBeforeGroupPhoto = driveUploads.length;
+const groupPhotoBody = JSON.stringify({ events: [groupImageEvent({ messageId: "group-trip-img-1", userId: groupSenderB })] });
+const groupPhotoSignature = await signLineBody(groupPhotoBody, env.LINE_CHANNEL_SECRET);
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": groupPhotoSignature }, body: groupPhotoBody }),
+  env
+);
+check(
+  "an unmentioned photo from any member queues silently once the group's trip is active",
+  driveUploads.length === driveUploadsBeforeGroupPhoto && (await countQueuedForUser(kv, `group:${groupId}`)) === 1
+);
+
+const pushesBeforeGroupDrain = pushes.length;
+await drainUploadQueue(env);
+check("the drain actually uploads the group's queued photo into the trip's own folder", driveUploads.at(-1).parentId === groupTripFolderId);
+check(
+  "the drain confirmation pushes to the group itself, not to whichever member happened to send the photo",
+  pushes.length === pushesBeforeGroupDrain + 1 && pushes.at(-1).to === groupId && pushes.at(-1).text.includes("ทริปกลุ่ม")
+);
+
+// Migration safety: a queue entry written before pushTarget existed (the
+// field is new, but the KV queue persists across deploys) must still get
+// its completion push delivered, falling back to lineUserId — which was
+// always the correct push target for every job before group mode split
+// the two apart.
+const legacyJob = {
+  lineUserId,
+  kind: "image",
+  messageId: "legacy-msg-1",
+  timestampMs: Date.now(),
+  tripFolderId,
+  tripName: "ทะเล",
+};
+await env.ACCOUNTS.put(`upload-queue:legacy-1`, JSON.stringify(legacyJob), {
+  metadata: { lineUserId },
+});
+const pushesBeforeLegacyDrain = pushes.length;
+const driveUploadsBeforeLegacyDrain = driveUploads.length;
+await drainUploadQueue(env);
+check(
+  "a pre-migration queue entry with no pushTarget field still uploads and pushes its confirmation to lineUserId",
+  driveUploads.length === driveUploadsBeforeLegacyDrain + 1 &&
+    pushes.length === pushesBeforeLegacyDrain + 1 &&
+    pushes.at(-1).to === lineUserId
+);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);

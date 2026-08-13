@@ -24,6 +24,14 @@ const QUEUE_PREFIX = "upload-queue:";
 
 export interface QueuedUpload {
   lineUserId: string;
+  // Where drainUploadQueue's final "✅ อัปโหลดแล้ว" confirmation gets pushed
+  // — the same value as lineUserId in personal mode, but a real LINE
+  // groupId (not the synthesized "group:<groupId>" subject id lineUserId
+  // holds in that case) in group mode, since pushToLine needs an actual
+  // LINE recipient id, not an opaque KV key. Snapshotted at enqueue time
+  // since the triggering event (and its `source`) is long gone by drain
+  // time — there's nothing left to re-derive it from.
+  pushTarget: string;
   kind: "image" | "video";
   messageId: string;
   timestampMs: number;
