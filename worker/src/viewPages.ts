@@ -61,24 +61,34 @@ function renderAccountsSummaryPage(token: string, monthLabel: string, monthTx: T
       ? ""
       : `<div class="card">
     <h2>หมวดที่จ่ายเยอะสุด</h2>
-    ${top
-      .map(
-        (c) =>
-          `<div class="row"><span>${escapeHtml(categoryLabel(c.categoryId))}</span><span>${formatBaht(c.amount)} บาท</span></div>`
-      )
-      .join("\n")}
+    <div class="table-scroll"><table class="data-table">
+      <thead><tr><th>หมวด</th><th class="num">รวม</th></tr></thead>
+      <tbody>
+        ${top
+          .map(
+            (c) =>
+              `<tr><td>${escapeHtml(categoryLabel(c.categoryId))}</td><td class="num expense">${formatBaht(c.amount)}</td></tr>`
+          )
+          .join("\n")}
+      </tbody>
+    </table></div>
   </div>`;
 
   const recentHtml = `<div class="card">
     <h2>รายการล่าสุด</h2>
-    ${recent
-      .map((r) => {
-        const label = escapeHtml(r.note || r.rawText || categoryLabel(r.categoryId));
-        const sign = r.type === "income" ? "+" : "-";
-        const cls = r.type === "income" ? "income" : "expense";
-        return `<div class="row"><span>${label}<br /><span class="meta">${escapeHtml(r.date)} · ${escapeHtml(categoryLabel(r.categoryId))}</span></span><span class="${cls}">${sign}${formatBaht(r.amount)}</span></div>`;
-      })
-      .join("\n")}
+    <div class="table-scroll"><table class="data-table">
+      <thead><tr><th>วันที่</th><th>หมวด</th><th>รายการ</th><th class="num">จำนวนเงิน</th></tr></thead>
+      <tbody>
+        ${recent
+          .map((r) => {
+            const label = escapeHtml(r.note || r.rawText || categoryLabel(r.categoryId));
+            const sign = r.type === "income" ? "+" : "-";
+            const cls = r.type === "income" ? "income" : "expense";
+            return `<tr><td>${escapeHtml(r.date)}</td><td>${escapeHtml(categoryLabel(r.categoryId))}</td><td class="note">${label}</td><td class="num ${cls}">${sign}${formatBaht(r.amount)}</td></tr>`;
+          })
+          .join("\n")}
+      </tbody>
+    </table></div>
   </div>`;
 
   return pageShell(

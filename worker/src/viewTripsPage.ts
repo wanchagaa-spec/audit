@@ -25,6 +25,7 @@ import {
   type DriveFolderSummary,
 } from "./drive.ts";
 import type { Env } from "./index.ts";
+import { bangkokDateKey, formatThaiDateLabel } from "./thaiDate.ts";
 import {
   DATA_FETCH_FAILED_MESSAGE,
   decodeUrlSegment,
@@ -70,7 +71,11 @@ function renderTripPhotoGrid(token: string, folderName: string, folderId: string
   const gridHtml = `<div class="grid">${page.files
     .map((f) => {
       const src = `/view/photo/${encodeURIComponent(f.id)}?token=${encodeURIComponent(token)}`;
-      return `<a href="${src}" target="_blank" rel="noopener"><img src="${src}" loading="lazy" alt="${escapeHtml(f.name)}" /></a>`;
+      // f.createdTime is Drive's own record of the upload moment, always
+      // present for a real file — no fallback needed for a null/missing
+      // case the API doesn't produce.
+      const uploadedLabel = formatThaiDateLabel(bangkokDateKey(new Date(f.createdTime)));
+      return `<div><a href="${src}" target="_blank" rel="noopener"><img src="${src}" loading="lazy" alt="${escapeHtml(f.name)}" /></a><div class="grid-caption">${escapeHtml(uploadedLabel)}</div></div>`;
     })
     .join("\n")}</div>`;
 

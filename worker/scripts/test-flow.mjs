@@ -253,7 +253,9 @@ globalThis.fetch = async (url, init = {}) => {
       if (q.includes("mimeType!=")) {
         const files = driveUploads.filter((f) => f.parentId === parentId);
         return new Response(
-          JSON.stringify({ files: files.map((f) => ({ id: f.id, name: f.name, mimeType: "image/jpeg" })) }),
+          JSON.stringify({
+            files: files.map((f) => ({ id: f.id, name: f.name, mimeType: "image/jpeg", createdTime: f.createdTime })),
+          }),
           { status: 200 }
         );
       }
@@ -322,7 +324,7 @@ globalThis.fetch = async (url, init = {}) => {
       // real overlap instead of near-instant mock responses hiding it.
       await new Promise((resolve) => setTimeout(resolve, 5));
       const id = nextDriveId("file");
-      driveUploads.push({ id, name, parentId, size: payloadSize });
+      driveUploads.push({ id, name, parentId, size: payloadSize, createdTime: new Date().toISOString() });
       return new Response(JSON.stringify({ id }), { status: 200 });
     } finally {
       activeDriveUploadRequests--;
@@ -1795,6 +1797,30 @@ check(
   diaryMalformedMonthResponse.status === 200 && !diaryMalformedMonthHtml.includes("NaN")
 );
 
+// Search box (?q=) on /view/diary: searches every month at once, same
+// substring match as the "ค้นหาไดอารี่ <คำ>" chat command, not just whatever
+// month happens to be showing.
+diaryRows.push(["diary-view-search-1", "2020-03-15", "ทั่วไป", "หาโน้ตเรื่องแมวส้มตัวนี้", new Date().toISOString()]);
+const diarySearchResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}&q=${encodeURIComponent("แมวส้ม")}`), env, new FakeExecutionContext());
+const diarySearchHtml = await diarySearchResponse.text();
+check(
+  "/view/diary?q= finds an entry from a month far outside the currently-viewed one",
+  diarySearchResponse.status === 200 && diarySearchHtml.includes("แมวส้ม") && diarySearchHtml.includes("2020-03-15")
+);
+const diarySearchNoMatchResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}&q=${encodeURIComponent("ไม่มีทางเจอคำนี้แน่นอน")}`), env, new FakeExecutionContext());
+check(
+  "/view/diary?q= with no matches shows an empty-results state, not an error",
+  diarySearchNoMatchResponse.status === 200 && (await diarySearchNoMatchResponse.text()).includes("ไม่พบบันทึก")
+);
+const diarySearchXssResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}&q=${encodeURIComponent('<script>alert(1)</script>')}`), env, new FakeExecutionContext());
+const diarySearchXssHtml = await diarySearchXssResponse.text();
+check(
+  "the search query itself is HTML-escaped when echoed back into the page (reflected in both the input value and the results heading)",
+  diarySearchXssResponse.status === 200 &&
+    !diarySearchXssHtml.includes("<script>alert(1)</script>") &&
+    diarySearchXssHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt;")
+);
+
 // Trip photos view reuses the "ทะเล" trip folder and its already-uploaded
 // files from the trip-photo tests earlier in this run (see tripFolderId
 // above) instead of manufacturing fresh Drive mock data — the view layer
@@ -1808,6 +1834,10 @@ const tripPhotosHtml = await tripPhotosResponse.text();
 check(
   "/view/trips/:folderId shows a photo grid linking to the photo-proxy endpoint",
   tripPhotosResponse.status === 200 && tripPhotosHtml.includes("ทะเล") && tripPhotosHtml.includes("/view/photo/")
+);
+check(
+  "each photo in the grid is captioned with its upload date",
+  tripPhotosHtml.includes("grid-caption") && tripPhotosHtml.includes(formatThaiDateLabel(bangkokDateKey()))
 );
 
 const tripPhotoFileId = driveUploads.find((f) => f.parentId === tripFolderId)?.id;
