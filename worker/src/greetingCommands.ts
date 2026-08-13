@@ -18,25 +18,28 @@ const WEEKDAY_TH = ["วันจันทร์", "วันอังคาร"
 // of its own) — so it deliberately isn't shaped like ActionCtx-based
 // Handler the way those are, to avoid making callers fetch a Google token
 // this command has no use for.
+// Shared by the regex matcher below and the AI interpreter's "set_province"
+// intent (aiInterpreter.ts, dispatched in index.ts).
+export async function setProvinceByName(kv: KVNamespace, lineUserId: string, requested: string): Promise<string> {
+  let geocoded;
+  try {
+    geocoded = await geocodeProvince(requested);
+  } catch (err) {
+    console.error("setProvinceByName: geocoding failed", err);
+    return "ขอโทษด้วย ตอนนี้ระบบค้นหาจังหวัดขัดข้อง ลองใหม่อีกครั้งนะ";
+  }
+  if (!geocoded) {
+    return `หาจังหวัด/เมือง "${requested}" ไม่เจอนะ ลองพิมพ์เป็นภาษาอังกฤษหรือสะกดแบบอื่นดู`;
+  }
+  await setUserProvince(kv, lineUserId, geocoded);
+  return `ตั้งพื้นที่พยากรณ์อากาศเป็น "${geocoded.name}" ให้แล้วนะ จะใช้บอกสภาพอากาศตอนทักทายครั้งแรกของวัน`;
+}
+
 export function matchProvinceCommand(text: string): ((kv: KVNamespace, lineUserId: string) => Promise<string>) | null {
   const m = text.trim().match(/^ตั้งจังหวัด\s+(.+)$/s);
   if (!m) return null;
   const requested = m[1].trim();
-
-  return async (kv, lineUserId) => {
-    let geocoded;
-    try {
-      geocoded = await geocodeProvince(requested);
-    } catch (err) {
-      console.error("matchProvinceCommand: geocoding failed", err);
-      return "ขอโทษด้วย ตอนนี้ระบบค้นหาจังหวัดขัดข้อง ลองใหม่อีกครั้งนะ";
-    }
-    if (!geocoded) {
-      return `หาจังหวัด/เมือง "${requested}" ไม่เจอนะ ลองพิมพ์เป็นภาษาอังกฤษหรือสะกดแบบอื่นดู`;
-    }
-    await setUserProvince(kv, lineUserId, geocoded);
-    return `ตั้งพื้นที่พยากรณ์อากาศเป็น "${geocoded.name}" ให้แล้วนะ จะใช้บอกสภาพอากาศตอนทักทายครั้งแรกของวัน`;
-  };
+  return (kv, lineUserId) => setProvinceByName(kv, lineUserId, requested);
 }
 
 // Best-effort: weather and news are independent nice-to-haves, so one

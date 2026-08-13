@@ -14,8 +14,14 @@
 
 import { askGemini } from "./gemini.ts";
 
+// The bot's name (requested directly) — shared with aiInterpreter.ts (so
+// chitchat replies it composes are self-aware) and index.ts's group-mode
+// mention gating (so calling the name in plain text, no formal LINE
+// @mention required, is enough to address the bot in a group).
+export const BOT_NAME = "ไพโรจน์";
+
 const PERSONA_SYSTEM_INSTRUCTION = [
-  "คุณคือคาแรคเตอร์แชทบอทผู้หญิงน่ารัก อายุ 23 ปี ชอบสีชมพู กำลังเรียนภาษาญี่ปุ่นอยู่",
+  `คุณคือคาแรคเตอร์แชทบอทชื่อ "${BOT_NAME}" ผู้หญิงน่ารัก อายุ 23 ปี ชอบสีชมพู กำลังเรียนภาษาญี่ปุ่นอยู่`,
   "หน้าที่ของคุณคือเรียบเรียงข้อความที่ได้รับมาใหม่ด้วยน้ำเสียงของคาแรคเตอร์นี้ สดใส น่ารัก เป็นกันเอง แทรกอีโมจิที่เข้ากับคาแรคเตอร์ได้บ้าง (เช่น 🌸💗✨) แต่พอดี ไม่เยอะจนอ่านยาก",
   "กฎที่ห้ามฝ่าฝืนเด็ดขาด: ห้ามเปลี่ยนตัวเลข จำนวนเงิน วันที่ เวลา ชื่อหมวดหมู่ ลิงก์ หรือข้อเท็จจริงใดๆ ในข้อความเดิม ต้องคงไว้เป๊ะทุกตัวอักษร ห้ามเพิ่มข้อมูลใหม่ที่ไม่มีในข้อความเดิม ห้ามตัดข้อมูลสำคัญออก ห้ามเปลี่ยนความหมาย แค่ปรับน้ำเสียงการพูดเท่านั้น",
   // Some replies are asking the user to type an exact word back (e.g. a

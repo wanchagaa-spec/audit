@@ -88,6 +88,18 @@ let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling 
 let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
+// Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
+// AI-interpreter call (PLAN.md 17.11) the same way persona.ts's calls are
+// identified by "ห้ามเปลี่ยนตัวเลข" below.
+const INTERPRETER_MARKER = "ระบบตีความข้อความแชท";
+// one-shot: the structured intent object the *next* AI interpreter call
+// returns (JSON-stringified for the mocked Gemini response). Left null by
+// default, which makes the mock return non-JSON text instead — interpretMessage
+// then fails to parse it and gracefully falls back to the deterministic
+// matcher chain, so every test written before this feature existed keeps
+// exercising that same deterministic path unless it explicitly opts in here.
+let simulateInterpreterResult = null;
+let simulateInterpreterFailure = false; // one-shot: fails the next AI-interpreter call specifically (a real network/API error, not just an unusable response), to exercise interpretMessage's own catch-and-fall-back path distinctly from a malformed-JSON response
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
 let simulateFinanceNewsFetchFailure = false; // makes the next CNBC RSS request fail, to exercise graceful degradation
@@ -406,13 +418,43 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response(JSON.stringify({ values: diaryRows }), { status: 200 });
   }
   if (u.includes("generativelanguage.googleapis.com")) {
+    const body = JSON.parse(init.body);
+    const systemInstruction = body.systemInstruction?.parts?.[0]?.text ?? "";
+    const question = body.contents?.[0]?.parts?.[0]?.text ?? "";
+
+    // AI-interpreter calls (PLAN.md 17.11, aiInterpreter.ts) are identified
+    // by their own marker phrase and handled before simulateGeminiFailure is
+    // even consulted — every fresh message now makes this call *first*,
+    // ahead of persona styling or the real Q&A pipeline, and tests that set
+    // simulateGeminiFailure to exercise one of those *specific* downstream
+    // calls need it to still be armed by the time that later call happens,
+    // not eaten by this earlier, unrelated one. See simulateInterpreterResult's
+    // own comment above for why the no-mock-configured default is
+    // deliberately non-JSON.
+    if (systemInstruction.includes(INTERPRETER_MARKER)) {
+      geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
+      if (simulateInterpreterFailure) {
+        simulateInterpreterFailure = false;
+        return new Response(JSON.stringify({ error: { message: "simulated interpreter failure" } }), { status: 500 });
+      }
+      if (simulateInterpreterResult) {
+        const result = simulateInterpreterResult;
+        simulateInterpreterResult = null;
+        return new Response(
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(result) }] } }] }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: `[no interpreter mock configured] ${question}` }] } }] }),
+        { status: 200 }
+      );
+    }
+
     if (simulateGeminiFailure) {
       simulateGeminiFailure = false;
       return new Response(JSON.stringify({ error: { message: "simulated Gemini failure" } }), { status: 500 });
     }
-    const body = JSON.parse(init.body);
-    const systemInstruction = body.systemInstruction?.parts?.[0]?.text ?? "";
-    const question = body.contents?.[0]?.parts?.[0]?.text ?? "";
     geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
 
     // Persona-styling calls (PLAN.md 17.9, persona.ts) are identified by a
@@ -549,12 +591,13 @@ const {
   drainUploadQueue,
   default: worker,
 } = await import("../src/index.ts");
-const { setAccountLink, getAccountLink } = await import("../src/state.ts");
+const { setAccountLink, getAccountLink, getPending } = await import("../src/state.ts");
 const { verifyState, signState, signViewToken, verifyViewToken } = await import("../src/signedState.ts");
 const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
+const { getConversationHistory } = await import("../src/conversationHistory.ts");
 
 async function signLineBody(rawBody, secret) {
   const key = await crypto.subtle.importKey(
@@ -1708,6 +1751,167 @@ check(
     diaryRows.some((r) => r[3] === "วันนี้อากาศดีมาก\nไปทะเลด้วย")
 );
 
+// AI message interpretation + conversation memory (PLAN.md 17.11): every
+// fresh message goes through interpretMessage first, and its structured
+// intent routes to the exact same deterministic apply/prompt/answer
+// functions the regex matchers use — confirm-before-save (17.9) still
+// applies to anything that saves data. The default Gemini mock returns
+// non-JSON text for an interpreter call (see simulateInterpreterResult's own
+// comment), so unless a test explicitly sets it, interpretMessage returns
+// null and the message falls back to the pre-existing deterministic path —
+// this is what let all 264 pre-17.11 tests above pass completely unchanged.
+
+const sheetRowsBeforeInterp = sheetRows.length;
+simulateInterpreterResult = {
+  intent: "transaction",
+  transactions: [{ amount: 350, type: "expense", categoryId: "shopping", note: "เสื้อยืดตัวใหม่" }],
+};
+const interpTxPromptReply = await handleTextMessage(env, lineUserId, "ไปเดินห้างมาซื้อเสื้อยืดตัวนึง", origin);
+check(
+  "an AI-interpreted transaction still asks to confirm before saving, doesn't save immediately",
+  interpTxPromptReply.includes("ใช่ไหม") && sheetRows.length === sheetRowsBeforeInterp
+);
+const interpTxConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the AI-interpreted draft actually saves it, using the AI-picked category",
+  interpTxConfirmReply.includes("350") &&
+    sheetRows.length === sheetRowsBeforeInterp + 1 &&
+    sheetRows.at(-1)[4] === "shopping" &&
+    sheetRows.at(-1)[5] === "เสื้อยืดตัวใหม่"
+);
+
+// validateIntent (aiInterpreter.ts) rejects a well-formed-JSON-but-invalid
+// intent outright — here, a categoryId that doesn't exist for the declared
+// type — rather than trusting it and writing a bogus category to the sheet.
+// A rejected intent is treated exactly like a failed call: gracefully falls
+// back to the deterministic parser, which still recognizes the plain
+// "ซื้อกาแฟ 45" phrasing on its own.
+const sheetRowsBeforeInvalid = sheetRows.length;
+simulateInterpreterResult = {
+  intent: "transaction",
+  transactions: [{ amount: 45, type: "expense", categoryId: "not-a-real-category", note: "กาแฟ" }],
+};
+const invalidIntentReply = await handleTextMessage(env, lineUserId, "ซื้อกาแฟ 45", origin);
+check(
+  "an invalid AI intent (bogus categoryId) is rejected and falls back to the deterministic parser",
+  invalidIntentReply.includes("ใช่ไหม")
+);
+const invalidIntentConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "the deterministic fallback saved a real category, not the AI's invalid one",
+  sheetRows.length === sheetRowsBeforeInvalid + 1 && sheetRows.at(-1)[4] === "food"
+);
+
+// An outright interpreter call failure (network/API error, not just an
+// unusable response) degrades the exact same way a malformed response does
+// — the deterministic parser still resolves an unambiguous message on its
+// own, so a Gemini outage never blocks logging an expense.
+const sheetRowsBeforeCallFailure = sheetRows.length;
+simulateInterpreterFailure = true;
+await logAndConfirm(lineUserId, "ซื้อขนม 20");
+check(
+  "an outright interpreter call failure still falls back to the deterministic parser",
+  sheetRows.length === sheetRowsBeforeCallFailure + 1 && sheetRows.at(-1)[4] === "food"
+);
+
+// "chitchat"/"unclear" intents: the AI answers directly (a reply it composed
+// itself, not routed through any save/confirm step) rather than being forced
+// through chatEngine's fixed clarification phrasing.
+simulateInterpreterResult = { intent: "chitchat", reply: "สวัสดีค่ะ วันนี้เป็นอย่างไรบ้างคะ" };
+const chitchatReply = await handleTextMessage(env, lineUserId, "ช่วงนี้เป็นไงบ้าง", origin);
+check("a chitchat intent returns the AI's own reply directly", chitchatReply === "สวัสดีค่ะ วันนี้เป็นอย่างไรบ้างคะ");
+
+const pendingBeforeUnclear = await getPending(env.ACCOUNTS, lineUserId);
+simulateInterpreterResult = { intent: "unclear", reply: "ซื้ออะไรคะ ราคาเท่าไหร่คะ" };
+const unclearReply = await handleTextMessage(env, lineUserId, "ซื้อของมา", origin);
+check("an unclear intent asks the AI's own clarifying question", unclearReply === "ซื้ออะไรคะ ราคาเท่าไหร่คะ");
+const pendingAfterUnclear = await getPending(env.ACCOUNTS, lineUserId);
+check(
+  // Regression guard: an "unclear" reply must never leave a chatEngine
+  // PendingClarification behind — if it did, the *next* message (however
+  // unrelated) would get silently swallowed as an answer to a question the
+  // AI asked, not chatEngine. Follow-ups instead rely purely on
+  // conversation history feeding back into the next interpreter call.
+  "an unclear intent does not leave a chatEngine pendingClarification behind",
+  pendingBeforeUnclear === null && pendingAfterUnclear === null
+);
+
+// calendar_create / diary_create intents route through the exact same
+// prompt*FromDraft functions the regex matchers use, so confirm-before-save
+// and the confirmation wording are identical either way.
+simulateInterpreterResult = {
+  intent: "calendar_create",
+  calendarTitle: "นัดหาหมอฟัน",
+  calendarDateKey: addDaysToDateKey(bangkokDateKey(), 3),
+  calendarTime: "10:30",
+};
+const interpCalendarPromptReply = await handleTextMessage(env, lineUserId, "อีก 3 วันนัดหาหมอฟัน 10 โมงครึ่ง", origin);
+check(
+  "an AI-interpreted calendar event asks to confirm before creating it",
+  interpCalendarPromptReply.includes("นัดหาหมอฟัน") && interpCalendarPromptReply.includes("ใช่ไหม")
+);
+const interpCalendarConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the AI-interpreted calendar draft actually creates the event",
+  interpCalendarConfirmReply.includes("จดนัดแล้ว") && calendarEvents.some((e) => e.summary === "นัดหาหมอฟัน")
+);
+
+const diaryRowsBeforeInterp = diaryRows.length;
+simulateInterpreterResult = { intent: "diary_create", diaryText: "วันนี้อารมณ์ดีมาก", diaryCategory: "อารมณ์" };
+const interpDiaryPromptReply = await handleTextMessage(env, lineUserId, "วันนี้รู้สึกดีมากเลย", origin);
+check("an AI-interpreted diary entry asks to confirm before saving", interpDiaryPromptReply.includes("ใช่ไหม"));
+const interpDiaryConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the AI-interpreted diary draft actually saves it",
+  interpDiaryConfirmReply.includes("บันทึกไดอารี่แล้ว") && diaryRows.length === diaryRowsBeforeInterp + 1
+);
+
+// "question"/"help" intents route directly to the exact same guarded
+// pipelines matchAiCommand/matchCommand already use (answerQuestion,
+// buildHelpText) — no separate implementation to keep in sync.
+simulateInterpreterResult = { intent: "question", question: "เดือนนี้ใช้เงินไปเท่าไหร่แล้ว" };
+const interpQuestionReply = await handleTextMessage(env, lineUserId, "เดือนนี้ใช้เงินไปเยอะไหมนะ", origin);
+check(
+  "a question intent routes straight to the guarded AI Q&A pipeline",
+  interpQuestionReply.includes("[mock AI answer]") && interpQuestionReply.includes("เดือนนี้ใช้เงินไปเท่าไหร่แล้ว")
+);
+
+simulateInterpreterResult = { intent: "help" };
+const interpHelpReply = await handleTextMessage(env, lineUserId, "ทำอะไรได้บ้างอะ", origin);
+check("a help intent returns the same detailed help text buildHelpText() produces", interpHelpReply.includes("เปิดเว็บดูข้อมูล"));
+
+// Conversation memory: both sides of an exchange are recorded, and the next
+// interpreter call actually receives that history in its prompt — this is
+// the "จำ context ที่คุยกันทั้งหมด" half of PLAN.md 17.11, not just intent
+// classification in isolation.
+const historyUserId = "history-test-user";
+await setAccountLink(env.ACCOUNTS, historyUserId, {
+  spreadsheetId: "sheet-history-test",
+  refreshToken: "refresh-history-test",
+  displayName: "ประวัติทดสอบ",
+});
+simulateInterpreterResult = { intent: "chitchat", reply: "จำได้ค่ะ ถามอะไรมาเมื่อกี้นะ" };
+await handleTextMessage(env, historyUserId, "ฉันชื่อฟ้า", origin);
+const historyAfterFirstTurn = await getConversationHistory(env.ACCOUNTS, historyUserId);
+check(
+  "both the user's message and the bot's reply are recorded after one exchange",
+  historyAfterFirstTurn.length === 2 &&
+    historyAfterFirstTurn[0].role === "user" &&
+    historyAfterFirstTurn[0].text === "ฉันชื่อฟ้า" &&
+    historyAfterFirstTurn[1].role === "bot" &&
+    historyAfterFirstTurn[1].text === "จำได้ค่ะ ถามอะไรมาเมื่อกี้นะ"
+);
+simulateInterpreterResult = { intent: "chitchat", reply: "ค่ะ" };
+await handleTextMessage(env, historyUserId, "จำชื่อฉันได้ไหม", origin);
+const lastInterpreterRequestForHistory = geminiRequests
+  .filter((r) => r.systemInstruction.includes("ระบบตีความข้อความแชท"))
+  .at(-1);
+check(
+  "the next interpreter call's prompt actually includes the prior turn's text",
+  lastInterpreterRequestForHistory.systemInstruction.includes("ฉันชื่อฟ้า") &&
+    lastInterpreterRequestForHistory.systemInstruction.includes("จำได้ค่ะ ถามอะไรมาเมื่อกี้นะ")
+);
+
 // AI Q&A / analysis (PLAN.md 15.6): "ถาม <คำถาม>" and "วิเคราะห์" route to
 // Gemini instead of the money parser or any hardcoded report — exercises the
 // full path (matchAiCommand -> aggregate Sheets/Diary data -> askGemini) and
@@ -1718,8 +1922,14 @@ check(
 const geminiRequestsBeforeNoQuestion = geminiRequests.length;
 const aiNoQuestionReply = await handleTextMessage(env, lineUserId, "ถาม", origin);
 check(
+  // +1, not +0: the AI interpreter (PLAN.md 17.11) still makes its own call
+  // first on every fresh message before any matcher runs; it just doesn't
+  // recognize this as an actionable intent (the mock's default response
+  // isn't valid JSON), so it falls back to the exact same deterministic
+  // matchAiCommand path this test originally exercised, which itself still
+  // never calls Gemini for an empty question.
   "asking with no question text gets a usage hint instead of calling Gemini",
-  aiNoQuestionReply.includes("ถาม เดือนนี้") && geminiRequests.length === geminiRequestsBeforeNoQuestion
+  aiNoQuestionReply.includes("ถาม เดือนนี้") && geminiRequests.length === geminiRequestsBeforeNoQuestion + 1
 );
 
 const geminiRequestsBeforeAsk = geminiRequests.length;
@@ -1728,7 +1938,12 @@ check(
   "a real question is forwarded to Gemini and its answer is returned as-is",
   aiAskReply.includes("[mock AI answer]") && aiAskReply.includes("เดือนนี้ใช้เงินหมวดไหนเยอะสุด")
 );
-check("exactly one Gemini request was made for the question", geminiRequests.length === geminiRequestsBeforeAsk + 1);
+check(
+  // +2: the AI interpreter's own attempt (falls back, non-JSON mock), then
+  // the real Q&A call from the legacy matchAiCommand fallback path.
+  "exactly two Gemini requests were made for the question (interpreter attempt + the real answer)",
+  geminiRequests.length === geminiRequestsBeforeAsk + 2
+);
 const lastGeminiRequest = geminiRequests.at(-1);
 check("the Gemini request authenticates with the configured API key", lastGeminiRequest.apiKey === "test-gemini-key");
 check(
@@ -1769,7 +1984,12 @@ check(
   "\"ถาม ข่าวหุ้น\" routes to the finance-news summary, using the CNBC-mocked headlines",
   financeNewsReply.includes("[mock AI answer]") && financeNewsReply.includes("tech earnings")
 );
-check("finance news doesn't touch the money/calendar/diary Q&A pipeline", geminiRequests.length === geminiRequestsBeforeFinance + 1);
+check(
+  // +2: interpreter attempt, then the real finance-news call — same
+  // accounting as the general-question test above.
+  "finance news doesn't touch the money/calendar/diary Q&A pipeline",
+  geminiRequests.length === geminiRequestsBeforeFinance + 2
+);
 const lastFinanceGeminiRequest = geminiRequests.at(-1);
 check(
   "the finance-news prompt has its own guardrail against stating stale prices as current",
@@ -1819,8 +2039,9 @@ check(
   domesticNewsReply.includes("[mock AI answer]") && domesticNewsReply.includes("Test headline")
 );
 check(
+  // +2: interpreter attempt, then the real domestic-news call.
   "domestic news doesn't touch the money/calendar/diary Q&A pipeline",
-  geminiRequests.length === geminiRequestsBeforeDomesticNews + 1
+  geminiRequests.length === geminiRequestsBeforeDomesticNews + 2
 );
 const lastDomesticNewsRequest = geminiRequests.at(-1);
 check(
@@ -2289,8 +2510,10 @@ check(
 const groupAiRequestsBefore = geminiRequests.length;
 const groupAiReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
 check(
+  // +2: interpreter attempt, then the real Q&A call — same accounting as
+  // personal mode above.
   "\"ถาม <คำถาม>\" reaches Gemini in group mode, same as personal mode",
-  geminiRequests.length === groupAiRequestsBefore + 1 && groupAiReply.includes("[mock AI answer]")
+  geminiRequests.length === groupAiRequestsBefore + 2 && groupAiReply.includes("[mock AI answer]")
 );
 const lastGroupAiRequest = geminiRequests.at(-1);
 check(
@@ -2299,6 +2522,27 @@ check(
 );
 const groupAnalyzeReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิเคราะห์", origin);
 check("\"วิเคราะห์\" (no question text) also works in group mode", groupAnalyzeReply.includes("[mock AI answer]"));
+
+// AI message interpretation in group mode (PLAN.md 17.11) — wired the same
+// way as personal mode, and attribution is still resolved lazily (only for
+// the "transaction" intent) so an ordinary chitchat message in a group
+// doesn't pay for a member-profile lookup it doesn't need.
+const groupSheetRowsBeforeInterp = sheetRows.length;
+simulateInterpreterResult = {
+  intent: "transaction",
+  transactions: [{ amount: 120, type: "expense", categoryId: "food", note: "หมูกระทะ" }],
+};
+const groupInterpPromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "กินหมูกระทะกันมา 120", origin);
+check("an AI-interpreted transaction in group mode also asks to confirm first", groupInterpPromptReply.includes("ใช่ไหม"));
+const groupInterpConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ใช่", origin);
+check(
+  "confirming saves it to the group's shared sheet, attributed to the actual sender",
+  sheetRows.length === groupSheetRowsBeforeInterp + 1 && sheetRows.at(-1)[7] === groupSenderA
+);
+
+simulateInterpreterResult = { intent: "chitchat", reply: "อ่ะ เข้าใจแล้ว" };
+const groupChitchatReply = await handleGroupTextMessage(env, groupId, groupSenderA, "แค่คุยเล่นเฉยๆนะ", origin);
+check("a chitchat intent works in group mode too, without touching the sheet", groupChitchatReply === "อ่ะ เข้าใจแล้ว");
 
 // 8. Full webhook-level mention gating: every message in a group the bot
 // belongs to reaches the webhook whether the bot was addressed or not —
@@ -2340,6 +2584,45 @@ await handleWebhook(
 check(
   "a message that @mentions the bot gets a reply, with the mention text stripped before parsing",
   replies.length === repliesBeforeMentioned + 1 && replies.at(-1).includes("รายรับ")
+);
+
+// PLAN.md 17.12: calling the bot by name in plain text (no formal @mention)
+// also addresses it in group mode — requested directly so members don't
+// have to reach for LINE's @ picker every time.
+const namedRawBody = JSON.stringify({ events: [groupTextEvent({ text: "ไพโรจน์ สรุปเดือนนี้" })] });
+const namedSignature = await signLineBody(namedRawBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeNamed = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": namedSignature }, body: namedRawBody }),
+  env
+);
+check(
+  "calling the bot by name (no @mention) also gets a reply, with the name stripped before parsing",
+  replies.length === repliesBeforeNamed + 1 && replies.at(-1).includes("รายรับ")
+);
+
+const namedMidRawBody = JSON.stringify({ events: [groupTextEvent({ text: "เดี๋ยวถามไพโรจน์หน่อยว่าเหลือเงินเท่าไหร่", replyToken: "reply-group-named-mid" })] });
+const namedMidSignature = await signLineBody(namedMidRawBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeNamedMid = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": namedMidSignature }, body: namedMidRawBody }),
+  env
+);
+check(
+  "the name works anywhere in the message, not just as a prefix",
+  replies.length === repliesBeforeNamedMid + 1
+);
+
+const stillUnmentionedRawBody = JSON.stringify({ events: [groupTextEvent({ text: "วันนี้อากาศดีจัง", replyToken: "reply-group-still-unmentioned" })] });
+const stillUnmentionedSignature = await signLineBody(stillUnmentionedRawBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeStillUnmentioned = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": stillUnmentionedSignature }, body: stillUnmentionedRawBody }),
+  env
+);
+check(
+  "ordinary chatter that doesn't mention the bot's name still gets no reply",
+  replies.length === repliesBeforeStillUnmentioned
 );
 
 // 9. The push fallback (used when the reply token has expired) targets the

@@ -1163,3 +1163,76 @@ event ในชุดนั้นโดยไม่สนว่าเป็น�
 เท่าเดิม) มีแค่ event ของ subject เดียวกันเท่านั้นที่ถูกบังคับให้เรียงทีละตัว — งานปกติ (คนละคนกันเกือบทุก
 ครั้งใน webhook call เดียว) ความเร็วเท่าเดิมทุกอย่าง กระทบแค่เคส 2 event ของ subject เดียวกันมาพร้อมกัน
 ซึ่งเป็นเคสที่เสี่ยง race พอดี
+
+### 17.11 AI ตีความข้อความทุกประโยค + จำ context บทสนทนา
+
+ผู้ใช้ถามว่าให้บอทตอบเหมือน AI ปกติได้ไหม — ปัญหาที่เจอคือบอทแค่ "แปลงคำตอบ" (persona, 17.9) แต่ไม่
+"เข้าใจคำถาม" จริงๆ เพราะการตีความข้อความทั้งหมดยังเป็น regex/keyword matcher ล้วนๆ (`transactionCommands.ts`,
+`calendarCommands.ts`, `diaryCommands.ts`, `tripCommands.ts`, `greetingCommands.ts`) ไม่เข้าใจประโยคที่ไม่ตรง
+รูปแบบที่เขียนไว้ และไม่มีความจำข้ามข้อความเลย
+
+เสนอ 2 ทางเลือก: (1) AI แค่ช่วยจัดหมวดเจตนา (intent) ว่าข้อความนี้เกี่ยวกับอะไร แต่ตัวเลข/วันที่ยังให้ parser
+เดิมตรวจซ้ำเสมอ [แนะนำ — เสี่ยงน้อยกว่า] กับ (2) ให้ AI ตัดสินใจ+ดึงข้อมูล (ตัวเลข วันที่ หมวดหมู่ ฯลฯ) เองทั้งหมด
+พร้อมจำบทสนทนาทั้งหมด ผู้ใช้เลือก **(2)** — เป็นการรื้อ guardrail หลักของทั้งโปรเจกต์ (PLAN.md 15.10: "เงินไม่เคย
+ให้ AI คำนวณ") ตรงๆ จึงทวนอีกครั้งด้วยฟอร์แมต confirm-core-changes ก่อนเริ่มเขียนโค้ด ผู้ใช้ยืนยันทำแบบ (2)
+เต็มรูปแบบอีกครั้ง
+
+**สิ่งที่แก้จริง / สิ่งที่ยังคงเดิม**: ตัวตีความ (`aiInterpreter.ts`) เป็นชั้นใหม่ที่รันก่อนทุก matcher เดิม
+(ยกเว้น pendingConfirmation ที่ต้องยัง deterministic เท่านั้น — ดูด้านล่าง) แต่ **ไม่เคยเขียนข้อมูลเอง** —
+`interpretMessage` คืนแค่ intent ที่ validate แล้ว (`InterpretedIntent`) ให้ `index.ts`'s `runInterpretedIntent`
+ไปเรียกฟังก์ชัน apply/prompt/answer **ตัวเดียวกัน** กับที่ regex matcher เดิมใช้ (`promptTransactionCreate`,
+`promptCalendarCreateFromDraft`, `promptDiaryCreateFromDraft`, ฯลฯ) — อะไรที่บันทึกข้อมูลยังต้องผ่านคอนเฟิร์ม
+"ใช่" ก่อนเสมอ (17.9) เหมือนเดิมทุกประการ ต่างแค่ "ใครเป็นคนตัดสินใจว่าข้อความนี้หมายถึงอะไร"
+(AI แทน regex) ไม่ใช่ "ใครเป็นคนบันทึก" (ยังเป็นโค้ด deterministic เดิมเป๊ะ)
+
+**verify ไม่เชื่อ AI เปล่าๆ**: `validateIntent` ตรวจทุก field อย่างเข้ม — `categoryId` ต้องมีอยู่จริงในลิสต์
+`DEFAULT_CATEGORIES` และ type ต้องตรง, วันที่ต้องเป็น `YYYY-MM-DD` ที่มีอยู่จริงในปฏิทิน (ผ่าน
+`Date.UTC` round-trip check), เวลาต้องเป็น `HH:MM` ที่ถูกต้อง — JSON ที่ถูกไวยากรณ์แต่ field ผิด (เช่น
+categoryId ที่ AI สร้างขึ้นเอง) ถูก reject เหมือน call ล้มเหลว ตกไปที่ deterministic parser เดิมทันที
+(pattern เดียวกับ `persona.ts`'s `quotedSpans` และ `aiCommands.ts`'s guarded numbers)
+
+**ลำดับ dispatch ใหม่** (`handleTextMessage`/`handleGroupTextMessage`): pendingConfirmation (deterministic,
+ต้องทำก่อนเสมอ — "ใช่" ต้องยืนยัน action จริงเท่านั้น ไม่ใช่ให้ AI ตีความใหม่) → ถ้าไม่มี pendingClarification
+เดิม (`pending` จาก chatEngine) ค่อยลอง AI interpreter → ถ้า interpreter fail (timeout/error/JSON พัง/
+intent invalid) ตกไปที่ matcher chain เดิมทั้งหมด (`dispatchLegacyCommands`, เปลี่ยนชื่อจาก
+`dispatchCoreCommands` เดิม) → ถ้ายังไม่เจอ ค่อยถึงทักทาย (`isGreeting`, deterministic เดิม ไม่ให้ AI คิดใหม่
+เพราะมี state "ทักครั้งแรกของวัน" ที่ต้อง exact) → สุดท้าย chatEngine fallback เดิม ลำดับนี้ทำให้ "วิธีใช้"
+ยังได้ help text ละเอียดเหมือนเดิมแม้ AI จะ fail (เพราะ HELP_TEST อยู่ใน `dispatchLegacyCommands` ซึ่งมาก่อน
+greeting check)
+
+**ความจำบทสนทนา** (`conversationHistory.ts`): เก็บ 12 ข้อความล่าสุด (6 รอบสนทนา) ต่อ subject ใน KV,
+TTL 24 ชั่วโมง อาศัย 17.10's per-subject serialization กันไม่ให้ read-modify-write ชนกัน — บันทึกทั้งข้อความ
+ผู้ใช้และคำตอบบอทหลังทุกข้อความ (best-effort, พังแล้วไม่ทำให้ reply ล้มเหลว) ประวัตินี้ถูกใส่ในทุก prompt ของ
+interpreter เพื่อแก้ความกำกวมข้ามข้อความ (คำถามต่อเนื่อง, "เพิ่มอีก 20") — เมื่อ intent เป็น `unclear` **ไม่ตั้ง
+chatEngine pendingClarification** เพราะรอบถัดไปอยากให้ interpreter ตีความใหม่โดยใช้ history ที่อัปเดตแล้ว
+ไม่ใช่ให้ chatEngine's fixed "จำนวนเงินเท่าไหร่คะ" flow มาแย่งจัดการ
+
+**ทวนโค้ดซ้ำ (DRY)**: `calendarCommands.ts`/`diaryCommands.ts`/`tripCommands.ts`/`greetingCommands.ts` ถูก
+refactor แยก apply/prompt/answer ออกจาก regex matcher เดิมเป็นฟังก์ชัน export (เช่น
+`promptCalendarCreateFromDraft`, `answerDiarySearch`, `promptOrStartTrip`, `setProvinceByName`) — ทั้ง regex
+matcher เดิมและ AI interpreter เรียกฟังก์ชันเดียวกัน ไม่มี logic ซ้ำสองที่ที่ต้องคอยซิงก์มือ เช่นเดียวกับ
+`aiCommands.ts`'s `answerQuestion` (แยกจาก `matchAiCommand` เดิม ให้ intent `question` เรียกใช้ pipeline
+guarded เดียวกันได้ตรงๆ)
+
+**ต้นทุนที่ยอมรับ**: ทุกข้อความตอนนี้อาจเรียก Gemini ได้ถึง 2 ครั้งต่อรอบ (interpret ก่อน แล้ว persona style
+ตอนตอบ) เพิ่ม latency/quota เท่าตัวจากเดิม — `INTERPRETER_TIMEOUT_MS = 3000` (ใกล้เคียง persona's 2500ms)
+กันไม่ให้ interpreter ค้างนานเกินไปจนชน LINE reply-token window เหมือนเหตุผลเดียวกับ persona.ts
+
+### 17.12 ตั้งชื่อบอท "ไพโรจน์" + เรียกชื่อเฉยๆ ในกลุ่มได้ ไม่ต้อง @
+
+ผู้ใช้ขอ 2 อย่าง: ตั้งชื่อบอทว่า "ไพโรจน์" กับให้เรียกชื่อเฉยๆ ในกลุ่มก็พอ ไม่ต้อง @ ทุกครั้ง
+
+**ชื่อบอท**: `BOT_NAME = "ไพโรจน์"` ประกาศไว้ที่ `persona.ts` (export ให้ที่อื่นใช้ร่วม) ใส่เข้าไปใน
+`PERSONA_SYSTEM_INSTRUCTION` (ตอบทุกข้อความจะรู้ชื่อตัวเอง), `aiInterpreter.ts`'s system instruction
+(ให้ chitchat reply ที่ AI แต่งเองรู้จักชื่อตัวเองด้วย ถ้ามีคนถาม "ชื่ออะไร") และ `WELCOME_MESSAGE`
+(`index.ts`) แนะนำตัวตอนทักทายครั้งแรก
+
+**เรียกชื่อแทน @mention ในกลุ่ม**: `handleOneOtherEvent` (`index.ts`) เดิมเช็คแค่ LINE @mention จริง
+(`findSelfMention`) ถ้าไม่มีก็ข้ามเงียบๆ ตอนนี้ถ้าไม่มี @mention จริง เช็คต่อว่าข้อความมีคำว่า "ไพโรจน์"
+อยู่ที่ไหนก็ได้ไหม (`stripBotNameMention`) ถ้ามีก็ตัดชื่อออกแล้วส่งต่อเหมือนโดน mention — ถ้าไม่มีทั้งคู่ค่อยข้าม
+เงียบๆ เหมือนเดิม ใช้ plain substring search ไม่ใช่ regex ขอบเขตคำ เพราะภาษาไทยไม่มีช่องว่างคั่นคำที่เชื่อถือได้
+(เหตุผลเดียวกับที่ `matchCalendarCommand`'s "นัด" search ยอมรับความหลวมแบบเดียวกันไว้แล้ว)
+
+**ความเสี่ยงที่ยอมรับ**: ข้อความในกลุ่มที่พูดถึงคนชื่อ "ไพโรจน์" จริงๆ (ไม่ได้ตั้งใจเรียกบอท) จะทริกเกอร์บอทตอบ
+โดยไม่ได้ตั้งใจ — ยอมรับเพราะเป็นสิ่งที่ผู้ใช้ขอตรงๆ (ให้เรียกชื่อได้โดยไม่ต้อง @) ถ้าเกิดปัญหาจริงค่อยพิจารณา
+เพิ่มขอบเขตคำ/context เพิ่มทีหลัง

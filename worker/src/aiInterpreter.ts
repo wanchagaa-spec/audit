@@ -1,0 +1,265 @@
+// Full AI message interpretation (PLAN.md 17.11) — the primary way every
+// fresh message (not a pending "ใช่/ไม่ใช่" confirmation, not a dangling
+// chatEngine clarification, not an exact-match greeting) gets understood
+// now, replacing "only known command phrases get recognized" with "Gemini
+// reads the whole sentence plus recent conversation history and decides what
+// it means." This is a deliberate, explicitly user-confirmed reversal of
+// this codebase's original core guarantee (PLAN.md 15.10: money is never
+// computed or decided by the AI) — see PLAN.md 17.11 for the full
+// confirm-core-changes record of that decision.
+//
+// What still holds regardless: every action this file's output can trigger
+// is the *same* deterministic function commands.ts/calendarCommands.ts/
+// diaryCommands.ts/tripCommands.ts/transactionCommands.ts always used —
+// interpretMessage never writes to Sheets/Calendar/Drive itself, it only
+// ever returns a structured intent for index.ts's runInterpretedIntent to
+// route. Anything that saves data (a transaction, a calendar event, a diary
+// entry) still goes through the exact same confirm-before-save step
+// (PLAN.md 17.9) as before — this file decides *what* the user meant, never
+// *whether* to actually commit it. And validateIntent below never trusts the
+// model's JSON blindly: an intent with a malformed/out-of-range field is
+// rejected outright (treated the same as a failed call), same "verify, don't
+// just trust" pattern as persona.ts's quotedSpans check and aiCommands.ts's
+// guarded numbers.
+
+import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import type { EntryType } from "../../app/src/types.ts";
+import { askGemini, GeminiError } from "./gemini.ts";
+import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
+import { BOT_NAME } from "./persona.ts";
+import { bangkokDateKey } from "./thaiDate.ts";
+
+export interface InterpretedTransaction {
+  amount: number;
+  type: EntryType;
+  categoryId: string;
+  note: string;
+}
+
+export type InterpretedIntent =
+  | { intent: "transaction"; transactions: InterpretedTransaction[] }
+  | { intent: "calendar_create"; calendarTitle: string; calendarDateKey: string; calendarTime: string }
+  | { intent: "calendar_delete"; calendarKeyword: string }
+  | { intent: "calendar_edit"; calendarKeyword: string; calendarDateKey?: string; calendarTime?: string }
+  | { intent: "calendar_query"; calendarRangeFromKey: string; calendarRangeToKeyExclusive: string; calendarRangeLabel: string }
+  | { intent: "diary_create"; diaryText: string; diaryCategory: string }
+  | { intent: "diary_query_date"; diaryDateKey: string }
+  | { intent: "diary_query_month" }
+  | { intent: "diary_search"; diarySearchTerm: string }
+  | { intent: "trip_start"; tripName: string }
+  | { intent: "trip_end" }
+  | { intent: "trip_status" }
+  | { intent: "set_province"; provinceName: string }
+  | { intent: "question"; question: string }
+  | { intent: "help" }
+  | { intent: "chitchat"; reply: string }
+  | { intent: "unclear"; reply: string };
+
+// A slow/hanging call must never stall a reply for long — same reasoning as
+// persona.ts's PERSONA_TIMEOUT_MS, kept in the same ballpark. This now sits
+// *before* persona styling in the pipeline (interpret, act, then style the
+// final reply), so a message can involve two sequential Gemini calls;
+// accepted latency/quota tradeoff, recorded in PLAN.md 17.11.
+const INTERPRETER_TIMEOUT_MS = 3000;
+
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}$/;
+
+function isValidDateKey(s: unknown): s is string {
+  if (typeof s !== "string" || !DATE_KEY_RE.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+function isValidTime(s: unknown): s is string {
+  if (typeof s !== "string" || !TIME_RE.test(s)) return false;
+  const [h, min] = s.split(":").map(Number);
+  return h >= 0 && h <= 23 && min >= 0 && min <= 59;
+}
+
+function isNonEmptyString(s: unknown): s is string {
+  return typeof s === "string" && s.trim().length > 0;
+}
+
+function validateTransaction(raw: unknown): InterpretedTransaction | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const amount = typeof r.amount === "number" ? r.amount : Number(r.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (r.type !== "income" && r.type !== "expense") return null;
+  if (typeof r.categoryId !== "string") return null;
+  const category = DEFAULT_CATEGORIES.find((c) => c.id === r.categoryId && c.type === r.type);
+  if (!category) return null;
+  const note = typeof r.note === "string" ? r.note : "";
+  return { amount, type: r.type, categoryId: r.categoryId, note };
+}
+
+// Rejects anything that doesn't match one of InterpretedIntent's exact
+// shapes, including a well-formed-JSON-but-wrong-fields response — a model
+// can emit syntactically valid JSON that's still semantically wrong (an
+// invented categoryId, an impossible date), and this is the one place that
+// stands between that and an action actually firing.
+export function validateIntent(raw: unknown): InterpretedIntent | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+
+  switch (r.intent) {
+    case "transaction": {
+      if (!Array.isArray(r.transactions) || r.transactions.length === 0) return null;
+      const transactions = r.transactions.map(validateTransaction);
+      if (transactions.some((t) => t === null)) return null;
+      return { intent: "transaction", transactions: transactions as InterpretedTransaction[] };
+    }
+    case "calendar_create": {
+      if (!isNonEmptyString(r.calendarTitle) || !isValidDateKey(r.calendarDateKey) || !isValidTime(r.calendarTime)) {
+        return null;
+      }
+      return { intent: "calendar_create", calendarTitle: r.calendarTitle, calendarDateKey: r.calendarDateKey, calendarTime: r.calendarTime };
+    }
+    case "calendar_delete": {
+      if (!isNonEmptyString(r.calendarKeyword)) return null;
+      return { intent: "calendar_delete", calendarKeyword: r.calendarKeyword };
+    }
+    case "calendar_edit": {
+      if (!isNonEmptyString(r.calendarKeyword)) return null;
+      const calendarDateKey = isValidDateKey(r.calendarDateKey) ? r.calendarDateKey : undefined;
+      const calendarTime = isValidTime(r.calendarTime) ? r.calendarTime : undefined;
+      if (!calendarDateKey && !calendarTime) return null;
+      return { intent: "calendar_edit", calendarKeyword: r.calendarKeyword, calendarDateKey, calendarTime };
+    }
+    case "calendar_query": {
+      if (!isValidDateKey(r.calendarRangeFromKey) || !isValidDateKey(r.calendarRangeToKeyExclusive)) return null;
+      const calendarRangeLabel = isNonEmptyString(r.calendarRangeLabel) ? r.calendarRangeLabel : "ที่ถามถึง";
+      return {
+        intent: "calendar_query",
+        calendarRangeFromKey: r.calendarRangeFromKey,
+        calendarRangeToKeyExclusive: r.calendarRangeToKeyExclusive,
+        calendarRangeLabel,
+      };
+    }
+    case "diary_create": {
+      if (!isNonEmptyString(r.diaryText)) return null;
+      const diaryCategory = isNonEmptyString(r.diaryCategory) ? r.diaryCategory : "อื่นๆ";
+      return { intent: "diary_create", diaryText: r.diaryText, diaryCategory };
+    }
+    case "diary_query_date": {
+      if (!isValidDateKey(r.diaryDateKey)) return null;
+      return { intent: "diary_query_date", diaryDateKey: r.diaryDateKey };
+    }
+    case "diary_query_month":
+      return { intent: "diary_query_month" };
+    case "diary_search": {
+      if (!isNonEmptyString(r.diarySearchTerm)) return null;
+      return { intent: "diary_search", diarySearchTerm: r.diarySearchTerm };
+    }
+    case "trip_start": {
+      if (!isNonEmptyString(r.tripName)) return null;
+      return { intent: "trip_start", tripName: r.tripName };
+    }
+    case "trip_end":
+      return { intent: "trip_end" };
+    case "trip_status":
+      return { intent: "trip_status" };
+    case "set_province": {
+      if (!isNonEmptyString(r.provinceName)) return null;
+      return { intent: "set_province", provinceName: r.provinceName };
+    }
+    case "question": {
+      if (!isNonEmptyString(r.question)) return null;
+      return { intent: "question", question: r.question };
+    }
+    case "help":
+      return { intent: "help" };
+    case "chitchat": {
+      if (!isNonEmptyString(r.reply)) return null;
+      return { intent: "chitchat", reply: r.reply };
+    }
+    case "unclear": {
+      if (!isNonEmptyString(r.reply)) return null;
+      return { intent: "unclear", reply: r.reply };
+    }
+    default:
+      return null;
+  }
+}
+
+function buildCategoryList(): string {
+  return DEFAULT_CATEGORIES.map((c) => `${c.id} | ${c.type === "income" ? "รายรับ" : "รายจ่าย"} | ${c.icon} ${c.name}`).join(
+    "\n"
+  );
+}
+
+// Unique phrase used by the test harness (test-flow.mjs) to tell an
+// interpreter call apart from a persona-styling call or an AI Q&A call, the
+// same way persona.ts's system instruction has its own marker string.
+function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
+  return [
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ถามคำถาม)`,
+    `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
+    "",
+    "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",
+    formatHistoryForPrompt(history),
+    "",
+    "รายการหมวดหมู่เงิน (categoryId | ประเภท | ชื่อ) — เวลาระบุ categoryId ต้องเลือกจากลิสต์นี้เท่านั้น ห้ามสร้างขึ้นเอง:",
+    buildCategoryList(),
+    "",
+    "อ่านข้อความล่าสุดของผู้ใช้ (ข้อความเดียว ไม่ใช่ทั้งประวัติ) แล้วตอบกลับเป็น JSON ล้วนๆ เท่านั้น (ห้ามมี markdown, ห้ามมีคำอธิบายอื่นนอก JSON) ตาม schema ต่อไปนี้ โดยเลือก intent ที่ตรงที่สุดหนึ่งอย่าง:",
+    "",
+    '{"intent":"transaction","transactions":[{"amount":number,"type":"income"หรือ"expense","categoryId":string,"note":string}]} — มีจำนวนเงินเกี่ยวข้อง (ซื้อของ รายรับ รายจ่าย) note คือคำอธิบายสั้นๆของรายการ',
+    '{"intent":"calendar_create","calendarTitle":string,"calendarDateKey":"YYYY-MM-DD","calendarTime":"HH:MM"} — สร้างนัดใหม่ ต้องรู้ทั้งวันที่และเวลาแน่ชัด',
+    '{"intent":"calendar_delete","calendarKeyword":string} — ลบนัดที่มีคำค้นหานี้',
+    '{"intent":"calendar_edit","calendarKeyword":string,"calendarDateKey"?:"YYYY-MM-DD","calendarTime"?:"HH:MM"} — แก้วันที่/เวลาของนัดที่มีคำค้นหานี้',
+    '{"intent":"calendar_query","calendarRangeFromKey":"YYYY-MM-DD","calendarRangeToKeyExclusive":"YYYY-MM-DD","calendarRangeLabel":string} — ถามว่ามีนัดอะไรบ้างในช่วงเวลาหนึ่ง (toKeyExclusive คือวันถัดจากวันสุดท้ายของช่วง)',
+    '{"intent":"diary_create","diaryText":string,"diaryCategory":string} — บันทึกไดอารี่ใหม่ (diaryCategory ถ้าไม่ได้ระบุหมวดให้ใช้ "อื่นๆ")',
+    '{"intent":"diary_query_date","diaryDateKey":"YYYY-MM-DD"} — ขอดูไดอารี่วันที่ระบุ',
+    '{"intent":"diary_query_month"} — ขอดูสรุปไดอารี่เดือนนี้',
+    '{"intent":"diary_search","diarySearchTerm":string} — ค้นหาไดอารี่ที่มีคำนี้',
+    '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
+    '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
+    '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',
+    '{"intent":"set_province","provinceName":string} — ตั้งจังหวัด/เมืองสำหรับพยากรณ์อากาศ',
+    '{"intent":"question","question":string} — คำถามเกี่ยวกับเงิน/นัดหมาย/ไดอารี่/สภาพอากาศ/ข่าวของผู้ใช้ (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
+    '{"intent":"help"} — ขอดูวิธีใช้/คำสั่งทั้งหมด',
+    '{"intent":"chitchat","reply":string} — พูดคุยทั่วไปที่ไม่ใช่คำสั่งอะไร (ทักทาย ชม คุยเล่น) ให้ตอบกลับตามธรรมชาติสั้นๆใน reply',
+    '{"intent":"unclear","reply":string} — ข้อมูลสำคัญไม่ครบจะตัดสินใจ (เช่น มีจำนวนเงินแต่ไม่รู้ว่าซื้ออะไร, บอกจะนัดแต่ไม่มีวันที่/เวลา) ให้ reply เป็นคำถามกลับไปถามข้อมูลที่ขาดเท่านั้น',
+    "",
+    "กติกาสำคัญที่ห้ามฝ่าฝืน:",
+    "- ห้ามสร้างตัวเลข วันที่ เวลา หรือข้อมูลใดๆ ที่ไม่ได้อยู่ในข้อความหรือบริบทการคุยจริงๆ ถ้าขาดข้อมูลสำคัญให้ใช้ intent unclear แทนการเดา",
+    "- categoryId ต้องเป็นค่าที่มีอยู่จริงในลิสต์หมวดหมู่ข้างบนเท่านั้น และต้อง type ตรงกับ income/expense ที่เลือก",
+    "- ตอบเป็น JSON ล้วนๆ เท่านั้น ไม่มีข้อความอื่นใดๆ ก่อนหรือหลัง JSON",
+  ].join("\n");
+}
+
+export async function interpretMessage(
+  geminiApiKey: string,
+  text: string,
+  history: ConversationTurn[]
+): Promise<InterpretedIntent | null> {
+  const systemInstruction = buildSystemInstruction(bangkokDateKey(), history);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), INTERPRETER_TIMEOUT_MS);
+  try {
+    const raw = await askGemini(geminiApiKey, systemInstruction, text, controller.signal, true);
+    const parsed: unknown = JSON.parse(raw);
+    const intent = validateIntent(parsed);
+    if (!intent) {
+      console.error("interpretMessage: model returned a well-formed but invalid/unrecognized intent, falling back", raw);
+    }
+    return intent;
+  } catch (err) {
+    if (!(err instanceof GeminiError) && !(err instanceof SyntaxError)) {
+      console.error("interpretMessage failed unexpectedly, falling back to deterministic parser", err);
+    }
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Distinctive phrase in buildSystemInstruction above, used by the test
+// harness (test-flow.mjs) to tell an interpreter call apart from a
+// persona-styling call (persona.ts) or an AI Q&A call (aiCommands.ts) in its
+// Gemini mock — the same marker-string trick persona.ts's own comment
+// documents for PERSONA_SYSTEM_INSTRUCTION.
+export const INTERPRETER_MARKER = "ระบบตีความข้อความแชท";
