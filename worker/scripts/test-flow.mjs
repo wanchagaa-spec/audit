@@ -64,6 +64,8 @@ function nextDriveId(prefix) {
   driveIdSeq += 1;
   return `${prefix}-${driveIdSeq}`;
 }
+let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
+let simulateFolderNameFetchFailure = false; // makes the next Drive folder-name (fields=name) lookup fail, to exercise the not-found-vs-transient-failure distinction
 
 const calendarEvents = []; // simulates Google Calendar: {id, summary, start:{dateTime}, end:{dateTime}}
 let calendarIdSeq = 0;
@@ -171,12 +173,63 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://www.googleapis.com/drive/v3/files")) {
     const parsed = new URL(u);
+    const idMatch = parsed.pathname.match(/^\/drive\/v3\/files\/([^/]+)$/);
+
+    // GET /files/:id?fields=name — viewTripsPage's getFileName (looking up
+    // a trip folder's own display name).
+    if (idMatch && parsed.searchParams.get("fields") === "name" && (!init.method || init.method === "GET")) {
+      if (simulateFolderNameFetchFailure) {
+        simulateFolderNameFetchFailure = false;
+        return new Response("simulated folder-name fetch failure", { status: 500 });
+      }
+      const folder = driveFolders.find((f) => f.id === idMatch[1]);
+      if (!folder) return new Response("not found", { status: 404 });
+      return new Response(JSON.stringify({ name: folder.name }), { status: 200 });
+    }
+
+    // GET /files/:id?alt=media — viewTripsPage's photo proxy.
+    if (idMatch && parsed.searchParams.get("alt") === "media") {
+      if (simulatePhotoFetchFailure) {
+        simulatePhotoFetchFailure = false;
+        return new Response("simulated photo fetch failure", { status: 500 });
+      }
+      const file = driveUploads.find((f) => f.id === idMatch[1]);
+      if (!file) return new Response("not found", { status: 404 });
+      return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
+        status: 200,
+        headers: { "content-type": "image/jpeg" },
+      });
+    }
+
     if (!init.method || init.method === "GET") {
       const q = parsed.searchParams.get("q") ?? "";
       const nameMatch = q.match(/name='((?:[^'\\]|\\.)*)'/);
       const parentMatch = q.match(/'([^']+)' in parents/);
       const name = nameMatch ? nameMatch[1].replace(/\\'/g, "'") : null;
       const parentId = parentMatch ? parentMatch[1] : null;
+
+      // listFilesInFolder excludes folders (mimeType!=...) and, unlike the
+      // findFolder/getOrCreateAlbumRoot queries below, matches real
+      // uploaded files (driveUploads), not folders.
+      if (q.includes("mimeType!=")) {
+        const files = driveUploads.filter((f) => f.parentId === parentId);
+        return new Response(
+          JSON.stringify({ files: files.map((f) => ({ id: f.id, name: f.name, mimeType: "image/jpeg" })) }),
+          { status: 200 }
+        );
+      }
+
+      // listTripFolders has no name='...' clause (it wants every folder
+      // under the parent, not one specific name) — findFolder/
+      // getOrCreateAlbumRoot always do, so `name` being null is what tells
+      // these two cases apart.
+      if (name === null) {
+        const matches = driveFolders.filter((f) => f.parentId === parentId);
+        return new Response(JSON.stringify({ files: matches.map((f) => ({ id: f.id, name: f.name })) }), {
+          status: 200,
+        });
+      }
+
       const matches = driveFolders.filter((f) => f.name === name && f.parentId === parentId);
       return new Response(JSON.stringify({ files: matches.map((f) => ({ id: f.id })) }), { status: 200 });
     }
@@ -421,7 +474,7 @@ const {
 } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState, signState, signViewToken, verifyViewToken } = await import("../src/signedState.ts");
-const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel } = await import("../src/thaiDate.ts");
+const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
 
@@ -1640,6 +1693,139 @@ const forgedViewTokenFromOauthState = await signState(lineUserId, env.STATE_SIGN
 check(
   "an OAuth state can't be replayed as a view token",
   (await verifyViewToken(forgedViewTokenFromOauthState, env.STATE_SIGNING_SECRET)) === null
+);
+
+// Calendar/diary/trip-photo views (PLAN.md 16.3) — same token, three more
+// pages sharing the resolveViewSession plumbing.
+
+calendarEvents.push({
+  id: "evt-view-test-1",
+  summary: "นัดหาหมอ",
+  start: { dateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
+  end: { dateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
+});
+const calendarViewResponse = await worker.fetch(new Request(`${origin}/view/calendar?token=${viewToken}`), env, new FakeExecutionContext());
+const calendarViewHtml = await calendarViewResponse.text();
+check(
+  "/view/calendar shows upcoming events grouped by date",
+  calendarViewResponse.status === 200 && calendarViewHtml.includes("นัดหาหมอ")
+);
+
+// Regression test for a real off-by-one: listCalendarEvents' timeMax is
+// exclusive, so an event landing exactly on the page's stated boundary
+// (60 days ahead) used to fall just outside the fetched window despite
+// the page claiming to cover it.
+const sixtyDaysOutIso = bangkokStartOfDayIso(addDaysToDateKey(bangkokDateKey(), 60));
+calendarEvents.push({
+  id: "evt-view-boundary-test",
+  summary: "นัดขอบเขตหกสิบวัน",
+  start: { dateTime: sixtyDaysOutIso },
+  end: { dateTime: sixtyDaysOutIso },
+});
+const calendarBoundaryResponse = await worker.fetch(new Request(`${origin}/view/calendar?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "an event exactly 60 days out is included, matching the page's stated range",
+  calendarBoundaryResponse.status === 200 && (await calendarBoundaryResponse.text()).includes("นัดขอบเขตหกสิบวัน")
+);
+calendarEvents.length = 0; // clean up — nothing after this reads calendarEvents
+
+diaryRows.push(["diary-view-test-1", bangkokDateKey(), "ทั่วไป", "<b>ทดสอบ</b> วันนี้อากาศดี", new Date().toISOString()]);
+const diaryViewResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}`), env, new FakeExecutionContext());
+const diaryViewHtml = await diaryViewResponse.text();
+check(
+  "/view/diary shows this month's entries grouped by day, with HTML-escaped text",
+  diaryViewResponse.status === 200 &&
+    diaryViewHtml.includes("&lt;b&gt;ทดสอบ&lt;/b&gt;") &&
+    !diaryViewHtml.includes("<b>ทดสอบ</b>")
+);
+const diaryEmptyMonthResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}&month=2999-01`), env, new FakeExecutionContext());
+check(
+  "/view/diary for a month with no entries shows an empty state instead of erroring",
+  diaryEmptyMonthResponse.status === 200 && (await diaryEmptyMonthResponse.text()).includes("ไม่มีบันทึกเดือนนี้")
+);
+
+// Regression test: a malformed ?month= (not YYYY-MM) used to flow straight
+// into shiftMonthKey's Number() parsing and produce permanently-broken
+// "NaN-NaN" prev/next links instead of falling back to the current month.
+const diaryMalformedMonthResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}&month=not-a-month`), env, new FakeExecutionContext());
+const diaryMalformedMonthHtml = await diaryMalformedMonthResponse.text();
+check(
+  "a malformed ?month= falls back to the current month instead of producing NaN-NaN navigation links",
+  diaryMalformedMonthResponse.status === 200 && !diaryMalformedMonthHtml.includes("NaN")
+);
+
+// Trip photos view reuses the "ทะเล" trip folder and its already-uploaded
+// files from the trip-photo tests earlier in this run (see tripFolderId
+// above) instead of manufacturing fresh Drive mock data — the view layer
+// just reads back what the upload path already wrote.
+const tripsListResponse = await worker.fetch(new Request(`${origin}/view/trips?token=${viewToken}`), env, new FakeExecutionContext());
+const tripsListHtml = await tripsListResponse.text();
+check("/view/trips lists the trip folders that exist", tripsListResponse.status === 200 && tripsListHtml.includes("ทะเล"));
+
+const tripPhotosResponse = await worker.fetch(new Request(`${origin}/view/trips/${tripFolderId}?token=${viewToken}`), env, new FakeExecutionContext());
+const tripPhotosHtml = await tripPhotosResponse.text();
+check(
+  "/view/trips/:folderId shows a photo grid linking to the photo-proxy endpoint",
+  tripPhotosResponse.status === 200 && tripPhotosHtml.includes("ทะเล") && tripPhotosHtml.includes("/view/photo/")
+);
+
+const tripPhotoFileId = driveUploads.find((f) => f.parentId === tripFolderId)?.id;
+const photoResponse = await worker.fetch(new Request(`${origin}/view/photo/${tripPhotoFileId}?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "/view/photo/:fileId proxies the actual image bytes with an image content-type, not a Google token",
+  photoResponse.status === 200 && (photoResponse.headers.get("content-type") ?? "").startsWith("image/")
+);
+
+simulatePhotoFetchFailure = true;
+const photoFailureResponse = await worker.fetch(new Request(`${origin}/view/photo/${tripPhotoFileId}?token=${viewToken}`), env, new FakeExecutionContext());
+check("a Drive failure while proxying a photo degrades to a friendly error page, not a crash", photoFailureResponse.status === 502);
+
+const missingFolderResponse = await worker.fetch(new Request(`${origin}/view/trips/does-not-exist?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "a trip folder id that doesn't exist (or isn't this account's) shows a friendly not-found page",
+  missingFolderResponse.status === 404
+);
+
+const missingPhotoResponse = await worker.fetch(new Request(`${origin}/view/photo/does-not-exist?token=${viewToken}`), env, new FakeExecutionContext());
+check("a photo id that doesn't exist shows a friendly not-found page, not a crash", missingPhotoResponse.status === 404);
+
+// Regression test: decodeURIComponent throws on malformed percent-encoding
+// instead of returning anything — it used to be called outside the
+// surrounding try/catch, so a mangled link crashed the whole request
+// instead of showing the usual friendly 404 page.
+const malformedFolderIdResponse = await worker.fetch(new Request(`${origin}/view/trips/%?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "a malformed percent-encoded trip folder id shows a friendly not-found page instead of crashing",
+  malformedFolderIdResponse.status === 404
+);
+const malformedPhotoIdResponse = await worker.fetch(new Request(`${origin}/view/photo/%?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "a malformed percent-encoded photo id shows a friendly not-found page instead of crashing",
+  malformedPhotoIdResponse.status === 404
+);
+
+// Regression test: folderId used to be interpolated straight into the
+// Drive search query without escaping, unlike every folder *name* lookup
+// elsewhere in drive.ts — a folder id containing a quote could break out
+// of the `'...' in parents` clause. Doesn't exist as a real folder either
+// way, so this just confirms the request degrades to a normal 404
+// instead of a raw Drive API error surfacing the broken query.
+const quoteFolderIdResponse = await worker.fetch(
+  new Request(`${origin}/view/trips/${encodeURIComponent("o' or '1'='1")}?token=${viewToken}`),
+  env,
+  new FakeExecutionContext()
+);
+check("a trip folder id containing a quote is handled safely, not as a broken query", quoteFolderIdResponse.status === 404);
+
+// Regression test: getFileName used to swallow every failure (401/403/5xx,
+// not just "doesn't exist") into null, so a transient Drive error on a
+// real, valid trip folder was reported as "trip not found" instead of
+// "try again" — same distinction fetchDriveFileContent already made.
+simulateFolderNameFetchFailure = true;
+const folderNameFailureResponse = await worker.fetch(new Request(`${origin}/view/trips/${tripFolderId}?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "a transient failure looking up a real trip folder's name degrades to 'try again', not 'not found'",
+  folderNameFailureResponse.status === 502
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);
