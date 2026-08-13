@@ -2586,6 +2586,45 @@ check(
   replies.length === repliesBeforeMentioned + 1 && replies.at(-1).includes("รายรับ")
 );
 
+// PLAN.md 17.12: calling the bot by name in plain text (no formal @mention)
+// also addresses it in group mode — requested directly so members don't
+// have to reach for LINE's @ picker every time.
+const namedRawBody = JSON.stringify({ events: [groupTextEvent({ text: "ไพโรจน์ สรุปเดือนนี้" })] });
+const namedSignature = await signLineBody(namedRawBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeNamed = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": namedSignature }, body: namedRawBody }),
+  env
+);
+check(
+  "calling the bot by name (no @mention) also gets a reply, with the name stripped before parsing",
+  replies.length === repliesBeforeNamed + 1 && replies.at(-1).includes("รายรับ")
+);
+
+const namedMidRawBody = JSON.stringify({ events: [groupTextEvent({ text: "เดี๋ยวถามไพโรจน์หน่อยว่าเหลือเงินเท่าไหร่", replyToken: "reply-group-named-mid" })] });
+const namedMidSignature = await signLineBody(namedMidRawBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeNamedMid = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": namedMidSignature }, body: namedMidRawBody }),
+  env
+);
+check(
+  "the name works anywhere in the message, not just as a prefix",
+  replies.length === repliesBeforeNamedMid + 1
+);
+
+const stillUnmentionedRawBody = JSON.stringify({ events: [groupTextEvent({ text: "วันนี้อากาศดีจัง", replyToken: "reply-group-still-unmentioned" })] });
+const stillUnmentionedSignature = await signLineBody(stillUnmentionedRawBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeStillUnmentioned = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": stillUnmentionedSignature }, body: stillUnmentionedRawBody }),
+  env
+);
+check(
+  "ordinary chatter that doesn't mention the bot's name still gets no reply",
+  replies.length === repliesBeforeStillUnmentioned
+);
+
 // 9. The push fallback (used when the reply token has expired) targets the
 // group itself, not any individual member — pushTargetId's whole reason
 // to exist.

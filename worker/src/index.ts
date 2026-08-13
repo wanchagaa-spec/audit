@@ -62,7 +62,7 @@ import {
   type ActiveTrip,
   type TransactionAttribution,
 } from "./state.ts";
-import { applyPersona } from "./persona.ts";
+import { applyPersona, BOT_NAME } from "./persona.ts";
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
 import { endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
@@ -90,7 +90,7 @@ export interface Env {
 }
 
 const WELCOME_MESSAGE = [
-  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 7 เรื่องหลักๆ:",
+  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 7 เรื่องหลักๆ:`,
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
@@ -1116,6 +1116,24 @@ async function verifyAndParseWebhookBody(request: Request, env: Env): Promise<Li
   return JSON.parse(rawBody) as LineWebhookBody;
 }
 
+// Group-mode addressing without a formal @mention (PLAN.md 17.12): returns
+// the text with the bot's name removed if the message contains it anywhere,
+// or null if it doesn't (meaning "not addressed to the bot" — same meaning
+// findSelfMention/stripSelfMention's null/non-null pairing already has).
+// Plain substring search rather than a word-boundary regex — Thai script has
+// no whitespace between words in general, so there's no reliable notion of
+// "word boundary" to anchor on the way there is in English; this is the same
+// looseness matchCalendarCommand's own "นัด" search already accepts (see its
+// comment). Only the *first* occurrence is removed, mirroring
+// stripSelfMention's single-span removal — a message repeating the name
+// keeps any later mentions as ordinary text, which no realistic case relies
+// on stripping.
+function stripBotNameMention(text: string): string | null {
+  const index = text.indexOf(BOT_NAME);
+  if (index === -1) return null;
+  return (text.slice(0, index) + text.slice(index + BOT_NAME.length)).trim();
+}
+
 // One text/unsupported event, start to finish (matcher dispatch, reply).
 // Extracted out of processWebhookEvents so it can be called from within a
 // per-subject sequential loop there instead of as a flat concurrency-limited
@@ -1132,12 +1150,18 @@ async function handleOneOtherEvent(
         // Every message in a group the bot belongs to reaches this
         // webhook, addressed to the bot or not — LINE does no filtering
         // on its side (PLAN.md 17). Silently skip anything that doesn't
-        // tag the bot, without touching any state at all, so ordinary
+        // address the bot, without touching any state at all, so ordinary
         // conversation between group members never gets treated as a
-        // command or a pending-clarification answer.
+        // command or a pending-clarification answer. A formal LINE @mention
+        // is checked first (unambiguous — LINE itself resolves it to this
+        // exact bot account); calling the bot by name in plain text (no @)
+        // is accepted too, requested directly so group members don't have
+        // to reach for the @ picker every time (PLAN.md 17.12).
         const selfMention = findSelfMention(event.message);
-        if (!selfMention) return;
-        const text = stripSelfMention(event.message.text, selfMention);
+        const text = selfMention
+          ? stripSelfMention(event.message.text, selfMention)
+          : stripBotNameMention(event.message.text);
+        if (text === null) return;
         const reply = await handleGroupTextMessage(env, event.source.groupId, event.source.userId, text, origin, tokenCache);
         await replyOrPush(event, reply, env);
         return;

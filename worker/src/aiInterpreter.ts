@@ -26,6 +26,7 @@ import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import type { EntryType } from "../../app/src/types.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
+import { BOT_NAME } from "./persona.ts";
 import { bangkokDateKey } from "./thaiDate.ts";
 
 export interface InterpretedTransaction {
@@ -194,7 +195,7 @@ function buildCategoryList(): string {
 // same way persona.ts's system instruction has its own marker string.
 function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
   return [
-    "คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัว (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ถามคำถาม)",
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ถามคำถาม)`,
     `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
     "",
     "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",

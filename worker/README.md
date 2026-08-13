@@ -671,6 +671,19 @@ safety net (17.9) is what stays in place to bound the risk:
   of 17.9's already-accepted persona cost. `INTERPRETER_TIMEOUT_MS` (3s) keeps a slow/hanging call
   from blocking a reply for long, same reasoning as persona's own timeout.
 
+### Bot name + name-based addressing in group mode (PLAN.md 17.12)
+
+The bot's name, `BOT_NAME = "ไพโรจน์"` (`persona.ts`), is included in the persona voice, the AI
+interpreter's own system instruction (so a "chitchat" reply it composes is self-aware), and the
+welcome message. In group mode, a message no longer needs a formal LINE @mention to reach the bot
+— `stripBotNameMention` (`index.ts`) checks for the name in plain text anywhere in the message
+(checked only when there's no formal `@mention`) and strips it before the message is handled the
+same way a stripped `@mention` is. This is a plain substring search, not a word-boundary regex —
+Thai script has no reliable notion of a word boundary to anchor on. Accepted tradeoff: a group
+message that happens to mention a real person also named "ไพโรจน์" (not the bot) will trigger a
+reply too — this was requested directly (call the bot by name, no @ needed), so some false-positive
+risk is inherent to the feature itself.
+
 ## Local development
 
 ```bash
