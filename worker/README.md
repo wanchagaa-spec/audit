@@ -451,9 +451,18 @@ from the "free forever, no AI" approach everything else follows.
 - `ถาม ข่าวหุ้น` (or anything matching a finance keyword — Bitcoin, gold, "การเงินสหรัฐ", etc.,
   see `FINANCE_KEYWORDS` in `aiCommands.ts`) — routes to a dedicated finance-news summary
   (CNBC's RSS feed, summarized by Gemini) instead of the personal-data pipeline above, since a
-  finance-news question has nothing to do with your own money/calendar/diary. The prompt for
-  this one carries its own extra guardrail: never state a price/index number from a headline as
-  the *current* price — financial figures go stale far faster than the news events around them.
+  finance-news question has nothing to do with your own money/calendar/diary. Also folds in real
+  numbers from `marketData.ts` — BTC/USD (CoinGecko), gold/USD (`gold-api.com`), the S&P 500
+  index value, and up to 2 top US gainers + 2 top losers (both unofficial Yahoo Finance
+  endpoints) — all free, no API key. These are fetched fresh in code and handed to Gemini as a
+  labeled fact block it must quote exactly; the prompt's older guardrail (never state a
+  price/index number from a *headline* as current, since financial figures go stale far faster
+  than the news events around them) still applies to everything outside that fact block. Every
+  one of these five fetches degrades independently — a broken/changed endpoint just drops that
+  one number instead of failing the whole summary.
+- `ถาม ข่าววันนี้` (or anything matching a general news keyword — see `DOMESTIC_NEWS_KEYWORDS` in
+  `aiCommands.ts`) — routes to the same Thai daily-news summary the morning briefing uses
+  (`fetchNewsSummary`, Bangkok Post RSS), on demand instead of only once a day.
 - `วิเคราะห์` (with or without extra text after it) — shortcut for an open-ended "analyze my
   spending and diary this month" request, without having to phrase it as a question yourself.
 - **Money never gets computed by the AI.** Every number in the prompt (`aiCommands.ts`) is
