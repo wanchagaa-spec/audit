@@ -85,6 +85,8 @@ let mockGroupName = "ทริปเพื่อน"; // the group name returned
 let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to the upload queue, to exercise handleQueuedMediaBatch's outer catch
 let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
 let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling call (PLAN.md 17.9) return a recognizably different string instead of echoing, to verify styling actually happened
+let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
+let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
@@ -151,6 +153,10 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response(JSON.stringify({}), { status: 200 });
   }
   if (u.includes("Transactions!A1:append")) {
+    if (simulateTransactionAppendFailureOnce) {
+      simulateTransactionAppendFailureOnce = false;
+      return new Response(JSON.stringify({ error: { message: "simulated transient Sheets append failure" } }), { status: 500 });
+    }
     const body = JSON.parse(init.body);
     sheetRows.push(...body.values);
     return new Response(JSON.stringify({}), { status: 200 });
@@ -418,6 +424,14 @@ globalThis.fetch = async (url, init = {}) => {
     // simulatePersonaRewrite first, which returns a recognizably different
     // string instead (one-shot, same pattern as simulateGeminiFailure).
     if (systemInstruction.includes("ห้ามเปลี่ยนตัวเลข")) {
+      if (simulatePersonaDropQuote) {
+        simulatePersonaDropQuote = false;
+        // Simulates the exact failure mode found in review: the model
+        // "styles" a quoted instruction like '"ใช่"' into something that no
+        // longer contains it verbatim, e.g. dropping the quotes entirely.
+        const mangled = question.replace(/"([^"]+)"/g, "$1");
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: mangled }] } }] }), { status: 200 });
+      }
       if (simulatePersonaRewrite) {
         simulatePersonaRewrite = false;
         return new Response(
@@ -690,6 +704,45 @@ const politeConfirmReply = await handleTextMessage(env, lineUserId, "ใช่�
 check(
   "a natural polite confirmation (\"ใช่ค่ะ\", not the bare \"ใช่\") still saves the transaction",
   politeConfirmReply.includes("45") && sheetRows.length === rowCountBeforePoliteConfirm + 1
+);
+
+// Regression test for a real bug found in review: resolveConfirmation used
+// to clear the pendingConfirmation *before* attempting the save, so a
+// transient failure while actually appending to the sheet (a Sheets API
+// hiccup, here simulated) threw the draft away along with the error —
+// "ลองใหม่อีกครั้งนะ" actually meant retyping the whole entry from scratch.
+// Now the pending draft survives a failed attempt, so retrying "ใช่" alone
+// is enough. Goes through the real webhook path (handleWebhook), not a
+// direct handleTextMessage call, since the graceful "เกิดข้อผิดพลาด..."
+// fallback for an uncaught throw lives in processWebhookEvents, not inside
+// handleTextMessage itself.
+const transientFailurePromptBody = JSON.stringify({ events: [personalTextEvent("ค่าเน็ต 89", "reply-transient-1")] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(transientFailurePromptBody, env.LINE_CHANNEL_SECRET) }, body: transientFailurePromptBody }),
+  env
+);
+check("asks to confirm before saving (setup for the transient-failure retry check below)", replies.at(-1).includes("ใช่ไหม"));
+
+const rowCountBeforeTransientFailure = sheetRows.length;
+simulateTransactionAppendFailureOnce = true;
+const transientFailureBody = JSON.stringify({ events: [personalTextEvent("ใช่", "reply-transient-2")] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(transientFailureBody, env.LINE_CHANNEL_SECRET) }, body: transientFailureBody }),
+  env
+);
+check(
+  "a transient save failure surfaces an error instead of a false success, without saving anything",
+  replies.at(-1).includes("เกิดข้อผิดพลาด") && sheetRows.length === rowCountBeforeTransientFailure
+);
+
+const transientRetryBody = JSON.stringify({ events: [personalTextEvent("ใช่", "reply-transient-3")] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(transientRetryBody, env.LINE_CHANNEL_SECRET) }, body: transientRetryBody }),
+  env
+);
+check(
+  "retrying \"ใช่\" alone (no retyping) succeeds, since the draft survived the earlier failed attempt",
+  replies.at(-1).includes("89") && sheetRows.length === rowCountBeforeTransientFailure + 1
 );
 
 // Regression test for a real report: "ยกเลิกรายการล่าสุด" contains
@@ -1354,6 +1407,31 @@ check(
     !replies.at(-1).startsWith("[persona]") &&
     replies.at(-1) === directPersonaReply
 );
+
+// Regression test for a real bug found in review: applyPersona used to
+// trust the styled output unconditionally — if Gemini dropped or reworded
+// a quoted instruction like '"ใช่"' despite being told not to (an
+// instruction, not a guarantee), the styled reply would go out with a
+// confirmation instruction the exact-match isAffirmative check could never
+// recognize, silently breaking the user's ability to confirm at all. Now
+// verifies every quoted span from the original survived, falling back to
+// the unstyled text otherwise.
+simulatePersonaDropQuote = true;
+const quoteDropWebhookBody = JSON.stringify({ events: [personalTextEvent("ชานมไข่มุก 25", "reply-persona-3")] });
+const quoteDropWebhookSignature = await signLineBody(quoteDropWebhookBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeQuoteDrop = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": quoteDropWebhookSignature }, body: quoteDropWebhookBody }),
+  env
+);
+check(
+  "a persona call that drops a quoted confirmation instruction falls back to the original reply, keeping the exact \"ใช่\" instruction intact",
+  replies.length === repliesBeforeQuoteDrop + 1 && replies.at(-1).includes('"ใช่"')
+);
+// Clean up the dangling pendingConfirmation this created directly (rather
+// than through a chat message, which would have side effects of its own),
+// so it doesn't interfere with anything later in the file sharing lineUserId.
+await kv.delete(`confirm:${lineUserId}`);
 
 // Regression test for a review finding on the fast-ack PR: the invalid-
 // signature check above only exercised handleWebhook directly, not the

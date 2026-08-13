@@ -38,12 +38,31 @@ const PERSONA_SYSTEM_INSTRUCTION = [
 // never turn into the reason a reply misses its token.
 const PERSONA_TIMEOUT_MS = 2500;
 
+// Any "..." span in the original text is always one of this codebase's
+// instructional command words (e.g. `(พิมพ์ "ใช่" เพื่อยืนยัน)`) — never
+// arbitrary user data (transaction notes/diary text never get quoted this
+// way in a reply). The system instruction above tells the model not to
+// touch these, but an instruction is not a guarantee — found in review:
+// verify it actually didn't, rather than just trusting it did, and fall
+// back to the unstyled original if even one quoted word went missing.
+// isAffirmative's own exact-match check is exactly what a dropped/reworded
+// "ใช่" here would silently break.
+function quotedSpans(text: string): string[] {
+  return text.match(/"[^"]+"/g) ?? [];
+}
+
 export async function applyPersona(text: string, geminiApiKey: string): Promise<string> {
   if (!text.trim()) return text;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PERSONA_TIMEOUT_MS);
   try {
-    return await askGemini(geminiApiKey, PERSONA_SYSTEM_INSTRUCTION, text, controller.signal);
+    const styled = await askGemini(geminiApiKey, PERSONA_SYSTEM_INSTRUCTION, text, controller.signal);
+    const missingQuote = quotedSpans(text).some((q) => !styled.includes(q));
+    if (missingQuote) {
+      console.error("applyPersona dropped or reworded a quoted instruction, sending the original reply unstyled");
+      return text;
+    }
+    return styled;
   } catch (err) {
     console.error("applyPersona failed, sending the original reply unstyled", err);
     return text;

@@ -1,8 +1,9 @@
 // Single dispatcher for the "ใช่ / ยกเลิก" confirmation slot shared by trip
-// switching, calendar create/edit/delete, and diary entries. The pending
-// state is always cleared as soon as it's read — whether the reply confirms
-// or cancels — so a stale question can never be re-triggered by an unrelated
-// later "ใช่".
+// switching, calendar create/edit/delete, diary entries, and transaction
+// create/delete. A decline (anything not affirmative) clears the pending
+// state immediately, so a stale question can never be re-triggered by an
+// unrelated later "ใช่". A confirmation only clears it after the apply step
+// actually succeeds — see resolveConfirmation's own comment for why.
 
 import { applyCalendarCreate, applyCalendarDelete, applyCalendarEdit } from "./calendarCommands.ts";
 import { applyDiaryCreate } from "./diaryCommands.ts";
@@ -49,9 +50,25 @@ export async function resolveConfirmation(
   text: string,
   pending: PendingConfirmation
 ): Promise<string | null> {
-  await setPendingConfirmation(ctx.kv, ctx.lineUserId, null);
-  if (!isAffirmative(text)) return null;
+  if (!isAffirmative(text)) {
+    await setPendingConfirmation(ctx.kv, ctx.lineUserId, null);
+    return null;
+  }
 
+  // Only cleared *after* the apply step succeeds (below), not before —
+  // found in review: clearing it first meant a transient failure while
+  // actually saving (a Sheets/Calendar API hiccup, a token issue) threw
+  // away the pending draft along with the error, forcing the user to
+  // retype the whole entry to try again. Leaving it in place on failure
+  // means a retried "ใช่" self-heals: it re-enters this same function and
+  // just tries the apply step again, using the TTL in state.ts to expire
+  // it naturally if nobody ever retries.
+  const result = await applyPendingConfirmation(ctx, pending);
+  await setPendingConfirmation(ctx.kv, ctx.lineUserId, null);
+  return result;
+}
+
+function applyPendingConfirmation(ctx: ActionCtx, pending: PendingConfirmation): Promise<string> {
   switch (pending.kind) {
     case "tripSwitch":
       return applyTripSwitch(ctx, pending);
