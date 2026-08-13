@@ -5,6 +5,7 @@
 // same "verify token -> load account -> refresh access token, or show a
 // friendly error" flow — this is that flow, written once.
 
+import { groupIdFromSubject } from "./groupSubject.ts";
 import { refreshAccessToken } from "./googleAuth.ts";
 import type { Env } from "./index.ts";
 import { verifyViewToken } from "./signedState.ts";
@@ -123,8 +124,18 @@ export function renderErrorPage(title: string, message: string): string {
 }
 
 export const TOKEN_INVALID_MESSAGE = 'ลิงก์หมดอายุหรือไม่ถูกต้อง กลับไปที่แชทแล้วพิมพ์ "เปิดเว็บดูข้อมูล" เพื่อขอลิงก์ใหม่';
-export const UNLINKED_MESSAGE = "ยังไม่ได้เชื่อมบัญชี Google เลย พิมพ์อะไรก็ได้หาบอทใน LINE ก่อนเพื่อเชื่อมบัญชี";
 export const DATA_FETCH_FAILED_MESSAGE = "ดึงข้อมูลไม่สำเร็จตอนนี้ ลองเปิดลิงก์ใหม่อีกครั้งสักครู่นะ";
+
+// Practically unreachable (a view token only exists for a subject that was
+// already linked when it was minted), but not impossible — a group could
+// theoretically get unlinked in the narrow window before its token is
+// used. Worded per mode since the fix is different: a group needs someone
+// to @mention the bot, personal mode just needs any message at all.
+function unlinkedMessage(isGroup: boolean): string {
+  return isGroup
+    ? "กลุ่มนี้ยังไม่ได้เชื่อมบัญชี Google เลย กลับไปที่กลุ่มแล้วแท็กบอทเพื่อเชื่อมบัญชีใหม่"
+    : "ยังไม่ได้เชื่อมบัญชี Google เลย พิมพ์อะไรก็ได้หาบอทใน LINE ก่อนเพื่อเชื่อมบัญชี";
+}
 
 export interface ViewSession {
   lineUserId: string;
@@ -146,7 +157,9 @@ export async function resolveViewSession(request: Request, env: Env): Promise<Vi
   if (!lineUserId) return html(renderErrorPage("เปิดหน้านี้ไม่ได้", TOKEN_INVALID_MESSAGE), 400);
 
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
-  if (!link) return html(renderErrorPage("ยังไม่ได้เชื่อมบัญชี", UNLINKED_MESSAGE), 400);
+  if (!link) {
+    return html(renderErrorPage("ยังไม่ได้เชื่อมบัญชี", unlinkedMessage(groupIdFromSubject(lineUserId) !== null)), 400);
+  }
 
   try {
     const accessToken = await refreshAccessToken({

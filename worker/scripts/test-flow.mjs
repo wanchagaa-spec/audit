@@ -1959,25 +1959,48 @@ check(
   groupDeleteConfirmReply.includes("ลบ") && sheetRows.length === groupSheetRowsBeforeDelete - 1
 );
 
-// Regression test for a real bug a user actually hit: the shared help text
-// ("วิธีใช้") used to unconditionally advertise "เปิดเว็บดูข้อมูล" even in
-// group mode, where that command doesn't work (view-link stays
-// personal-only). A group member who typed the exact command the help text
-// told them to got no link back — silently falling through to chatEngine's
-// ambiguous-message clarification ("จำนวนเงินเท่าไหร่คะ") instead, since
-// nothing else recognized the text either.
+// The shared help text ("วิธีใช้") advertises the web viewer in both modes
+// now that it actually works in both (PLAN.md 17.7 second pass) — a fix
+// to a real bug an earlier version of this help text had (see the group
+// view-link regression test block further below for the full story).
 const personalHelpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
-check("personal mode's help text still advertises the web viewer", personalHelpReply.includes("เปิดเว็บดูข้อมูล"));
+check("personal mode's help text advertises the web viewer", personalHelpReply.includes("เปิดเว็บดูข้อมูล"));
 const groupHelpReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิธีใช้", origin);
+check("group mode's help text advertises the web viewer too, since it now actually works there", groupHelpReply.includes("เปิดเว็บดูข้อมูล"));
+
+// "เปิดเว็บดูข้อมูล" (PLAN.md 17.7 second pass) works in group mode now,
+// after a user asked for it once they noticed calendar/diary/trip/province
+// worked but the web viewer still didn't — exercises the same chat
+// command -> signed token -> real fetch handler -> HTML response path as
+// personal mode above, plus the group-specific wording and error message.
+const groupViewLinkReply = await handleGroupTextMessage(env, groupId, groupSenderA, "เปิดเว็บดูข้อมูล", origin);
+const groupViewLinkMatch = groupViewLinkReply.match(/https?:\/\/\S+\/view\?token=\S+/);
+check("\"เปิดเว็บดูข้อมูล\" works in group mode and replies with a /view link", groupViewLinkMatch !== null);
 check(
-  "group mode's help text no longer advertises the web-viewer command that doesn't actually work there",
-  !groupHelpReply.includes("เปิดเว็บดูข้อมูล")
+  "the group's view-link reply doesn't falsely claim only the asker can see it, since the reply posts into the shared chat",
+  !groupViewLinkReply.includes("เห็นได้เฉพาะคุณคนเดียว")
+);
+const groupViewLinkUrl = groupViewLinkMatch[0];
+const groupViewPageResponse = await worker.fetch(new Request(groupViewLinkUrl), env, new FakeExecutionContext());
+check(
+  "the group's view token actually renders the shared account's summary page",
+  groupViewPageResponse.status === 200 && (await groupViewPageResponse.text()).includes("สรุปบัญชี")
+);
+
+const neverLinkedGroupViewToken = await signViewToken("group:Cneverlinkedgroup", env.STATE_SIGNING_SECRET);
+const neverLinkedGroupViewResponse = await worker.fetch(
+  new Request(`${origin}/view?token=${neverLinkedGroupViewToken}`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "a view token for a group that never linked shows a group-specific prompt, not the personal-mode wording",
+  neverLinkedGroupViewResponse.status === 400 && (await neverLinkedGroupViewResponse.text()).includes("กลุ่มนี้ยังไม่ได้เชื่อมบัญชี")
 );
 
 // 7. AI Q&A/analysis (PLAN.md 17.6) — opened up to group mode too, reusing
 // matchAiCommand exactly as-is (no group-specific code needed, since it
-// was already generic over whatever ActionCtx it's handed). Calendar/
-// diary/trip/province/view-link *writes* stay personal-only still.
+// was already generic over whatever ActionCtx it's handed).
 const groupAiRequestsBefore = geminiRequests.length;
 const groupAiReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
 check(

@@ -8,6 +8,7 @@ import { resolveConfirmation } from "./confirmations.ts";
 import { matchDiaryCommand } from "./diaryCommands.ts";
 import { uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
+import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
 import {
   buildMorningBriefing,
   buildReturnGreeting,
@@ -89,22 +90,9 @@ function html(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-// Group mode (PLAN.md 17) reuses every personal-mode function that's
-// already generic over an opaque "subject id" string (getAccountLink,
-// getPending, setPendingConfirmation, etc. — see state.ts, none of them
-// know or care whether the id is a real LINE userId) by synthesizing one
-// for the group instead: "group:<groupId>". A LINE userId can never
-// collide with this (LINE userIds don't contain colons), so a group and a
-// personal account can never accidentally share state.
-const GROUP_SUBJECT_PREFIX = "group:";
-
-function groupSubjectId(groupId: string): string {
-  return `${GROUP_SUBJECT_PREFIX}${groupId}`;
-}
-
-function groupIdFromSubject(subjectId: string): string | null {
-  return subjectId.startsWith(GROUP_SUBJECT_PREFIX) ? subjectId.slice(GROUP_SUBJECT_PREFIX.length) : null;
-}
+// groupSubjectId/groupIdFromSubject moved to groupSubject.ts (imported
+// above) so viewCommands.ts can use them too without an import cycle
+// (index.ts already imports from viewCommands.ts).
 
 function renderLinkedPage(isGroup: boolean): string {
   const heading = isGroup ? "เชื่อมบัญชีกลุ่มสำเร็จ ✅" : "เชื่อมบัญชีสำเร็จ ✅";
@@ -299,8 +287,7 @@ async function dispatchCoreCommands(
   link: AccountLink,
   text: string,
   origin: string,
-  tokenCache: TokenCache | undefined,
-  allowViewLink: boolean
+  tokenCache: TokenCache | undefined
 ): Promise<string | null> {
   const actionCtx = (accessToken: string): ActionCtx => ({
     accessToken,
@@ -384,12 +371,14 @@ async function dispatchCoreCommands(
       return await provinceHandler(env.ACCOUNTS, subjectId);
     }
 
-    // Personal mode only (allowViewLink=false in group mode) — the web
-    // viewer's data model (PLAN.md 16) is built around a single linked
-    // account's own data, not a shared one. Same reasoning as the province
+    // Works in both modes (PLAN.md 17.7) — resolveViewSession (viewAuth.ts)
+    // resolves a view token's subject through the same generic
+    // getAccountLink group mode already relies on everywhere else, and none
+    // of the /view pages read anything identity-specific off the session
+    // besides accessToken/spreadsheetId. Same reasoning as the province
     // handler above for skipping withFreshAccessToken: minting a view-link
     // token only needs STATE_SIGNING_SECRET, no Google auth at all.
-    if (allowViewLink && matchViewLinkCommand(text)) {
+    if (matchViewLinkCommand(text)) {
       return await buildViewLinkReply(env, subjectId, origin);
     }
 
@@ -417,7 +406,7 @@ async function dispatchCoreCommands(
     throw err;
   }
 
-  const reportHandler = await matchCommand(text, allowViewLink);
+  const reportHandler = await matchCommand(text);
   if (reportHandler) {
     return withFreshAccessToken(
       env,
@@ -440,7 +429,7 @@ export async function handleTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
 
-  const coreReply = await dispatchCoreCommands(env, lineUserId, link, text, origin, tokenCache, true);
+  const coreReply = await dispatchCoreCommands(env, lineUserId, link, text, origin, tokenCache);
   if (coreReply !== null) return coreReply;
 
   const pending = await getPending(env.ACCOUNTS, lineUserId);
@@ -529,14 +518,19 @@ async function saveTransactionDrafts(
 // generalized subject-id trick (groupSubjectId) — none of them needed
 // group-specific code beyond just being wired in here, since state.ts's
 // functions and every matcher's ActionCtx parameter were already generic.
+// view-link ("เปิดเว็บดูข้อมูล", PLAN.md 17.7) works here too, for the same
+// reason: resolveViewSession (viewAuth.ts) already resolves a token's
+// subject through the same generic getAccountLink, and none of the /view
+// pages read anything identity-specific off the session besides its
+// accessToken/spreadsheetId — buildViewLinkReply just tailors its message
+// wording for the fact that a group's reply, unlike personal mode's, posts
+// straight into the shared chat (so "visible to you alone" would be untrue).
 // The one thing that's genuinely different from personal mode: trip
 // *photos*. LINE's @mention feature only exists on text messages, so a
 // group member can never address a photo to the bot the way they can
 // address text — see the media-event handling in processWebhookEvents for
 // how that's actually solved (auto-upload while a trip is active, no
-// mention needed, silence otherwise). view-link ("เปิดเว็บดูข้อมูล") stays
-// personal-only — the web viewer's data model (PLAN.md 16) was built
-// entirely around a single linked account's own data, not a shared one.
+// mention needed, silence otherwise).
 export async function handleGroupTextMessage(
   env: Env,
   groupId: string,
@@ -549,7 +543,7 @@ export async function handleGroupTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, subjectId);
   if (!link) return buildGroupUnlinkedPrompt(env, groupId, origin);
 
-  const coreReply = await dispatchCoreCommands(env, subjectId, link, text, origin, tokenCache, false);
+  const coreReply = await dispatchCoreCommands(env, subjectId, link, text, origin, tokenCache);
   if (coreReply !== null) return coreReply;
 
   // Pending clarifications (PENDING_TTL_SECONDS in state.ts) are shared by

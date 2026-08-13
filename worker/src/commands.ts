@@ -88,14 +88,7 @@ function searchMatch(text: string): string | null {
 
 const HELP_TEST = (t: string) => includesAny(t, ["วิธีใช้", "คำสั่ง", "help", "ช่วยเหลือ"]);
 
-// includeViewLink=false in group mode (matchCommand's caller passes this
-// through) — "เปิดเว็บดูข้อมูล" doesn't actually work there (view-link stays
-// personal-only, PLAN.md 17.7), so advertising it in a group's help text
-// used to send members straight into a confusing dead end: they'd type the
-// exact command shown here, get no link back, and land in chatEngine's
-// ambiguous-message clarification ("จำนวนเงินเท่าไหร่คะ") instead, since
-// nothing else recognized the text either. A real user hit exactly this.
-function buildHelpText(includeViewLink: boolean): string {
+function buildHelpText(): string {
   const sections = [
     "💰 จดเงิน",
     "• พิมพ์รายการตรงๆ เช่น \"ซื้อกาแฟ 60\" หรือ \"เงินเดือนเข้า 25000\" (ถ้าข้อมูลไม่ครบ ฉันจะถามกลับเอง)",
@@ -127,16 +120,15 @@ function buildHelpText(includeViewLink: boolean): string {
     "☀️ ทักทายตอนเช้า",
     "• ทัก \"สวัสดี\" ครั้งแรกของวัน จะสรุปวันที่/อากาศ/ข่าวให้ ทักครั้งต่อไปในวันเดียวกันแค่ทักธรรมดา",
     "• ตั้งจังหวัด <ชื่อ> เช่น \"ตั้งจังหวัด เชียงใหม่\" เพื่อให้บอกสภาพอากาศตอนทักทายตอนเช้าได้",
+    "",
+    "🌐 ดูข้อมูลผ่านเว็บ",
+    // No "เห็นเฉพาะคุณคนเดียว" claim here (unlike an earlier version) — this
+    // help text is shared between personal and group mode (PLAN.md 17.7),
+    // and a group's reply posts straight into the shared chat, so the link
+    // is visible to whoever's in the group, not just whoever asked for it.
+    "• เปิดเว็บดูข้อมูล — ขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บ (ลิงก์ใช้ได้ 1 ชั่วโมง หมดอายุแล้วพิมพ์คำสั่งนี้ใหม่ได้เลย)",
   ];
-  if (includeViewLink) {
-    sections.push(
-      "",
-      "🌐 ดูข้อมูลผ่านเว็บ",
-      "• เปิดเว็บดูข้อมูล — ขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บ (เห็นเฉพาะคุณคนเดียว ลิงก์ใช้ได้ 1 ชั่วโมง)"
-    );
-  }
-  const topicCount = includeViewLink ? 7 : 6;
-  return [`ฉันช่วยได้ ${topicCount} เรื่อง — พิมพ์คำสั่งด้านล่าง หรือแตะเมนูใต้ช่องพิมพ์ก็ได้:`, "", ...sections].join("\n");
+  return ["ฉันช่วยได้ 7 เรื่อง — พิมพ์คำสั่งด้านล่าง หรือแตะเมนูใต้ช่องพิมพ์ก็ได้:", "", ...sections].join("\n");
 }
 
 const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
@@ -304,9 +296,9 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
 ];
 
-export async function matchCommand(text: string, includeViewLink = true): Promise<Handler | null> {
+export async function matchCommand(text: string): Promise<Handler | null> {
   if (HELP_TEST(text)) {
-    return async () => buildHelpText(includeViewLink);
+    return async () => buildHelpText();
   }
 
   const searchTerm = searchMatch(text);
