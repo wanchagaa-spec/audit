@@ -519,6 +519,31 @@ set yet and no context for why they're suddenly getting a weather/news briefing.
   the news section is just omitted (same graceful-degradation behavior as anywhere else Gemini
   is used).
 
+### Web viewer (PLAN.md 16)
+
+`เปิดเว็บดูข้อมูล` in chat replies with a link to a read-only web page summarizing this month's
+transactions (`/view?token=...`).
+
+- **No new Google sign-in, no LIFF** (LIFF was already ruled out for account linking in PLAN.md
+  14.2 — same userId mismatch problem would apply here too). The link's token is signed with the
+  existing `STATE_SIGNING_SECRET` (same mechanism as the OAuth `state` param, now purpose-tagged
+  `k: "oauth"` vs `k: "view"` in `signedState.ts` so a leaked view-link token can't be replayed as
+  an OAuth `state` to hijack the account link, or vice versa) and expires after 1 hour — request a
+  fresh one any time by typing the command again.
+- `/view` is server-rendered HTML straight from the Worker (`viewPages.ts`), not a separate SPA —
+  keeps it testable by the same `test-flow.mjs` fetch-mock harness as everything else, and adds no
+  new build tooling. Every value that came from user-typed chat text (transaction notes) is
+  HTML-escaped before being embedded in the page — the first place in this codebase where user
+  text lands in actual HTML rather than a LINE reply or an AI prompt, so this one actually matters.
+- Only shows the requesting LINE user's own linked account's data — the token embeds their LINE
+  userId, and the Worker looks up that account's own refresh token server-side. No Google token
+  ever reaches the browser.
+- Calendar/diary/trip-photo views aren't built yet — this first pass only covers accounts summary,
+  since it needed no new data-access code (`readAllTransactions` already existed). See PLAN.md 16.3
+  for what's left and why trip photos in particular need more work (Drive folder/file listing +
+  proxying image bytes through the Worker, since uploaded files use the `drive.file` scope and
+  aren't publicly reachable).
+
 ## Local development
 
 ```bash

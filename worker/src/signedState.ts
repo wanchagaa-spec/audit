@@ -1,7 +1,17 @@
-// Signs the LINE userId into the OAuth `state` param so the callback can
-// trust it after the round trip through Google's consent screen, without
-// a database lookup. Prevents someone from linking a Google account to a
-// LINE userId that isn't theirs.
+// Signs a LINE userId into a short opaque token, HMAC'd with a shared
+// secret so it can be trusted later without a database lookup. Two
+// unrelated things use this: the OAuth `state` param (so /oauth/callback
+// can trust which LINE userId a completed Google consent belongs to), and
+// the web-viewer session token (PLAN.md 16 — "เปิดเว็บดูข้อมูล" mints one of
+// these so /view can tell which linked account's data to show).
+//
+// Both payloads have the same shape ({u, t}), so each carries a `k`
+// (purpose) tag and each verify function rejects a token whose `k` doesn't
+// match what it expects — without this, a leaked view-link token (valid an
+// hour, sitting in LINE chat history) could otherwise be replayed as an
+// OAuth `state` and used to rebind that victim's LINE account to an
+// attacker's Google account, since both are just "a signature over an
+// {u, t} payload" the same secret would accept either way.
 
 function toBase64Url(bytes: ArrayBuffer | Uint8Array): string {
   const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -26,18 +36,18 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
   );
 }
 
-export async function signState(lineUserId: string, secret: string): Promise<string> {
-  const payload = JSON.stringify({ u: lineUserId, t: Date.now() });
-  const payloadB64 = toBase64Url(new TextEncoder().encode(payload));
+async function signPayload(payload: { u: string; t: number; k: string }, secret: string): Promise<string> {
+  const payloadB64 = toBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
   const key = await hmacKey(secret);
   const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payloadB64));
   return `${payloadB64}.${toBase64Url(signature)}`;
 }
 
-const MAX_STATE_AGE_MS = 10 * 60 * 1000; // linking must complete within 10 minutes
-
-export async function verifyState(state: string, secret: string): Promise<string | null> {
-  const [payloadB64, signatureB64] = state.split(".");
+async function verifyPayload(
+  token: string,
+  secret: string
+): Promise<{ u: string; t: number; k: string } | null> {
+  const [payloadB64, signatureB64] = token.split(".");
   if (!payloadB64 || !signatureB64) return null;
 
   const key = await hmacKey(secret);
@@ -50,13 +60,39 @@ export async function verifyState(state: string, secret: string): Promise<string
   if (!valid) return null;
 
   try {
-    const payload = JSON.parse(new TextDecoder().decode(fromBase64Url(payloadB64))) as {
-      u: string;
-      t: number;
-    };
-    if (Date.now() - payload.t > MAX_STATE_AGE_MS) return null;
-    return payload.u;
+    return JSON.parse(new TextDecoder().decode(fromBase64Url(payloadB64))) as { u: string; t: number; k: string };
   } catch {
     return null;
   }
+}
+
+const MAX_STATE_AGE_MS = 10 * 60 * 1000; // linking must complete within 10 minutes
+
+export async function signState(lineUserId: string, secret: string): Promise<string> {
+  return signPayload({ u: lineUserId, t: Date.now(), k: "oauth" }, secret);
+}
+
+export async function verifyState(state: string, secret: string): Promise<string | null> {
+  const payload = await verifyPayload(state, secret);
+  if (!payload || payload.k !== "oauth") return null;
+  if (Date.now() - payload.t > MAX_STATE_AGE_MS) return null;
+  return payload.u;
+}
+
+// Long enough to comfortably browse the viewer for a while; short enough
+// that a link left sitting in LINE chat history (LINE never expires/deletes
+// old messages) stops working on its own before too long. Re-requesting a
+// fresh one is just "พิมพ์ 'เปิดเว็บดูข้อมูล' อีกครั้ง" — cheap, so there's no
+// pressure to make this long-lived instead.
+const MAX_VIEW_TOKEN_AGE_MS = 60 * 60 * 1000;
+
+export async function signViewToken(lineUserId: string, secret: string): Promise<string> {
+  return signPayload({ u: lineUserId, t: Date.now(), k: "view" }, secret);
+}
+
+export async function verifyViewToken(token: string, secret: string): Promise<string | null> {
+  const payload = await verifyPayload(token, secret);
+  if (!payload || payload.k !== "view") return null;
+  if (Date.now() - payload.t > MAX_VIEW_TOKEN_AGE_MS) return null;
+  return payload.u;
 }
