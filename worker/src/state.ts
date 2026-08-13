@@ -103,3 +103,31 @@ export interface ActionCtx {
   spreadsheetId: string;
   geminiApiKey: string;
 }
+
+// The morning briefing (PLAN.md 15.11) needs to know which calendar day a
+// user was last greeted on, to tell a first-greeting-of-the-day (full
+// briefing) apart from any later one (short "ว่าไง" prompt) — this is the
+// only piece of state it needs, since the briefing itself is composed fresh
+// from live weather/news each time rather than being cached.
+export async function getLastGreetingDate(kv: KVNamespace, lineUserId: string): Promise<string | null> {
+  return kv.get(`last-greeting:${lineUserId}`);
+}
+
+export async function setLastGreetingDate(kv: KVNamespace, lineUserId: string, dateKey: string): Promise<void> {
+  await kv.put(`last-greeting:${lineUserId}`, dateKey);
+}
+
+export interface UserProvince {
+  name: string; // display name from the geocoder, not necessarily what the user typed
+  lat: number;
+  lon: number;
+}
+
+export async function getUserProvince(kv: KVNamespace, lineUserId: string): Promise<UserProvince | null> {
+  const raw = await kv.get(`province:${lineUserId}`);
+  return raw ? (JSON.parse(raw) as UserProvince) : null;
+}
+
+export async function setUserProvince(kv: KVNamespace, lineUserId: string, province: UserProvince): Promise<void> {
+  await kv.put(`province:${lineUserId}`, JSON.stringify(province));
+}

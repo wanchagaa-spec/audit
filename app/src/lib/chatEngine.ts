@@ -28,6 +28,12 @@ export interface ChatEngineResult {
 const GREETINGS = new Set([
   "สวัสดี", "สวัสดีครับ", "สวัสดีค่ะ", "หวัดดี", "หวัดดีครับ", "หวัดดีค่ะ",
   "ดีครับ", "ดีค่ะ", "hello", "hi", "hey", "เริ่ม", "start", "วิธีใช้", "help", "ช่วยด้วย",
+  // Morning-specific greetings (PLAN.md 15.11) — kept in the same exact-match
+  // set as every other greeting above rather than a separate list, since the
+  // worker doesn't otherwise distinguish "a greeting" from "a morning
+  // greeting"; classifyGreeting's once-per-day logic is what actually
+  // decides whether a reply gets the morning briefing.
+  "มอนิ่ง", "มอร์นิ่ง", "กู๊ดมอร์นิ่ง", "อรุณสวัสดิ์", "good morning", "goodmorning", "morning",
 ]);
 
 const HELP_MESSAGE =

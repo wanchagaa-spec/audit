@@ -471,6 +471,35 @@ from the "free forever, no AI" approach everything else follows.
   the rest of the bot stays within — see setup step 4 above for the free-tier data-usage
   disclosure before turning it on.
 
+### Morning briefing (PLAN.md 15.11)
+
+The **first** greeting ("สวัสดี", "มอนิ่ง", etc. — see `GREETINGS` in `chatEngine.ts`) of each
+Bangkok calendar day gets a short briefing: the date, weather (if you've set a location), and
+an AI-summarized news roundup. Any later greeting the same day just gets a short "ว่าไง ให้ฉันช่วย
+อะไรดี 😊" instead of repeating the whole thing. The very first greeting an account ever sends
+still gets the original feature-list welcome message instead — a brand-new user has no location
+set yet and no context for why they're suddenly getting a weather/news briefing.
+
+- `ตั้งจังหวัด <ชื่อ>` — e.g. "ตั้งจังหวัด เชียงใหม่" — sets the location used for weather. Not
+  required; without it, the briefing just suggests setting one instead of showing weather.
+- Weather comes from [Open-Meteo](https://open-meteo.com) — both its geocoding and forecast
+  endpoints are free with **no API key or account at all**, which fits this project's "free
+  forever" approach even better than Gemini does (nothing to sign up for, nothing to leak).
+  Purely rule-based: a weather code from the API maps to a fixed Thai description, no AI
+  involved.
+- News is fetched from [Bangkok Post's official RSS feed](https://www.bangkokpost.com/rss/)
+  (no key needed) and summarized/translated into Thai by Gemini — a normal, low-risk use of a
+  language model (summarizing text handed to it in full), unlike `aiCommands.ts`'s money/date
+  guardrails, which exist specifically because those tasks *would* let the model guess at a
+  fact the code already knows for certain.
+- Weather and news are independent and both best-effort: either one failing doesn't take the
+  other down, and neither ever blocks the greeting itself — worst case, the briefing still goes
+  out with just the date.
+- Needs no new secrets at all — Open-Meteo needs no key, the RSS feed needs no key, and news
+  summarization reuses the `GEMINI_API_KEY` from the AI Q&A feature above. If that's not set,
+  the news section is just omitted (same graceful-degradation behavior as anywhere else Gemini
+  is used).
+
 ## Local development
 
 ```bash
