@@ -684,6 +684,31 @@ message that happens to mention a real person also named "ไพโรจน์"
 reply too — this was requested directly (call the bot by name, no @ needed), so some false-positive
 risk is inherent to the feature itself.
 
+### Fixes from a real usage report (PLAN.md 17.13)
+
+Three issues found from an actual group chat screenshot:
+
+- **Missing `"view_link"` intent**: the interpreter's schema had no intent for the web-viewer
+  feature at all, so a natural phrasing like "เปิดเว็บไซต์ให้หน่อย" (not the exact
+  `"เปิดเว็บดูข้อมูล"` trigger the regex matcher needs) fell through to chitchat/unclear, and the bot
+  wrongly claimed it couldn't open a website. Added `view_link`, routed to the same
+  `buildViewLinkReply` the regex matcher already used.
+- **Lost context after a near-miss confirmation reply**: the bot proposed a calendar event ("จะสร้าง
+  นัด: ... ใช่ไหม?"); the user replied restating a detail ("ฉันนัดตอน 17.00 นะ") instead of the exact
+  "ใช่" the confirm step needs — that's still treated as a decline (unchanged; loosening the exact-word
+  check would reopen the accidental-confirmation risk 17.9 was built to close), but the interpreter
+  then re-asked for the event's name and date from scratch, ignoring that both were in the immediately
+  preceding turn's history. Added a rule: when the most recent bot turn was a confirmation prompt and
+  the new message looks like it's answering/adjusting the same thing, reconstruct the same intent from
+  history + the new message instead of asking again — safe either way, since the result still only
+  ever produces a fresh confirm-before-save prompt, never a direct save.
+- **Garbled, gender-drifted replies**: an AI-composed chitchat/unclear reply, restyled a second time
+  by `applyPersona`, occasionally drifted into male pronouns (ผม/ครับ) with broken grammar — two
+  sequential creative-writing passes over the same free-form text compounding drift risk. Added an
+  explicit "always female pronouns, must be grammatical Thai, prefer minimal changes over risking a
+  garbled rewrite" rule to both `persona.ts` and the interpreter's own instruction for composing those
+  replies, so the first pass already lands in the right voice.
+
 ## Local development
 
 ```bash

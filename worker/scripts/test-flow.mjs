@@ -1880,6 +1880,14 @@ simulateInterpreterResult = { intent: "help" };
 const interpHelpReply = await handleTextMessage(env, lineUserId, "ทำอะไรได้บ้างอะ", origin);
 check("a help intent returns the same detailed help text buildHelpText() produces", interpHelpReply.includes("เปิดเว็บดูข้อมูล"));
 
+// Regression test for a real report: "เปิดเว็บไซต์ให้หน่อย" (natural phrasing,
+// not the exact "เปิดเว็บดูข้อมูล" trigger) had no interpreter intent to route
+// to at all, so it fell through to chitchat/unclear and the bot wrongly
+// claimed it couldn't open a website — a feature that already exists.
+simulateInterpreterResult = { intent: "view_link" };
+const interpViewLinkReply = await handleTextMessage(env, lineUserId, "เปิดเว็บไซต์ให้หน่อย", origin);
+check("a view_link intent replies with the same /view link buildViewLinkReply produces", interpViewLinkReply.includes("/view"));
+
 // Conversation memory: both sides of an exchange are recorded, and the next
 // interpreter call actually receives that history in its prompt — this is
 // the "จำ context ที่คุยกันทั้งหมด" half of PLAN.md 17.11, not just intent

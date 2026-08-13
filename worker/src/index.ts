@@ -408,6 +408,8 @@ async function runInterpretedIntent(
         return withToken((ctx) => answerQuestion(ctx, intent.question));
       case "help":
         return buildHelpText();
+      case "view_link":
+        return buildViewLinkReply(env, subjectId, origin);
       case "chitchat":
       case "unclear":
         return intent.reply;
