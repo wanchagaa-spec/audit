@@ -1433,6 +1433,44 @@ check(
 // so it doesn't interfere with anything later in the file sharing lineUserId.
 await kv.delete(`confirm:${lineUserId}`);
 
+// Regression test for the fix to a real race found in review: every event
+// for the same subject in one webhook call used to run concurrently
+// (Promise.allSettled), so two events for the same subject could race on
+// the single shared pendingConfirmation KV slot (state.ts) — e.g. one
+// event's "ใช่" confirming a fresh draft the other event only just created,
+// or clobbering it entirely. Events for the same subject are now grouped
+// and processed strictly one at a time (still concurrent across different
+// subjects), so a batch containing both "confirm the old draft" and
+// "start a brand new draft" for the same person must resolve deterministically
+// in array order, not race.
+const subjectRaceSetupPromptReply = await handleTextMessage(env, lineUserId, "ซื้อกาแฟ 200", origin);
+check(
+  "setup: an older pending draft exists before the same-batch race test below",
+  subjectRaceSetupPromptReply.includes("ใช่ไหม")
+);
+const rowCountBeforeSubjectRace = sheetRows.length;
+const subjectRaceBody = JSON.stringify({
+  events: [personalTextEvent("ใช่", "reply-race-1"), personalTextEvent("ค่ากาแฟ 15", "reply-race-2")],
+});
+const repliesBeforeSubjectRace = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(subjectRaceBody, env.LINE_CHANNEL_SECRET) }, body: subjectRaceBody }),
+  env
+);
+check(
+  "the older draft (200) is confirmed and saved by the batch's first event, not lost or crossed with the second",
+  sheetRows.length === rowCountBeforeSubjectRace + 1 && sheetRows.at(-1)[3] === 200
+);
+check(
+  "the batch's second event starts its own fresh draft (15) afterward, in order, not concurrently",
+  replies.length === repliesBeforeSubjectRace + 2 &&
+    replies.at(-2).includes("200") &&
+    replies.at(-1).includes("15") &&
+    replies.at(-1).includes("ใช่ไหม")
+);
+// Clean up the dangling pendingConfirmation this test's second event left behind.
+await kv.delete(`confirm:${lineUserId}`);
+
 // Regression test for a review finding on the fast-ack PR: the invalid-
 // signature check above only exercised handleWebhook directly, not the
 // production fetch handler real LINE traffic actually hits — a future edit
