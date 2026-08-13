@@ -576,12 +576,16 @@ using one shared Google account for the whole group instead of everyone's own pe
   to the webhook, mentioned or not — there's no server-side filtering, so the bot checks
   `message.mention.mentionees[].isSelf === true` itself and ignores everything else without
   touching any state.
-- **Deliberately smaller command set for this first pass**: money logging (natural language +
-  "ลบรายการล่าสุด") and the read-only report shortcuts ("สรุปเดือนนี้" etc. — pure reads, no
-  per-user state, essentially free to include). AI/calendar/diary/trip/province/web-viewer stay
-  personal-only for now; each raises questions worth thinking through separately in a
-  shared-account context (who can create/delete a shared Calendar event, whether different
-  members' trip photos should land in the same folder) rather than being enabled by default.
+- **Command set (PLAN.md 17.4/17.6)**: money logging (natural language + "ลบรายการล่าสุด"), the
+  read-only report shortcuts ("สรุปเดือนนี้" etc. — pure reads, no per-user state), and
+  "ถาม <คำถาม>"/"วิเคราะห์" (AI Q&A, reusing `matchAiCommand` unchanged — it already reads through
+  whatever `ActionCtx` it's handed, so it just works against the group's own shared
+  spreadsheet/calendar). Calendar/diary/trip/province/web-viewer *writes* stay personal-only for
+  now; each raises questions worth thinking through separately in a shared-account context (who
+  can create/delete a shared Calendar event, whether different members' trip photos should land
+  in the same folder) that a read-only feature like AI Q&A doesn't. One tradeoff worth knowing:
+  Gemini's free-tier quota is one shared pool for the whole bot, not per-group or per-person, so a
+  busy group asking the AI a lot eats into what's left for everyone else.
 - Transactions logged in group mode are attributed to whoever actually sent them (`addedBy`/
   `addedByName`), fetched via `GET /v2/bot/group/{groupId}/member/{userId}` — unlike the general
   profile API, this works even for members who've never added the OA as a friend. Falls back to

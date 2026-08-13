@@ -474,16 +474,20 @@ async function saveTransactionDrafts(
   );
 }
 
-// Group mode (PLAN.md 17) — a deliberately smaller command set than
-// personal mode's handleTextMessage: money logging (natural-language
-// parsing + "ลบรายการล่าสุด") and the read-only report shortcuts
-// (matchCommand — "สรุปเดือนนี้" etc., pure reads, no per-user state, so
-// there's no reason to hold them back). AI/calendar/diary/trip/province/
-// view-link stay personal-only for now — held back deliberately, not
-// forgotten, since they need more thought in a shared-account context
-// (e.g. who can trigger a Calendar write, whether "ทริป" photos from
-// different members should even land in the same folder) than this first
-// pass was worth risking.
+// Group mode (PLAN.md 17) — still a smaller command set than personal
+// mode's handleTextMessage, but AI Q&A/analysis (PLAN.md 17.6) is in now
+// too: money logging (natural-language parsing + "ลบรายการล่าสุด"), the
+// read-only report shortcuts (matchCommand — "สรุปเดือนนี้" etc., pure
+// reads, no per-user state), "ถาม <คำถาม>"/"วิเคราะห์" (matchAiCommand —
+// reads the same shared spreadsheet/calendar, using the group's own
+// linked Google account like everything else here; no group-specific
+// code needed since it was already generic over whatever ActionCtx it's
+// handed). Calendar/diary/trip/province/view-link *writes* stay
+// personal-only for now — held back deliberately, not forgotten, since
+// each raises its own question about who in a shared account should be
+// allowed to trigger them (e.g. a Calendar write, or which folder
+// different members' trip photos should land in) that AI Q&A (read-only,
+// same guardrails as personal mode) doesn't.
 export async function handleGroupTextMessage(
   env: Env,
   groupId: string,
@@ -515,6 +519,15 @@ export async function handleGroupTextMessage(
     if (reply) return reply;
     // Not an affirmative reply — falls through and handles `text` normally,
     // same as personal mode.
+  }
+
+  // Checked before every other matcher below, same precedence rule as
+  // personal mode's handleTextMessage — "ถาม"/"วิเคราะห์" is an explicit,
+  // unambiguous signal this message is for the AI, and should never be
+  // shadowed by a coincidental keyword match in one of the matchers below.
+  const aiHandler = await matchAiCommand(text);
+  if (aiHandler) {
+    return await withFreshAccessToken(env, link.refreshToken, (accessToken) => aiHandler(actionCtx(accessToken)), tokenCache);
   }
 
   const transactionHandler = await matchTransactionCommand(text);

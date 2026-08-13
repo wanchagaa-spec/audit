@@ -1951,16 +1951,23 @@ check(
   groupDeleteConfirmReply.includes("ลบ") && sheetRows.length === groupSheetRowsBeforeDelete - 1
 );
 
-// 7. AI/calendar/diary/trip/province/view-link commands are deliberately
-// NOT wired into group mode yet — "ถาม ..." should fall through to the
-// natural-language parser (which won't recognize it as a transaction
-// either) rather than reaching Gemini.
+// 7. AI Q&A/analysis (PLAN.md 17.6) — opened up to group mode too, reusing
+// matchAiCommand exactly as-is (no group-specific code needed, since it
+// was already generic over whatever ActionCtx it's handed). Calendar/
+// diary/trip/province/view-link *writes* stay personal-only still.
 const groupAiRequestsBefore = geminiRequests.length;
-const groupAiAttemptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+const groupAiReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
 check(
-  "AI commands don't reach Gemini in group mode yet — held back deliberately for this first pass",
-  geminiRequests.length === groupAiRequestsBefore && !groupAiAttemptReply.includes("[mock AI answer]")
+  "\"ถาม <คำถาม>\" reaches Gemini in group mode, same as personal mode",
+  geminiRequests.length === groupAiRequestsBefore + 1 && groupAiReply.includes("[mock AI answer]")
 );
+const lastGroupAiRequest = geminiRequests.at(-1);
+check(
+  "the AI prompt in group mode is built from the group's own shared spreadsheet, not any individual's",
+  lastGroupAiRequest.systemInstruction.includes("รายรับรวม")
+);
+const groupAnalyzeReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิเคราะห์", origin);
+check("\"วิเคราะห์\" (no question text) also works in group mode", groupAnalyzeReply.includes("[mock AI answer]"));
 
 // 8. Full webhook-level mention gating: every message in a group the bot
 // belongs to reaches the webhook whether the bot was addressed or not —
