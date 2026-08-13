@@ -78,6 +78,11 @@ export interface DriveFileSummary {
   id: string;
   name: string;
   mimeType: string;
+  // ISO 8601, used by the web viewer to caption each thumbnail with the
+  // upload date (PLAN.md 16.3) — Drive's own record of when the file was
+  // created, not parsed back out of the filename (which happens to also
+  // encode the date, but isn't the field meant to be authoritative for it).
+  createdTime: string;
 }
 
 export interface DriveFileListPage {
@@ -101,7 +106,7 @@ export async function listFilesInFolder(
   const q = `mimeType!='${FOLDER_MIME}' and trashed=false and '${escapeDriveQueryValue(folderId)}' in parents`;
   const params = new URLSearchParams({
     q,
-    fields: "nextPageToken,files(id,name,mimeType)",
+    fields: "nextPageToken,files(id,name,mimeType,createdTime)",
     orderBy: "createdTime desc",
     pageSize: String(PHOTOS_PAGE_SIZE),
     spaces: "drive",
@@ -109,7 +114,7 @@ export async function listFilesInFolder(
   if (pageToken) params.set("pageToken", pageToken);
   const data = await driveFetch(accessToken, `/files?${params}`);
   return {
-    files: (data.files ?? []).map((f: any) => ({ id: f.id, name: f.name, mimeType: f.mimeType })),
+    files: (data.files ?? []).map((f: any) => ({ id: f.id, name: f.name, mimeType: f.mimeType, createdTime: f.createdTime })),
     nextPageToken: data.nextPageToken ?? null,
   };
 }

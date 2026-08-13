@@ -105,11 +105,28 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
     display: block; background: #fff; border-radius: 14px; padding: .9rem 1.1rem; margin-bottom: .7rem;
     text-decoration: none; color: #1c1e21; box-shadow: 0 1px 3px rgba(0,0,0,0.06); font-size: .95rem;
   }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .4rem; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem .4rem; }
   .grid a { display: block; aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: #e5e7eb; }
   .grid img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .grid-caption { text-align: center; color: #9aa0a6; font-size: .68rem; margin-top: .25rem; }
   .empty { text-align: center; color: #6b6f76; padding: 1.5rem 0; font-size: .9rem; }
   .footnote { text-align: center; color: #9aa0a6; font-size: .75rem; margin-top: 1.5rem; }
+  .table-scroll { overflow-x: auto; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .data-table th, .data-table td { padding: .5rem .5rem; text-align: left; border-bottom: 1px solid #eee; white-space: nowrap; }
+  .data-table th { color: #6b6f76; font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .02em; }
+  .data-table tbody tr:last-child td { border-bottom: none; }
+  .data-table td.note { white-space: normal; }
+  .data-table td.num { text-align: right; font-weight: 600; }
+  .search-form { display: flex; gap: .5rem; margin-bottom: 1.1rem; }
+  .search-form input[type="text"] {
+    flex: 1; min-width: 0; padding: .55rem .7rem; border-radius: 10px; border: 1px solid #d8dade;
+    font-size: .9rem; font-family: inherit;
+  }
+  .search-form button {
+    flex: none; padding: .55rem 1rem; border-radius: 10px; border: none; background: #16a34a;
+    color: #fff; font-size: .85rem; font-family: inherit; cursor: pointer;
+  }
 </style>
 </head>
 <body>
