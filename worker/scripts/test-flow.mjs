@@ -1959,6 +1959,21 @@ check(
   groupDeleteConfirmReply.includes("ลบ") && sheetRows.length === groupSheetRowsBeforeDelete - 1
 );
 
+// Regression test for a real bug a user actually hit: the shared help text
+// ("วิธีใช้") used to unconditionally advertise "เปิดเว็บดูข้อมูล" even in
+// group mode, where that command doesn't work (view-link stays
+// personal-only). A group member who typed the exact command the help text
+// told them to got no link back — silently falling through to chatEngine's
+// ambiguous-message clarification ("จำนวนเงินเท่าไหร่คะ") instead, since
+// nothing else recognized the text either.
+const personalHelpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
+check("personal mode's help text still advertises the web viewer", personalHelpReply.includes("เปิดเว็บดูข้อมูล"));
+const groupHelpReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิธีใช้", origin);
+check(
+  "group mode's help text no longer advertises the web-viewer command that doesn't actually work there",
+  !groupHelpReply.includes("เปิดเว็บดูข้อมูล")
+);
+
 // 7. AI Q&A/analysis (PLAN.md 17.6) — opened up to group mode too, reusing
 // matchAiCommand exactly as-is (no group-specific code needed, since it
 // was already generic over whatever ActionCtx it's handed). Calendar/

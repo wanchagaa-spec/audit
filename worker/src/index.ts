@@ -417,7 +417,7 @@ async function dispatchCoreCommands(
     throw err;
   }
 
-  const reportHandler = await matchCommand(text);
+  const reportHandler = await matchCommand(text, allowViewLink);
   if (reportHandler) {
     return withFreshAccessToken(
       env,
