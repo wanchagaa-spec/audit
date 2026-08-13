@@ -42,8 +42,11 @@ import {
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand } from "./transactionCommands.ts";
 import { matchTripCommand } from "./tripCommands.ts";
+import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
-import { handleViewRequest } from "./viewPages.ts";
+import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
+import { handleViewAccountsRequest } from "./viewPages.ts";
+import { handleViewPhotoRequest, handleViewTripsRequest } from "./viewTripsPage.ts";
 import {
   countQueuedForUser,
   deleteQueueEntry,
@@ -71,7 +74,7 @@ const WELCOME_MESSAGE = [
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
   "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
-  "🌐 พิมพ์ \"เปิดเว็บดูข้อมูล\" เพื่อขอลิงก์ดูสรุปบัญชีผ่านเว็บ",
+  "🌐 พิมพ์ \"เปิดเว็บดูข้อมูล\" เพื่อขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บ",
   "",
   "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
 ].join("\n");
@@ -838,7 +841,13 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
-    if (url.pathname === "/view") return handleViewRequest(request, env);
+    if (url.pathname === "/view") return handleViewAccountsRequest(request, env);
+    if (url.pathname === "/view/calendar") return handleViewCalendarRequest(request, env);
+    if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
+    if (url.pathname === "/view/trips" || url.pathname.startsWith("/view/trips/")) {
+      return handleViewTripsRequest(request, env);
+    }
+    if (url.pathname.startsWith("/view/photo/")) return handleViewPhotoRequest(request, env);
     if (url.pathname === "/webhook" && request.method === "POST") {
       const body = await verifyAndParseWebhookBody(request, env);
       if (!body) return new Response("invalid signature", { status: 401 });

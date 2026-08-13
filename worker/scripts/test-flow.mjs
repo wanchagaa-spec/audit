@@ -64,6 +64,7 @@ function nextDriveId(prefix) {
   driveIdSeq += 1;
   return `${prefix}-${driveIdSeq}`;
 }
+let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
 
 const calendarEvents = []; // simulates Google Calendar: {id, summary, start:{dateTime}, end:{dateTime}}
 let calendarIdSeq = 0;
@@ -171,12 +172,59 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://www.googleapis.com/drive/v3/files")) {
     const parsed = new URL(u);
+    const idMatch = parsed.pathname.match(/^\/drive\/v3\/files\/([^/]+)$/);
+
+    // GET /files/:id?fields=name — viewTripsPage's getFileName (looking up
+    // a trip folder's own display name).
+    if (idMatch && parsed.searchParams.get("fields") === "name" && (!init.method || init.method === "GET")) {
+      const folder = driveFolders.find((f) => f.id === idMatch[1]);
+      if (!folder) return new Response("not found", { status: 404 });
+      return new Response(JSON.stringify({ name: folder.name }), { status: 200 });
+    }
+
+    // GET /files/:id?alt=media — viewTripsPage's photo proxy.
+    if (idMatch && parsed.searchParams.get("alt") === "media") {
+      if (simulatePhotoFetchFailure) {
+        simulatePhotoFetchFailure = false;
+        return new Response("simulated photo fetch failure", { status: 500 });
+      }
+      const file = driveUploads.find((f) => f.id === idMatch[1]);
+      if (!file) return new Response("not found", { status: 404 });
+      return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
+        status: 200,
+        headers: { "content-type": "image/jpeg" },
+      });
+    }
+
     if (!init.method || init.method === "GET") {
       const q = parsed.searchParams.get("q") ?? "";
       const nameMatch = q.match(/name='((?:[^'\\]|\\.)*)'/);
       const parentMatch = q.match(/'([^']+)' in parents/);
       const name = nameMatch ? nameMatch[1].replace(/\\'/g, "'") : null;
       const parentId = parentMatch ? parentMatch[1] : null;
+
+      // listFilesInFolder excludes folders (mimeType!=...) and, unlike the
+      // findFolder/getOrCreateAlbumRoot queries below, matches real
+      // uploaded files (driveUploads), not folders.
+      if (q.includes("mimeType!=")) {
+        const files = driveUploads.filter((f) => f.parentId === parentId);
+        return new Response(
+          JSON.stringify({ files: files.map((f) => ({ id: f.id, name: f.name, mimeType: "image/jpeg" })) }),
+          { status: 200 }
+        );
+      }
+
+      // listTripFolders has no name='...' clause (it wants every folder
+      // under the parent, not one specific name) — findFolder/
+      // getOrCreateAlbumRoot always do, so `name` being null is what tells
+      // these two cases apart.
+      if (name === null) {
+        const matches = driveFolders.filter((f) => f.parentId === parentId);
+        return new Response(JSON.stringify({ files: matches.map((f) => ({ id: f.id, name: f.name })) }), {
+          status: 200,
+        });
+      }
+
       const matches = driveFolders.filter((f) => f.name === name && f.parentId === parentId);
       return new Response(JSON.stringify({ files: matches.map((f) => ({ id: f.id })) }), { status: 200 });
     }
@@ -1641,6 +1689,73 @@ check(
   "an OAuth state can't be replayed as a view token",
   (await verifyViewToken(forgedViewTokenFromOauthState, env.STATE_SIGNING_SECRET)) === null
 );
+
+// Calendar/diary/trip-photo views (PLAN.md 16.3) — same token, three more
+// pages sharing the resolveViewSession plumbing.
+
+calendarEvents.push({
+  id: "evt-view-test-1",
+  summary: "นัดหาหมอ",
+  start: { dateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
+  end: { dateTime: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() },
+});
+const calendarViewResponse = await worker.fetch(new Request(`${origin}/view/calendar?token=${viewToken}`), env, new FakeExecutionContext());
+const calendarViewHtml = await calendarViewResponse.text();
+check(
+  "/view/calendar shows upcoming events grouped by date",
+  calendarViewResponse.status === 200 && calendarViewHtml.includes("นัดหาหมอ")
+);
+calendarEvents.length = 0; // clean up — nothing after this reads calendarEvents
+
+diaryRows.push(["diary-view-test-1", bangkokDateKey(), "ทั่วไป", "<b>ทดสอบ</b> วันนี้อากาศดี", new Date().toISOString()]);
+const diaryViewResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}`), env, new FakeExecutionContext());
+const diaryViewHtml = await diaryViewResponse.text();
+check(
+  "/view/diary shows this month's entries grouped by day, with HTML-escaped text",
+  diaryViewResponse.status === 200 &&
+    diaryViewHtml.includes("&lt;b&gt;ทดสอบ&lt;/b&gt;") &&
+    !diaryViewHtml.includes("<b>ทดสอบ</b>")
+);
+const diaryEmptyMonthResponse = await worker.fetch(new Request(`${origin}/view/diary?token=${viewToken}&month=2999-01`), env, new FakeExecutionContext());
+check(
+  "/view/diary for a month with no entries shows an empty state instead of erroring",
+  diaryEmptyMonthResponse.status === 200 && (await diaryEmptyMonthResponse.text()).includes("ไม่มีบันทึกเดือนนี้")
+);
+
+// Trip photos view reuses the "ทะเล" trip folder and its already-uploaded
+// files from the trip-photo tests earlier in this run (see tripFolderId
+// above) instead of manufacturing fresh Drive mock data — the view layer
+// just reads back what the upload path already wrote.
+const tripsListResponse = await worker.fetch(new Request(`${origin}/view/trips?token=${viewToken}`), env, new FakeExecutionContext());
+const tripsListHtml = await tripsListResponse.text();
+check("/view/trips lists the trip folders that exist", tripsListResponse.status === 200 && tripsListHtml.includes("ทะเล"));
+
+const tripPhotosResponse = await worker.fetch(new Request(`${origin}/view/trips/${tripFolderId}?token=${viewToken}`), env, new FakeExecutionContext());
+const tripPhotosHtml = await tripPhotosResponse.text();
+check(
+  "/view/trips/:folderId shows a photo grid linking to the photo-proxy endpoint",
+  tripPhotosResponse.status === 200 && tripPhotosHtml.includes("ทะเล") && tripPhotosHtml.includes("/view/photo/")
+);
+
+const tripPhotoFileId = driveUploads.find((f) => f.parentId === tripFolderId)?.id;
+const photoResponse = await worker.fetch(new Request(`${origin}/view/photo/${tripPhotoFileId}?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "/view/photo/:fileId proxies the actual image bytes with an image content-type, not a Google token",
+  photoResponse.status === 200 && (photoResponse.headers.get("content-type") ?? "").startsWith("image/")
+);
+
+simulatePhotoFetchFailure = true;
+const photoFailureResponse = await worker.fetch(new Request(`${origin}/view/photo/${tripPhotoFileId}?token=${viewToken}`), env, new FakeExecutionContext());
+check("a Drive failure while proxying a photo degrades to a friendly error page, not a crash", photoFailureResponse.status === 502);
+
+const missingFolderResponse = await worker.fetch(new Request(`${origin}/view/trips/does-not-exist?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "a trip folder id that doesn't exist (or isn't this account's) shows a friendly not-found page",
+  missingFolderResponse.status === 404
+);
+
+const missingPhotoResponse = await worker.fetch(new Request(`${origin}/view/photo/does-not-exist?token=${viewToken}`), env, new FakeExecutionContext());
+check("a photo id that doesn't exist shows a friendly not-found page, not a crash", missingPhotoResponse.status === 404);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

@@ -54,6 +54,102 @@ export async function getOrCreateAlbumRoot(accessToken: string): Promise<string>
   return created.id;
 }
 
+// Everything below is for the web viewer (PLAN.md 16) reading trip photos
+// back — nothing above this point ever needed to list or read a file back,
+// only create folders and upload into them.
+
+export interface DriveFolderSummary {
+  id: string;
+  name: string;
+}
+
+/** Trip folders directly under the album root, most recently created first. */
+export async function listTripFolders(accessToken: string): Promise<DriveFolderSummary[]> {
+  const rootId = await getOrCreateAlbumRoot(accessToken);
+  const q = `mimeType='${FOLDER_MIME}' and trashed=false and '${rootId}' in parents`;
+  const data = await driveFetch(
+    accessToken,
+    `/files?q=${encodeURIComponent(q)}&fields=files(id,name)&orderBy=createdTime desc&pageSize=100&spaces=drive`
+  );
+  return (data.files ?? []).map((f: any) => ({ id: f.id, name: f.name }));
+}
+
+export interface DriveFileSummary {
+  id: string;
+  name: string;
+  mimeType: string;
+}
+
+export interface DriveFileListPage {
+  files: DriveFileSummary[];
+  nextPageToken: string | null;
+}
+
+const PHOTOS_PAGE_SIZE = 60;
+
+/** Photos/videos inside one trip folder, newest first, paginated (a trip
+ * can easily hold more files than are worth loading in one page). */
+export async function listFilesInFolder(
+  accessToken: string,
+  folderId: string,
+  pageToken?: string
+): Promise<DriveFileListPage> {
+  const q = `mimeType!='${FOLDER_MIME}' and trashed=false and '${folderId}' in parents`;
+  const params = new URLSearchParams({
+    q,
+    fields: "nextPageToken,files(id,name,mimeType)",
+    orderBy: "createdTime desc",
+    pageSize: String(PHOTOS_PAGE_SIZE),
+    spaces: "drive",
+  });
+  if (pageToken) params.set("pageToken", pageToken);
+  const data = await driveFetch(accessToken, `/files?${params}`);
+  return {
+    files: (data.files ?? []).map((f: any) => ({ id: f.id, name: f.name, mimeType: f.mimeType })),
+    nextPageToken: data.nextPageToken ?? null,
+  };
+}
+
+/** A trip folder's display name, or null if it doesn't exist / isn't
+ * reachable with this access token (deliberately swallowed here rather
+ * than thrown — the caller treats "no name" as "no such trip" either way,
+ * whether the folder was deleted or just never belonged to this account). */
+export async function getFileName(accessToken: string, fileId: string): Promise<string | null> {
+  try {
+    const data = await driveFetch(accessToken, `/files/${encodeURIComponent(fileId)}?fields=name`);
+    return data.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Streams one file's raw bytes straight from Drive, or null specifically
+ * when the file genuinely doesn't exist (or isn't reachable with this
+ * access token — same 404 either way) — used to proxy trip photos to the
+ * browser, since files uploaded under the `drive.file` scope aren't
+ * publicly reachable by any other means (no Authorization header, no
+ * anonymous fetch). Any other failure (a transient 5xx, say) throws
+ * instead of also returning null, so the caller can tell "this photo
+ * doesn't exist" apart from "couldn't load it right now, try again" —
+ * conflating the two would tell someone their photo is gone when Drive
+ * just hiccuped. Returns the live Response rather than buffering the body
+ * into memory first, the same streaming approach uploadFileToFolder
+ * already uses in the other direction. */
+export async function fetchDriveFileContent(
+  accessToken: string,
+  fileId: string
+): Promise<{ body: ReadableStream<Uint8Array>; contentType: string } | null> {
+  const res = await fetch(`${DRIVE_BASE}/files/${encodeURIComponent(fileId)}?alt=media`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`Google Drive API error (${res.status}): ${await res.text()}`);
+  }
+  if (!res.body) return null;
+  return { body: res.body, contentType: res.headers.get("content-type") ?? "application/octet-stream" };
+}
+
 // Concatenates fixed byte chunks and/or passthrough streams into one
 // ReadableStream, reading each source only once and only as fast as the
 // consumer pulls. Used below to build a streamed multipart body without
