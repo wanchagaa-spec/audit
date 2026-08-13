@@ -78,6 +78,10 @@ const diaryRows = []; // simulates the Diary tab
 
 let simulateDriveUploadFailureCount = 0; // decremented each time; while > 0, fails the next Drive media upload request(s)
 let simulatePushFailureToo = false; // one-shot: fails the next push too (pair with an "expired" replyToken to simulate total messaging failure)
+const groupMemberDisplayNames = {}; // simulates LINE group member profiles: { [userId]: displayName }
+let simulateGroupMemberProfileFailure = false; // makes the next group-member-profile lookup fail, to exercise graceful attribution fallback
+let simulateGroupSummaryFailure = false; // makes the next group-summary lookup fail, to exercise the generic spreadsheet-name fallback
+let mockGroupName = "ทริปเพื่อน"; // the group name returned by the mocked group-summary endpoint
 let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to the upload queue, to exercise handleQueuedMediaBatch's outer catch
 let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
@@ -97,9 +101,19 @@ globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
 
   if (u.includes("oauth2.googleapis.com/token")) {
-    return new Response(JSON.stringify({ access_token: "fake-access-token", expires_in: 3600 }), {
-      status: 200,
-    });
+    const params = new URLSearchParams(init.body);
+    const body = { access_token: "fake-access-token", expires_in: 3600 };
+    // Only the initial code exchange (exchangeCodeForTokens) returns a
+    // refresh_token, same as the real endpoint — refreshAccessToken's own
+    // requests (grant_type=refresh_token) don't need or check for one, so
+    // this stays a no-op for the many tests that only ever refresh.
+    // Deriving it from `code` (not a fixed string) lets a test simulate
+    // two different people completing the same still-valid OAuth link with
+    // two different Google accounts, by using two different `code`s.
+    if (params.get("grant_type") === "authorization_code") {
+      body.refresh_token = `fake-refresh-token-for-${params.get("code")}`;
+    }
+    return new Response(JSON.stringify(body), { status: 200 });
   }
   if (u.endsWith("/v4/spreadsheets")) {
     return new Response(JSON.stringify({ spreadsheetId: "fake-sheet-id" }), { status: 200 });
@@ -156,6 +170,23 @@ globalThis.fetch = async (url, init = {}) => {
     const body = JSON.parse(init.body);
     pushes.push({ to: body.to, text: body.messages[0].text });
     return new Response("{}", { status: 200 });
+  }
+  if (u.match(/https:\/\/api\.line\.me\/v2\/bot\/group\/([^/]+)\/member\/([^/]+)$/)) {
+    if (simulateGroupMemberProfileFailure) {
+      simulateGroupMemberProfileFailure = false;
+      return new Response("simulated member-profile fetch failure", { status: 500 });
+    }
+    const [, , userId] = u.match(/https:\/\/api\.line\.me\/v2\/bot\/group\/([^/]+)\/member\/([^/]+)$/);
+    const displayName = groupMemberDisplayNames[userId];
+    if (!displayName) return new Response("not found", { status: 404 });
+    return new Response(JSON.stringify({ displayName, userId }), { status: 200 });
+  }
+  if (u.match(/https:\/\/api\.line\.me\/v2\/bot\/group\/([^/]+)\/summary$/)) {
+    if (simulateGroupSummaryFailure) {
+      simulateGroupSummaryFailure = false;
+      return new Response("simulated group-summary fetch failure", { status: 500 });
+    }
+    return new Response(JSON.stringify({ groupName: mockGroupName }), { status: 200 });
   }
   if (u.startsWith("https://api-data.line.me/v2/bot/message/") && u.endsWith("/content")) {
     const isVideo = u.includes("vid-");
@@ -466,16 +497,18 @@ globalThis.fetch = async (url, init = {}) => {
 
 const {
   handleTextMessage,
+  handleGroupTextMessage,
   handleImageMessage,
   handleVideoMessage,
   handleWebhook,
   drainUploadQueue,
   default: worker,
 } = await import("../src/index.ts");
-const { setAccountLink } = await import("../src/state.ts");
+const { setAccountLink, getAccountLink } = await import("../src/state.ts");
 const { verifyState, signState, signViewToken, verifyViewToken } = await import("../src/signedState.ts");
 const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
+const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
 
 async function signLineBody(rawBody, secret) {
@@ -1826,6 +1859,230 @@ const folderNameFailureResponse = await worker.fetch(new Request(`${origin}/view
 check(
   "a transient failure looking up a real trip folder's name degrades to 'try again', not 'not found'",
   folderNameFailureResponse.status === 502
+);
+
+// Group mode (PLAN.md 17) — a shared account bound to a LINE groupId
+// instead of an individual's userId, gated on the bot being @-mentioned.
+const groupId = "Cgrouptest1";
+const groupSenderA = "Ugroupsender-a";
+const groupSenderB = "Ugroupsender-b";
+
+// 1. An unlinked group gets a link whose signed state decodes to
+// "group:<groupId>", not any individual's LINE userId — same round-trip
+// regression check as the personal-linking test near the top of this file.
+const groupUnlinkedReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ซื้อกาแฟ 60", origin);
+check("an unlinked group is told to link, with a Google OAuth URL", groupUnlinkedReply.includes("accounts.google.com/o/oauth2/v2/auth"));
+const groupAuthorizeUrl = groupUnlinkedReply.split("\n").pop();
+const groupState = new URL(groupAuthorizeUrl).searchParams.get("state");
+check(
+  "the group's state param round-trips to \"group:<groupId>\", not a personal LINE userId",
+  (await verifyState(groupState, env.STATE_SIGNING_SECRET)) === `group:${groupId}`
+);
+
+// 2. Link the group (simulating a completed OAuth flow, same pattern used
+// for the personal account near the top of this file).
+await setAccountLink(kv, `group:${groupId}`, {
+  spreadsheetId: "fake-group-sheet-id",
+  refreshToken: "fake-group-refresh-token",
+  displayName: "สมุดกลุ่ม",
+});
+
+// 3. Money logging, attributed to whoever actually sent it (unlike
+// personal mode, where attribution is always just "LINE" — meaningless in
+// a 1:1 chat, but genuinely informative once several people share one
+// account).
+groupMemberDisplayNames[groupSenderA] = "สมชาย";
+const groupSheetRowsBeforeLog = sheetRows.length;
+const groupLogReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ซื้อกาแฟ 60", origin);
+check("a clear expense logs in group mode same as personal mode", groupLogReply.includes("60"));
+check("exactly one row was appended to the group's own spreadsheet", sheetRows.length === groupSheetRowsBeforeLog + 1);
+const loggedGroupRow = sheetRows.at(-1);
+check(
+  "the logged row is attributed to the actual sender, not a generic group label",
+  loggedGroupRow[7] === groupSenderA && loggedGroupRow[8] === "สมชาย"
+);
+
+// 4. A pending clarification is shared by the whole group — sender A asks
+// the question, sender B (a different person) answers it, and it still
+// resolves, matching how a question posed to a group chat naturally works
+// (unlike personal mode, where only one person could ever be replying).
+const groupSheetRowsBeforeShared = sheetRows.length;
+// "ซื้อกาแฟ" (no amount) rather than something like "ซื้อของ" — "กาแฟ" alone
+// already resolves to a specific category (same convention used throughout
+// this file), so answering just the amount below completes the entry in
+// one round instead of also needing a category clarification round.
+const groupAskReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ซื้อกาแฟ", origin);
+check("an ambiguous message still asks a clarifying question in group mode", groupAskReply.includes("จำนวนเงินเท่าไหร่"));
+groupMemberDisplayNames[groupSenderB] = "สมหญิง";
+const groupAnswerReply = await handleGroupTextMessage(env, groupId, groupSenderB, "80", origin);
+check(
+  "a different group member answering the pending question resolves it",
+  groupAnswerReply.includes("80") && sheetRows.length === groupSheetRowsBeforeShared + 1
+);
+check("the resolved entry is attributed to whoever actually answered it", sheetRows.at(-1)[7] === groupSenderB);
+
+// 5. Attribution degrades gracefully when LINE didn't include a sender
+// userId at all (see LineEventSource's comment in line.ts for when that
+// happens) — never blocks the save over what's a cosmetic detail.
+const groupNoSenderReply = await handleGroupTextMessage(env, groupId, undefined, "ข้าว 30", origin);
+check(
+  "a message with no sender userId still logs, with a generic attribution label",
+  groupNoSenderReply.includes("30") && sheetRows.at(-1)[7] === "unknown" && sheetRows.at(-1)[8] === "สมาชิกกลุ่ม"
+);
+
+simulateGroupMemberProfileFailure = true;
+const groupProfileFailureReply = await handleGroupTextMessage(env, groupId, groupSenderA, "น้ำ 20", origin);
+check(
+  "a failed member-profile lookup still logs the transaction, with the generic label",
+  groupProfileFailureReply.includes("20") && sheetRows.at(-1)[8] === "สมาชิกกลุ่ม"
+);
+
+// 6. The read-only report shortcuts and "ลบรายการล่าสุด" both work in
+// group mode too (pure reads / a single well-tested command, unlike the
+// AI/calendar/diary/trip commands this first pass deliberately holds back).
+const groupSummaryReply = await handleGroupTextMessage(env, groupId, groupSenderA, "สรุปเดือนนี้", origin);
+check("\"สรุปเดือนนี้\" works in group mode", groupSummaryReply.includes("รายรับ"));
+const groupSheetRowsBeforeDelete = sheetRows.length;
+const groupDeletePromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ลบรายการล่าสุด", origin);
+check("\"ลบรายการล่าสุด\" asks to confirm in group mode", groupDeletePromptReply.includes("ใช่"));
+const groupDeleteConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
+check(
+  "any group member can confirm the shared pending deletion, same as the money-amount clarification above",
+  groupDeleteConfirmReply.includes("ลบ") && sheetRows.length === groupSheetRowsBeforeDelete - 1
+);
+
+// 7. AI/calendar/diary/trip/province/view-link commands are deliberately
+// NOT wired into group mode yet — "ถาม ..." should fall through to the
+// natural-language parser (which won't recognize it as a transaction
+// either) rather than reaching Gemini.
+const groupAiRequestsBefore = geminiRequests.length;
+const groupAiAttemptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+check(
+  "AI commands don't reach Gemini in group mode yet — held back deliberately for this first pass",
+  geminiRequests.length === groupAiRequestsBefore && !groupAiAttemptReply.includes("[mock AI answer]")
+);
+
+// 8. Full webhook-level mention gating: every message in a group the bot
+// belongs to reaches the webhook whether the bot was addressed or not —
+// gating on @mention is this bot's own responsibility, not something LINE
+// filters server-side (PLAN.md 17).
+function groupTextEvent({ text, mention, userId = groupSenderA, replyToken = "reply-group-1" }) {
+  return {
+    type: "message",
+    message: { type: "text", text, ...(mention ? { mention } : {}) },
+    source: { type: "group", groupId, userId },
+    replyToken,
+    timestamp: Date.now(),
+  };
+}
+
+const repliesBeforeUnmentioned = replies.length;
+const unmentionedRawBody = JSON.stringify({ events: [groupTextEvent({ text: "ไปกินข้าวกันไหม" })] });
+const unmentionedSignature = await signLineBody(unmentionedRawBody, env.LINE_CHANNEL_SECRET);
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": unmentionedSignature }, body: unmentionedRawBody }),
+  env
+);
+check("ordinary group chatter with no @mention gets no reply at all", replies.length === repliesBeforeUnmentioned);
+
+const mentionedRawBody = JSON.stringify({
+  events: [
+    groupTextEvent({
+      text: "@BotName สรุปเดือนนี้",
+      mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] },
+    }),
+  ],
+});
+const mentionedSignature = await signLineBody(mentionedRawBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeMentioned = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": mentionedSignature }, body: mentionedRawBody }),
+  env
+);
+check(
+  "a message that @mentions the bot gets a reply, with the mention text stripped before parsing",
+  replies.length === repliesBeforeMentioned + 1 && replies.at(-1).includes("รายรับ")
+);
+
+// 9. The push fallback (used when the reply token has expired) targets the
+// group itself, not any individual member — pushTargetId's whole reason
+// to exist.
+const mentionedExpiredBody = JSON.stringify({
+  events: [
+    groupTextEvent({
+      text: "@BotName สรุปเดือนนี้",
+      mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] },
+      replyToken: "reply-token-expired",
+    }),
+  ],
+});
+const mentionedExpiredSignature = await signLineBody(mentionedExpiredBody, env.LINE_CHANNEL_SECRET);
+const pushesBeforeGroupFallback = pushes.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": mentionedExpiredSignature }, body: mentionedExpiredBody }),
+  env
+);
+check(
+  "an expired reply token in a group falls back to pushing to the groupId, not a member's userId",
+  pushes.length === pushesBeforeGroupFallback + 1 && pushes.at(-1).to === groupId
+);
+
+// 10. The raw LINE API helpers behind group linking/attribution, tested
+// directly rather than just through the flows above.
+check(
+  "getGroupMemberProfile returns a display name for a known member",
+  (await getGroupMemberProfile(groupId, groupSenderA, env.LINE_CHANNEL_ACCESS_TOKEN))?.displayName === "สมชาย"
+);
+check(
+  "getGroupMemberProfile degrades to null (not a throw) for an unknown member",
+  (await getGroupMemberProfile(groupId, "Uneverjoined", env.LINE_CHANNEL_ACCESS_TOKEN)) === null
+);
+check(
+  "getGroupSummary returns the group's real name",
+  (await getGroupSummary(groupId, env.LINE_CHANNEL_ACCESS_TOKEN))?.groupName === mockGroupName
+);
+simulateGroupSummaryFailure = true;
+check(
+  "getGroupSummary degrades to null (not a throw) on failure",
+  (await getGroupSummary(groupId, env.LINE_CHANNEL_ACCESS_TOKEN)) === null
+);
+
+// 11. Regression test for a real bug caught in review: a group's authorize
+// link is posted into the shared chat (not DM'd), so unlike a personal
+// re-link (always expected to be the same person, safe to overwrite in
+// place), a *second* completion of the same still-valid link could easily
+// be a different person entirely, with their own separate Google account.
+// Overwriting the group's refreshToken in that case would silently break
+// every future read/write against the first person's spreadsheet.
+const raceGroupId = "Cgrouprace1";
+const raceSubjectId = `group:${raceGroupId}`;
+const raceState = await signState(raceSubjectId, env.STATE_SIGNING_SECRET);
+
+const oauthCallbackA = await worker.fetch(
+  new Request(`${origin}/oauth/callback?code=code-person-a&state=${encodeURIComponent(raceState)}`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "the first person to complete a group's OAuth link succeeds and links the group",
+  oauthCallbackA.status === 200 && (await oauthCallbackA.text()).includes("เชื่อมบัญชีกลุ่มสำเร็จ")
+);
+const linkAfterA = await getAccountLink(kv, raceSubjectId);
+check("the group's refresh token matches person A's completed exchange", linkAfterA?.refreshToken === "fake-refresh-token-for-code-person-a");
+
+const oauthCallbackB = await worker.fetch(
+  new Request(`${origin}/oauth/callback?code=code-person-b&state=${encodeURIComponent(raceState)}`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "a second completion of the same still-valid link for an already-linked group is a no-op, not an overwrite",
+  oauthCallbackB.status === 200 && (await oauthCallbackB.text()).includes("เชื่อมบัญชีไว้แล้ว")
+);
+const linkAfterB = await getAccountLink(kv, raceSubjectId);
+check(
+  "the group's refresh token is still person A's after a second, different person's completion attempt",
+  linkAfterB?.refreshToken === "fake-refresh-token-for-code-person-a" && linkAfterB?.spreadsheetId === linkAfterA?.spreadsheetId
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);
