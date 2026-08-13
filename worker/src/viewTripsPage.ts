@@ -25,7 +25,15 @@ import {
   type DriveFolderSummary,
 } from "./drive.ts";
 import type { Env } from "./index.ts";
-import { DATA_FETCH_FAILED_MESSAGE, escapeHtml, html, pageShell, renderErrorPage, resolveViewSession } from "./viewAuth.ts";
+import {
+  DATA_FETCH_FAILED_MESSAGE,
+  decodeUrlSegment,
+  escapeHtml,
+  html,
+  pageShell,
+  renderErrorPage,
+  resolveViewSession,
+} from "./viewAuth.ts";
 
 function renderTripFolderList(token: string, folders: DriveFolderSummary[]): string {
   const nav = { token, active: "trips" as const };
@@ -97,7 +105,7 @@ export async function handleViewTripsRequest(request: Request, env: Env): Promis
   }
 
   if (url.pathname.startsWith(TRIPS_PATH_PREFIX)) {
-    const folderId = decodeURIComponent(url.pathname.slice(TRIPS_PATH_PREFIX.length));
+    const folderId = decodeUrlSegment(url.pathname.slice(TRIPS_PATH_PREFIX.length));
     if (!folderId) return html(renderErrorPage("ไม่พบทริป", "ไม่พบทริปที่ขอ"), 404);
 
     const pageToken = url.searchParams.get("page") ?? undefined;
@@ -123,7 +131,7 @@ export async function handleViewPhotoRequest(request: Request, env: Env): Promis
   if (session instanceof Response) return session;
 
   const url = new URL(request.url);
-  const fileId = decodeURIComponent(url.pathname.slice(PHOTO_PATH_PREFIX.length));
+  const fileId = decodeUrlSegment(url.pathname.slice(PHOTO_PATH_PREFIX.length));
   if (!fileId) return html(renderErrorPage("ไม่พบรูป", "ไม่พบรูปที่ขอ"), 404);
 
   try {

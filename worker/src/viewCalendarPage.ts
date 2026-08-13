@@ -69,7 +69,12 @@ export async function handleViewCalendarRequest(request: Request, env: Env): Pro
   try {
     const today = bangkokDateKey();
     const rangeStart = addDaysToDateKey(today, -DAYS_BEFORE);
-    const rangeEnd = addDaysToDateKey(today, DAYS_AFTER);
+    // listCalendarEvents' timeMax is exclusive (Google Calendar API
+    // convention), so an event landing exactly on the DAYS_AFTER-th day
+    // would otherwise fall outside the window despite the page's own
+    // subtitle claiming it's included — +1 so "60 วันข้างหน้า" genuinely
+    // covers day 60, not just up to the start of it.
+    const rangeEnd = addDaysToDateKey(today, DAYS_AFTER + 1);
     const events = await listCalendarEvents(
       session.accessToken,
       bangkokStartOfDayIso(rangeStart),

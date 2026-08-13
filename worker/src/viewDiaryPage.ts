@@ -9,6 +9,8 @@ import { readAllDiaryEntries, type DiaryRow } from "./sheets.ts";
 import { bangkokMonthKey } from "./thaiDate.ts";
 import { DATA_FETCH_FAILED_MESSAGE, escapeHtml, html, pageShell, renderErrorPage, resolveViewSession } from "./viewAuth.ts";
 
+const MONTH_KEY_PATTERN = /^\d{4}-\d{2}$/;
+
 function shiftMonthKey(monthKey: string, delta: number): string {
   const [y, m] = monthKey.split("-").map(Number);
   const d = new Date(Date.UTC(y, m - 1 + delta, 1));
@@ -74,7 +76,12 @@ export async function handleViewDiaryRequest(request: Request, env: Env): Promis
   if (session instanceof Response) return session;
 
   const url = new URL(request.url);
-  const month = url.searchParams.get("month") || bangkokMonthKey();
+  const requestedMonth = url.searchParams.get("month");
+  // A malformed month (bad copy-paste, hand-edited URL) would otherwise
+  // flow straight into shiftMonthKey's Number() parsing and produce
+  // "NaN-NaN" prev/next links that can never recover — falls back to the
+  // current month instead of trusting the query param's shape.
+  const month = requestedMonth && MONTH_KEY_PATTERN.test(requestedMonth) ? requestedMonth : bangkokMonthKey();
 
   try {
     const allRows = await readAllDiaryEntries(session.accessToken, session.spreadsheetId, env.ACCOUNTS);

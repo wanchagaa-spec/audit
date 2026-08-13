@@ -20,6 +20,19 @@ export function html(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
+/** decodeURIComponent throws on malformed percent-encoding (e.g. a lone
+ * "%" or an invalid UTF-8 sequence) instead of returning something — used
+ * for path segments taken straight from the URL (trip folder/photo ids),
+ * where that input is untrusted and a bad link shouldn't crash the whole
+ * request. */
+export function decodeUrlSegment(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")

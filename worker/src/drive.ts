@@ -94,7 +94,11 @@ export async function listFilesInFolder(
   folderId: string,
   pageToken?: string
 ): Promise<DriveFileListPage> {
-  const q = `mimeType!='${FOLDER_MIME}' and trashed=false and '${folderId}' in parents`;
+  // folderId comes straight from the URL path in the web viewer
+  // (/view/trips/:folderId) — untrusted input, same as any folder *name*
+  // elsewhere in this file, so it needs the same escaping or a crafted id
+  // containing a quote could break out of the `'...' in parents` clause.
+  const q = `mimeType!='${FOLDER_MIME}' and trashed=false and '${escapeDriveQueryValue(folderId)}' in parents`;
   const params = new URLSearchParams({
     q,
     fields: "nextPageToken,files(id,name,mimeType)",
@@ -110,17 +114,24 @@ export async function listFilesInFolder(
   };
 }
 
-/** A trip folder's display name, or null if it doesn't exist / isn't
- * reachable with this access token (deliberately swallowed here rather
- * than thrown — the caller treats "no name" as "no such trip" either way,
- * whether the folder was deleted or just never belonged to this account). */
+/** A trip folder's display name, or null specifically when it doesn't
+ * exist (or isn't reachable with this access token — same 404 either
+ * way). Any other failure throws instead, same distinction
+ * fetchDriveFileContent makes and for the same reason: driveFetch's
+ * generic "throw on any non-ok response" would otherwise collapse a
+ * transient 5xx into the same null as "no such trip," which the caller
+ * renders as a flat "not found" — misleading for a failure a retry would
+ * have fixed. */
 export async function getFileName(accessToken: string, fileId: string): Promise<string | null> {
-  try {
-    const data = await driveFetch(accessToken, `/files/${encodeURIComponent(fileId)}?fields=name`);
-    return data.name ?? null;
-  } catch {
-    return null;
+  const res = await fetch(`${DRIVE_BASE}/files/${encodeURIComponent(fileId)}?fields=name`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    throw new Error(`Google Drive API error (${res.status}): ${await res.text()}`);
   }
+  const data = (await res.json()) as { name?: string };
+  return data.name ?? null;
 }
 
 /** Streams one file's raw bytes straight from Drive, or null specifically
