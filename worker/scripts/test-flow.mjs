@@ -327,7 +327,7 @@ const {
 } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
 const { verifyState } = await import("../src/signedState.ts");
-const { bangkokDateKey, addDaysToDateKey } = await import("../src/thaiDate.ts");
+const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 
 async function signLineBody(rawBody, secret) {
@@ -1255,6 +1255,16 @@ check(
   lastGeminiRequest.systemInstruction.includes("รายรับรวม") &&
     lastGeminiRequest.systemInstruction.includes("รายจ่ายรวม") &&
     lastGeminiRequest.systemInstruction.includes("ห้ามคำนวณหรือเดาตัวเลขเอง")
+);
+// Regression test for a real report: asked "วันนี้วันที่" (what's today's
+// date), Gemini answered a day off — it was never actually told today's
+// date, only handed a calendar range that started from it, so it had to
+// infer "today" itself instead of being given the fact outright, same
+// mistake the money guardrail above already exists to prevent.
+check(
+  "the prompt states today's actual date explicitly, not left for Gemini to infer",
+  lastGeminiRequest.systemInstruction.includes(`วันนี้คือวันที่ ${formatThaiDateLabel(bangkokDateKey())}`) &&
+    lastGeminiRequest.systemInstruction.includes("ห้ามเดาหรือคำนวณเอง")
 );
 
 const aiAnalyzeReply = await handleTextMessage(env, lineUserId, "วิเคราะห์", origin);
