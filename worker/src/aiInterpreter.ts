@@ -52,6 +52,7 @@ export type InterpretedIntent =
   | { intent: "set_province"; provinceName: string }
   | { intent: "question"; question: string }
   | { intent: "help" }
+  | { intent: "view_link" }
   | { intent: "chitchat"; reply: string }
   | { intent: "unclear"; reply: string };
 
@@ -171,6 +172,8 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     }
     case "help":
       return { intent: "help" };
+    case "view_link":
+      return { intent: "view_link" };
     case "chitchat": {
       if (!isNonEmptyString(r.reply)) return null;
       return { intent: "chitchat", reply: r.reply };
@@ -221,12 +224,28 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"set_province","provinceName":string} — ตั้งจังหวัด/เมืองสำหรับพยากรณ์อากาศ',
     '{"intent":"question","question":string} — คำถามเกี่ยวกับเงิน/นัดหมาย/ไดอารี่/สภาพอากาศ/ข่าวของผู้ใช้ (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
     '{"intent":"help"} — ขอดูวิธีใช้/คำสั่งทั้งหมด',
+    '{"intent":"view_link"} — ขอลิงก์เปิดดูข้อมูล/บัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บเบราว์เซอร์ (เช่น "เปิดเว็บ", "ขอลิงก์เว็บ", "ดูเว็บไซต์หน่อย", "เปิดดูเว็บข้อมูล") — มีฟีเจอร์นี้จริง อย่าตอบว่าทำไม่ได้',
     '{"intent":"chitchat","reply":string} — พูดคุยทั่วไปที่ไม่ใช่คำสั่งอะไร (ทักทาย ชม คุยเล่น) ให้ตอบกลับตามธรรมชาติสั้นๆใน reply',
     '{"intent":"unclear","reply":string} — ข้อมูลสำคัญไม่ครบจะตัดสินใจ (เช่น มีจำนวนเงินแต่ไม่รู้ว่าซื้ออะไร, บอกจะนัดแต่ไม่มีวันที่/เวลา) ให้ reply เป็นคำถามกลับไปถามข้อมูลที่ขาดเท่านั้น',
     "",
     "กติกาสำคัญที่ห้ามฝ่าฝืน:",
     "- ห้ามสร้างตัวเลข วันที่ เวลา หรือข้อมูลใดๆ ที่ไม่ได้อยู่ในข้อความหรือบริบทการคุยจริงๆ ถ้าขาดข้อมูลสำคัญให้ใช้ intent unclear แทนการเดา",
     "- categoryId ต้องเป็นค่าที่มีอยู่จริงในลิสต์หมวดหมู่ข้างบนเท่านั้น และต้อง type ตรงกับ income/expense ที่เลือก",
+    // Found in a real report: the bot proposed creating a calendar event
+    // ("จะสร้างนัด: ... ใช่ไหม?"), the user replied restating one detail
+    // ("ฉันนัดตอน 17.00 นะ") instead of the exact "ใช่" word the confirm step
+    // needs — that decline silently clears the draft (confirmations.ts), and
+    // without this rule the interpreter re-asked for the appointment's name
+    // AND date from scratch, ignoring that both were right there in the
+    // previous turn. Reconstructing the same intent from history costs
+    // nothing safety-wise: it still only ever produces a fresh
+    // confirm-before-save prompt (PLAN.md 17.9), never a direct save.
+    '- ถ้าข้อความบอทล่าสุดในประวัติเป็นคำถามยืนยัน (ลงท้ายด้วย "ใช่ไหม?" หรือมี "(พิมพ์ \\"ใช่\\" เพื่อยืนยัน)") และข้อความล่าสุดของผู้ใช้ดูเหมือนกำลังตอบ/แก้ไข/เสริมรายละเอียดของสิ่งเดียวกัน (ไม่ใช่หัวข้อใหม่) ให้รวมข้อมูลเดิมจากคำถามนั้นเข้ากับข้อความใหม่ แล้วสร้าง intent เดิมขึ้นใหม่ทั้งหมด (เช่น calendar_create/transaction) แทนที่จะถามข้อมูลที่มีอยู่แล้วซ้ำ — ใช้ intent unclear เฉพาะตอนข้อมูลยังขาดจริงๆ แม้รวมกับประวัติแล้ว',
+    // Found in the same report: a persona-styling pass afterward (persona.ts)
+    // sometimes drifted the character's voice to male pronouns (ผม/ครับ)
+    // when restyling a reply generated here — giving it the right voice from
+    // the start reduces how much that second pass needs to change.
+    `- เวลาแต่งข้อความเองใน reply (chitchat/unclear) ให้ใช้น้ำเสียงคาแรคเตอร์ "${BOT_NAME}" ผู้หญิงน่ารัก สรรพนาม "ฉัน" ลงท้ายด้วย "ค่ะ"/"นะคะ" เท่านั้น ห้ามใช้ "ผม"/"ครับ" หรือสรรพนามผู้ชายเด็ดขาด และต้องเป็นประโยคภาษาไทยที่ถูกต้อง อ่านเข้าใจง่าย ห้ามแต่งคำที่ไม่มีความหมาย`,
     "- ตอบเป็น JSON ล้วนๆ เท่านั้น ไม่มีข้อความอื่นใดๆ ก่อนหรือหลัง JSON",
   ].join("\n");
 }

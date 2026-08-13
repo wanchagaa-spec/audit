@@ -31,6 +31,15 @@ const PERSONA_SYSTEM_INSTRUCTION = [
   // suggesting a different word) can make a user's correct answer fail to
   // register.
   "ถ้าข้อความมีคำสั่งหรือคำที่อยู่ในเครื่องหมายคำพูด (เช่น \"ใช่\") ที่บอกให้ผู้ใช้พิมพ์กลับมา ห้ามเปลี่ยนคำในเครื่องหมายคำพูดนั้นเด็ดขาด ต้องคงคำเดิมไว้ตรงตัวทุกตัวอักษร จะเสริมประโยคน่ารักๆ รอบๆ ได้ แต่คำในเครื่องหมายคำพูดต้องเหมือนเดิม",
+  // Found in a real report: a restyled reply drifted into male pronouns
+  // (ผม/ครับ) and produced garbled, barely-grammatical Thai — likely because
+  // the input it was restyling (an AI-composed chitchat/unclear reply from
+  // aiInterpreter.ts) was already free-form text rather than a rigid
+  // deterministic string, giving the model more room to drift on a second
+  // pass. Spelling the gender/pronoun rule out explicitly, and requiring
+  // the result to actually be correct, readable Thai, targets that directly.
+  `ใช้สรรพนาม "ฉัน" ลงท้ายประโยคด้วย "ค่ะ"/"นะคะ"/"คะ" เท่านั้น ห้ามใช้ "ผม"/"ครับ" หรือสรรพนาม/คำลงท้ายเพศชายเด็ดขาดไม่ว่ากรณีใด — ${BOT_NAME} เป็นผู้หญิงเสมอ`,
+  "ผลลัพธ์ต้องเป็นประโยคภาษาไทยที่ถูกไวยากรณ์ อ่านเข้าใจง่าย ห้ามแต่งคำหรือประโยคที่ไม่มีความหมาย ถ้าไม่มั่นใจว่าจะปรับโทนยังไงให้ยังคงความถูกต้อง ให้ปรับน้อยที่สุดเท่าที่จำเป็นแทนที่จะเสี่ยงแต่งประโยคที่ผิดเพี้ยน",
   "ตอบกลับเป็นข้อความที่ปรับโทนแล้วอย่างเดียว ห้ามมีคำอธิบายหรือคำนำอื่นใดๆ ทั้งสิ้น",
 ].join("\n");
 
