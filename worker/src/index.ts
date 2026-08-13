@@ -42,6 +42,8 @@ import {
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand } from "./transactionCommands.ts";
 import { matchTripCommand } from "./tripCommands.ts";
+import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
+import { handleViewRequest } from "./viewPages.ts";
 import {
   countQueuedForUser,
   deleteQueueEntry,
@@ -61,7 +63,7 @@ export interface Env {
 }
 
 const WELCOME_MESSAGE = [
-  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 6 เรื่องหลักๆ:",
+  "สวัสดีค่ะ 👋 ฉันเป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 7 เรื่องหลักๆ:",
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
@@ -69,6 +71,7 @@ const WELCOME_MESSAGE = [
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
   "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
+  "🌐 พิมพ์ \"เปิดเว็บดูข้อมูล\" เพื่อขอลิงก์ดูสรุปบัญชีผ่านเว็บ",
   "",
   "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
 ].join("\n");
@@ -285,6 +288,12 @@ export async function handleTextMessage(
     const provinceHandler = matchProvinceCommand(text);
     if (provinceHandler) {
       return await provinceHandler(env.ACCOUNTS, lineUserId);
+    }
+
+    // Same reasoning as the province handler above — minting a view-link
+    // token only needs STATE_SIGNING_SECRET, no Google auth at all.
+    if (matchViewLinkCommand(text)) {
+      return await buildViewLinkReply(env, lineUserId, origin);
     }
 
     // Checked before reportHandler below: "ลบรายการล่าสุด"/"ยกเลิกรายการล่าสุด"
@@ -829,6 +838,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
+    if (url.pathname === "/view") return handleViewRequest(request, env);
     if (url.pathname === "/webhook" && request.method === "POST") {
       const body = await verifyAndParseWebhookBody(request, env);
       if (!body) return new Response("invalid signature", { status: 401 });

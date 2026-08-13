@@ -420,7 +420,7 @@ const {
   default: worker,
 } = await import("../src/index.ts");
 const { setAccountLink } = await import("../src/state.ts");
-const { verifyState } = await import("../src/signedState.ts");
+const { verifyState, signState, signViewToken, verifyViewToken } = await import("../src/signedState.ts");
 const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
@@ -601,7 +601,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("6 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("7 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -611,7 +611,7 @@ await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // tr
 const greetingWhilePendingReply = await handleTextMessage(env, lineUserId, "หวัดดีครับ", origin);
 check(
   "a greeting mid-clarification cancels it via chatEngine, not the rich welcome",
-  !greetingWhilePendingReply.includes("6 เรื่องหลักๆ")
+  !greetingWhilePendingReply.includes("7 เรื่องหลักๆ")
 );
 const afterGreetingReply = await handleTextMessage(env, lineUserId, "ข้าว 30", origin);
 check(
@@ -629,7 +629,7 @@ await env.ACCOUNTS.put(`last-greeting:${lineUserId}`, "2000-01-01");
 const briefingNoProvinceReply = await handleTextMessage(env, lineUserId, "มอนิ่ง", origin);
 check(
   "a first-greeting-of-the-day (not first-ever) gets the morning briefing, not the welcome message",
-  !briefingNoProvinceReply.includes("6 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
+  !briefingNoProvinceReply.includes("7 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
 );
 check(
   "with no province set, the briefing suggests setting one instead of showing weather",
@@ -1571,6 +1571,76 @@ check(
   aiCalendarFailReply.includes("[mock AI answer]") && !aiCalendarFailReply.includes("Google Cloud Console")
 );
 simulateCalendarApiDisabled = false;
+
+// Web viewer (PLAN.md 16): "เปิดเว็บดูข้อมูล" mints a signed link to a
+// read-only /view page instead of requiring a fresh Google sign-in in the
+// browser — exercises the whole path: chat command -> signed token ->
+// real fetch handler -> HTML response, plus the guardrails a leaked/
+// tampered/wrong-purpose token needs.
+const viewLinkReply = await handleTextMessage(env, lineUserId, "เปิดเว็บดูข้อมูล", origin);
+const viewLinkMatch = viewLinkReply.match(/https?:\/\/\S+\/view\?token=\S+/);
+check("\"เปิดเว็บดูข้อมูล\" replies with a /view link", viewLinkMatch !== null);
+const viewLinkUrl = viewLinkMatch[0];
+const viewToken = new URL(viewLinkUrl).searchParams.get("token");
+
+// Injects a transaction with an HTML-special-characters note directly
+// into the mocked sheet (bypassing the chat parser, which isn't what's
+// under test here) so the escaping test below is unambiguous about what
+// it's checking, dated today so it lands inside the current month filter
+// /view uses.
+sheetRows.push([
+  "xss-test-id",
+  bangkokDateKey(),
+  "expense",
+  111,
+  "other",
+  "<script>alert(1)</script>",
+  "<script>alert(1)</script> 111",
+  lineUserId,
+  "tester",
+  new Date().toISOString(),
+]);
+
+const viewPageResponse = await worker.fetch(new Request(viewLinkUrl), env, new FakeExecutionContext());
+const viewPageHtml = await viewPageResponse.text();
+check("a valid view token renders the accounts summary page", viewPageResponse.status === 200 && viewPageHtml.includes("สรุปบัญชี"));
+check(
+  "the summary page shows totals labels",
+  viewPageHtml.includes("รายรับ") && viewPageHtml.includes("รายจ่าย") && viewPageHtml.includes("คงเหลือ")
+);
+check(
+  "a transaction note containing HTML is escaped, not rendered as live markup — the one place in this codebase user text lands in actual HTML",
+  viewPageHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt;") && !viewPageHtml.includes("<script>alert(1)</script>")
+);
+
+const viewNoTokenResponse = await worker.fetch(new Request(`${origin}/view`), env, new FakeExecutionContext());
+check("/view with no token shows a friendly message, not a raw error", viewNoTokenResponse.status === 400 && (await viewNoTokenResponse.text()).includes("เปิดเว็บดูข้อมูล"));
+
+const tamperedToken = viewToken.slice(0, -2) + "xx";
+const viewTamperedResponse = await worker.fetch(new Request(`${origin}/view?token=${tamperedToken}`), env, new FakeExecutionContext());
+check("a tampered view token is rejected", viewTamperedResponse.status === 400);
+
+const unlinkedViewToken = await signViewToken("Uneverlinkeduser", env.STATE_SIGNING_SECRET);
+const viewUnlinkedResponse = await worker.fetch(new Request(`${origin}/view?token=${unlinkedViewToken}`), env, new FakeExecutionContext());
+check(
+  "a view token for an account that never linked shows a friendly prompt to link first",
+  viewUnlinkedResponse.status === 400 && (await viewUnlinkedResponse.text()).includes("ยังไม่ได้เชื่อมบัญชี")
+);
+
+// Regression test for the exact hijack scenario signedState.ts's top
+// comment describes: OAuth `state` and the view token share the same
+// {u, t} shape and secret, so without a purpose tag either one would
+// verify as the other.
+const forgedOauthStateFromViewToken = await signViewToken(lineUserId, env.STATE_SIGNING_SECRET);
+check(
+  "a view token can't be replayed as an OAuth state",
+  (await verifyState(forgedOauthStateFromViewToken, env.STATE_SIGNING_SECRET)) === null
+);
+const forgedViewTokenFromOauthState = await signState(lineUserId, env.STATE_SIGNING_SECRET);
+check(
+  "an OAuth state can't be replayed as a view token",
+  (await verifyViewToken(forgedViewTokenFromOauthState, env.STATE_SIGNING_SECRET)) === null
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
