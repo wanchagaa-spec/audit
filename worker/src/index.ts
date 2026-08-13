@@ -683,9 +683,12 @@ function pushTargetId(source: LineEventSource): string {
 
 // The KV/account-state key for an event's sender — a real personal LINE
 // userId for 1:1 chat, or the synthesized group subject id for a group
-// (see groupSubjectId's own comment), so a photo batch groups by "whose
-// shared trip is this" rather than by individual sender.
-function mediaSubjectId(source: LineEventSource): string {
+// (see groupSubjectId's own comment). Used to group both media events
+// ("whose shared trip is this") and text events (see
+// processWebhookEvents — every event for the same subject shares one
+// pendingConfirmation slot in state.ts, so they need to run one at a time,
+// not concurrently, to avoid racing on it).
+function subjectIdForSource(source: LineEventSource): string {
   return source.type === "group" ? groupSubjectId(source.groupId) : source.userId;
 }
 
@@ -880,6 +883,45 @@ async function verifyAndParseWebhookBody(request: Request, env: Env): Promise<Li
   return JSON.parse(rawBody) as LineWebhookBody;
 }
 
+// One text/unsupported event, start to finish (matcher dispatch, reply).
+// Extracted out of processWebhookEvents so it can be called from within a
+// per-subject sequential loop there instead of as a flat concurrency-limited
+// callback — see that call site's comment for why.
+async function handleOneOtherEvent(
+  event: LineWebhookBody["events"][number],
+  env: Env,
+  origin: string,
+  tokenCache: TokenCache
+): Promise<void> {
+  try {
+    if (isTextMessageEvent(event)) {
+      if (event.source.type === "group") {
+        // Every message in a group the bot belongs to reaches this
+        // webhook, addressed to the bot or not — LINE does no filtering
+        // on its side (PLAN.md 17). Silently skip anything that doesn't
+        // tag the bot, without touching any state at all, so ordinary
+        // conversation between group members never gets treated as a
+        // command or a pending-clarification answer.
+        const selfMention = findSelfMention(event.message);
+        if (!selfMention) return;
+        const text = stripSelfMention(event.message.text, selfMention);
+        const reply = await handleGroupTextMessage(env, event.source.groupId, event.source.userId, text, origin, tokenCache);
+        await replyOrPush(event, reply, env);
+        return;
+      }
+      const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
+      await replyOrPush(event, reply, env);
+    } else if (isUnsupportedMessageEvent(event)) {
+      await replyOrPush(event, "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ", env);
+    }
+  } catch (err) {
+    if (isTextMessageEvent(event) || isUnsupportedMessageEvent(event)) {
+      await replyOrPush(event, "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ", env).catch(() => undefined);
+    }
+    console.error("webhook handling failed", err);
+  }
+}
+
 // All the real work for one webhook call: uploading media, sending replies,
 // everything. Split out from handleWebhook so the production fetch handler
 // can run it via ctx.waitUntil() *after* already responding to LINE — see
@@ -909,43 +951,43 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
   const mediaEventSet = new Set<LineWebhookBody["events"][number]>(mediaEvents);
   const otherEvents = body.events.filter((event) => !mediaEventSet.has(event));
 
-  // Processed with bounded concurrency rather than one-at-a-time or all at
-  // once — see WEBHOOK_EVENT_CONCURRENCY above for why neither extreme
-  // works: events used to be handled fully sequentially, so each one's
-  // reply had to wait for every earlier one's full round-trip first, making
-  // later replies far more likely to miss their token's short window (see
-  // replyOrPush); running a whole batch fully concurrently instead fixed
-  // that but could spike too many subrequests in flight at once for a large
-  // batch.
-  await processWithConcurrencyLimit(otherEvents, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
-    try {
-      if (isTextMessageEvent(event)) {
-        if (event.source.type === "group") {
-          // Every message in a group the bot belongs to reaches this
-          // webhook, addressed to the bot or not — LINE does no filtering
-          // on its side (PLAN.md 17). Silently skip anything that doesn't
-          // tag the bot, without touching any state at all, so ordinary
-          // conversation between group members never gets treated as a
-          // command or a pending-clarification answer.
-          const selfMention = findSelfMention(event.message);
-          if (!selfMention) return;
-          const text = stripSelfMention(event.message.text, selfMention);
-          const reply = await handleGroupTextMessage(env, event.source.groupId, event.source.userId, text, origin, tokenCache);
-          await replyOrPush(event, reply, env);
-          return;
-        }
-        const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
-        await replyOrPush(event, reply, env);
-      } else if (isUnsupportedMessageEvent(event)) {
-        await replyOrPush(event, "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ", env);
+  // Grouped by subject (same subjectIdForSource used for media above) so
+  // two events for the same subject can never run concurrently — found in
+  // review: they'd otherwise race on the single shared pendingConfirmation
+  // KV slot (state.ts) that money logging and calendar/diary/trip
+  // confirmations all use, e.g. one event creating a fresh draft right as
+  // another confirms an older one, silently confirming the wrong thing (or
+  // losing the newer draft). LINE really can bundle several messages for
+  // the same person/group into one webhook call — see the media-ordering
+  // comment above for another real instance of this. Different subjects
+  // still run concurrently, bounded by WEBHOOK_EVENT_CONCURRENCY — see its
+  // own comment for why neither fully serial nor fully concurrent works —
+  // so an ordinary batch (rarely more than a handful of distinct senders)
+  // keeps the same throughput as before; only same-subject events are now
+  // forced one at a time.
+  const otherEventsBySubject = new Map<string, typeof otherEvents>();
+  for (const event of otherEvents) {
+    // Only text/unsupported events (the two kinds handleOneOtherEvent
+    // actually does anything with) have a real, typed `source` — LINE's
+    // other event types (follow/unfollow/join/leave/etc., none of which
+    // this bot handles) fall through isTextMessageEvent/
+    // isUnsupportedMessageEvent and get silently ignored either way, so
+    // their grouping key doesn't matter.
+    const subjectId =
+      isTextMessageEvent(event) || isUnsupportedMessageEvent(event) ? subjectIdForSource(event.source) : "unrecognized";
+    const forSubject = otherEventsBySubject.get(subjectId) ?? [];
+    forSubject.push(event);
+    otherEventsBySubject.set(subjectId, forSubject);
+  }
+  await processWithConcurrencyLimit(
+    [...otherEventsBySubject.values()],
+    WEBHOOK_EVENT_CONCURRENCY,
+    async (subjectEvents) => {
+      for (const event of subjectEvents) {
+        await handleOneOtherEvent(event, env, origin, tokenCache);
       }
-    } catch (err) {
-      if (isTextMessageEvent(event) || isUnsupportedMessageEvent(event)) {
-        await replyOrPush(event, "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ", env).catch(() => undefined);
-      }
-      console.error("webhook handling failed", err);
     }
-  });
+  );
 
   // Media events (image/video) are always queued (uploadQueue.ts) and never
   // uploaded inline here — grouped by sender, one combined reply per sender.
@@ -962,7 +1004,7 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
     // batch/trip regardless of which member actually sent each one.
     const eventsBySubject = new Map<string, Array<LineImageMessageEvent | LineVideoMessageEvent>>();
     for (const event of mediaEvents) {
-      const subjectId = mediaSubjectId(event.source);
+      const subjectId = subjectIdForSource(event.source);
       const forSubject = eventsBySubject.get(subjectId) ?? [];
       forSubject.push(event);
       eventsBySubject.set(subjectId, forSubject);

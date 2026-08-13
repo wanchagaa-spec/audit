@@ -622,7 +622,15 @@ Two things, requested together:
   is fixed to whoever actually completed the draft, not whoever happens to type "ใช่". The
   confirmation-word check (`isAffirmative`, `confirmations.ts`) strips common polite particles
   ("ครับ"/"ค่ะ"/"จ้า"/etc.) before matching, since a natural "ใช่ครับ" used to fail the old
-  exact-match check and silently discard the pending save.
+  exact-match check and silently discard the pending save. `resolveConfirmation` also only clears
+  the pending slot *after* a successful save — a transient failure leaves the draft in place so a
+  retried "ใช่" alone recovers it, instead of forcing a full retype.
+- **Events for the same subject in one webhook call are processed one at a time, not
+  concurrently** (PLAN.md 17.10) — every subject shares one `pendingConfirmation` KV slot, so two
+  events for the same person/group landing in the same webhook call (LINE really does bundle
+  multiple messages together sometimes) used to be able to race on it, e.g. one confirming a
+  draft the other had only just replaced. Different subjects still process concurrently, so an
+  ordinary batch (almost always different senders) keeps the same throughput as before.
 
 ## Local development
 
