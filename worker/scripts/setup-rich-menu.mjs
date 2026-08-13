@@ -19,10 +19,9 @@ const imagePath = join(__dirname, "..", "assets", "rich-menu.png");
 
 // Tap area texts must exactly match phrases the bot already understands
 // (see src/commands.ts, tripCommands.ts, calendarCommands.ts, diaryCommands.ts,
-// aiCommands.ts) — a rich menu tap sends the text as an ordinary message,
-// nothing special. Bounds must stay in sync with the 4x2 grid drawn in
-// assets/generate-rich-menu.py (625x843 per tile) — only 7 of the 8 tiles
-// get an area here; the 8th (bottom-right) is a non-tappable brand tile.
+// aiCommands.ts, viewCommands.ts) — a rich menu tap sends the text as an
+// ordinary message, nothing special. Bounds must stay in sync with the 4x2
+// grid drawn in assets/generate-rich-menu.py (625x843 per tile).
 const richMenuDefinition = {
   size: { width: 2500, height: 1686 },
   selected: true,
@@ -39,6 +38,7 @@ const richMenuDefinition = {
       action: { type: "message", text: "ไดอารี่เดือนนี้มีอะไรบ้าง" },
     },
     { bounds: { x: 1250, y: 843, width: 625, height: 843 }, action: { type: "message", text: "วิเคราะห์" } },
+    { bounds: { x: 1875, y: 843, width: 625, height: 843 }, action: { type: "message", text: "เปิดเว็บดูข้อมูล" } },
   ],
 };
 

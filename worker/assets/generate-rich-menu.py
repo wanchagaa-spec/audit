@@ -26,12 +26,13 @@ HERE = Path(__file__).parent
 FONT_DIR = HERE / "fonts"
 
 # LINE rich menu images must be one of a few fixed sizes; 2500x1686 is the
-# standard "full" size. 4x2 divides evenly (625x843 per tile) and fits 7
-# real command tiles plus one non-tappable brand tile (see BUTTONS below) —
-# grew from the original 3x2 grid when the AI Q&A feature (PLAN.md 15.10)
-# needed a spot; checked with Pillow's textbbox first that every existing
-# title still fits comfortably at the narrower width before committing to
-# this over shrinking fonts or an uneven per-row column count.
+# standard "full" size. 4x2 divides evenly (625x843 per tile) and fits 8
+# real command tiles (see BUTTONS below) — grew from the original 3x2 grid
+# when the AI Q&A feature (PLAN.md 15.10) needed a spot; checked with
+# Pillow's textbbox first that every existing title still fits comfortably
+# at the narrower width before committing to this over shrinking fonts or
+# an uneven per-row column count. The 8th slot was a non-tappable brand
+# tile until the web viewer (PLAN.md 16) gave it an actual command to hold.
 WIDTH, HEIGHT = 2500, 1686
 COLS, ROWS = 4, 2
 
@@ -133,16 +134,13 @@ def icon_sparkle(draw, cx, cy, r, color):
     draw.polygon(pts, fill=color)
 
 
-def icon_wallet(draw, cx, cy, r, stroke, color):
-    w, h = r * 1.8, r * 1.3
-    x0, y0 = cx - w / 2, cy - h / 2
-    draw.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=h * 0.18, outline=color, width=stroke)
-    clasp_r = h * 0.16
+def icon_globe(draw, cx, cy, r, stroke, color):
+    rad = r * 0.85
+    draw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], outline=color, width=stroke)
     draw.ellipse(
-        [x0 + w - clasp_r * 1.6, cy - clasp_r, x0 + w - clasp_r * 1.6 + clasp_r * 2, cy + clasp_r],
-        outline=color,
-        width=max(2, stroke - 6),
+        [cx - rad * 0.42, cy - rad, cx + rad * 0.42, cy + rad], outline=color, width=max(2, stroke - 4)
     )
+    draw.line([cx - rad, cy, cx + rad, cy], fill=color, width=max(2, stroke - 4))
 
 
 BUTTONS = [
@@ -153,10 +151,10 @@ BUTTONS = [
     {"title": "นัดวันนี้", "sub": "TODAY'S EVENTS", "icon": "calendar"},
     {"title": "ไดอารี่เดือนนี้", "sub": "DIARY", "icon": "diary"},
     {"title": "วิเคราะห์", "sub": "AI ANALYSIS", "icon": "sparkle"},
-    # Not a command — no tap area is defined for this cell in
-    # setup-rich-menu.mjs, so it's purely a brand tile that fills the 8th
-    # slot in the 4x2 grid instead of leaving a dead, unlabeled rectangle.
-    {"title": "ผู้ช่วยการเงิน", "sub": "LINE BOT", "icon": "wallet"},
+    # Used to be a non-tappable brand tile filling the dead 8th slot (a user
+    # asked why it couldn't be tapped) — now the web viewer's own tile
+    # (PLAN.md 16) instead, once there was an actual command worth the spot.
+    {"title": "เปิดเว็บดูข้อมูล", "sub": "WEB VIEW", "icon": "globe"},
 ]
 
 
@@ -184,8 +182,8 @@ def draw_icon(draw, kind, cx, cy, r, help_font):
         icon_diary(draw, cx, cy, r, ICON_STROKE, color)
     elif kind == "sparkle":
         icon_sparkle(draw, cx, cy, r, color)
-    elif kind == "wallet":
-        icon_wallet(draw, cx, cy, r, ICON_STROKE, color)
+    elif kind == "globe":
+        icon_globe(draw, cx, cy, r, ICON_STROKE, color)
 
 
 def main():
