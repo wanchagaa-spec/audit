@@ -84,6 +84,9 @@ let simulateGroupSummaryFailure = false; // makes the next group-summary lookup 
 let mockGroupName = "ทริปเพื่อน"; // the group name returned by the mocked group-summary endpoint
 let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to the upload queue, to exercise handleQueuedMediaBatch's outer catch
 let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
+let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling call (PLAN.md 17.9) return a recognizably different string instead of echoing, to verify styling actually happened
+let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
+let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
@@ -150,6 +153,10 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response(JSON.stringify({}), { status: 200 });
   }
   if (u.includes("Transactions!A1:append")) {
+    if (simulateTransactionAppendFailureOnce) {
+      simulateTransactionAppendFailureOnce = false;
+      return new Response(JSON.stringify({ error: { message: "simulated transient Sheets append failure" } }), { status: 500 });
+    }
     const body = JSON.parse(init.body);
     sheetRows.push(...body.values);
     return new Response(JSON.stringify({}), { status: 200 });
@@ -407,6 +414,34 @@ globalThis.fetch = async (url, init = {}) => {
     const systemInstruction = body.systemInstruction?.parts?.[0]?.text ?? "";
     const question = body.contents?.[0]?.parts?.[0]?.text ?? "";
     geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
+
+    // Persona-styling calls (PLAN.md 17.9, persona.ts) are identified by a
+    // marker phrase unique to that system instruction. By default they echo
+    // the input straight back — every other test in this file asserts on
+    // the bot's exact deterministic reply text, and would break if persona
+    // styling silently rewrote it under the hood. A test that specifically
+    // wants to verify persona styling actually happened sets
+    // simulatePersonaRewrite first, which returns a recognizably different
+    // string instead (one-shot, same pattern as simulateGeminiFailure).
+    if (systemInstruction.includes("ห้ามเปลี่ยนตัวเลข")) {
+      if (simulatePersonaDropQuote) {
+        simulatePersonaDropQuote = false;
+        // Simulates the exact failure mode found in review: the model
+        // "styles" a quoted instruction like '"ใช่"' into something that no
+        // longer contains it verbatim, e.g. dropping the quotes entirely.
+        const mangled = question.replace(/"([^"]+)"/g, "$1");
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: mangled }] } }] }), { status: 200 });
+      }
+      if (simulatePersonaRewrite) {
+        simulatePersonaRewrite = false;
+        return new Response(
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: `[persona] ${question}` }] } }] }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: question }] } }] }), { status: 200 });
+    }
+
     // A canned (not truly AI-generated) answer that echoes the question back,
     // so tests can assert the real question made it all the way through.
     return new Response(
@@ -585,18 +620,36 @@ await setAccountLink(kv, lineUserId, {
   displayName: "สมุดส่วนตัว",
 });
 
-// 3. A clean message logs a transaction directly.
-const okReply = await handleTextMessage(env, lineUserId, "ซื้อกาแฟ 60", origin);
-check("logs a clear expense", okReply.includes("60"));
+// Every transaction save now asks to confirm first (PLAN.md 17.9 —
+// requested explicitly: numbers/anything that gets saved must always be
+// confirmed, not just when the amount/category was ambiguous). This helper
+// sends the log message, checks it prompted for confirmation instead of
+// saving immediately, then confirms — for tests that don't need to inspect
+// the prompt text itself.
+async function logAndConfirm(userId, text, tokenCache) {
+  const promptReply = await handleTextMessage(env, userId, text, origin, tokenCache);
+  check(`"${text}" asks to confirm before saving, doesn't save immediately`, promptReply.includes("ใช่ไหม"));
+  return handleTextMessage(env, userId, "ใช่", origin, tokenCache);
+}
+
+// 3. A clean message asks to confirm, then logs the transaction once confirmed.
+const okReply = await logAndConfirm(lineUserId, "ซื้อกาแฟ 60");
+check("logs a clear expense once confirmed", okReply.includes("60"));
 check("wrote a row to the sheet", sheetRows.length === 1 && sheetRows[0][3] === 60);
 
-// 4. An ambiguous message triggers a clarification question, then resolves.
+// 4. An ambiguous message triggers a clarification question, then resolves
+// into a confirmation prompt (not an immediate save).
 const askReply = await handleTextMessage(env, lineUserId, "ซื้อของ", origin);
 check("asks for the missing amount", askReply.includes("จำนวนเงิน"));
 const resolveReply = await handleTextMessage(env, lineUserId, "120", origin);
 check("category still needed after amount", resolveReply.includes("หมวด"));
-const categoryReply = await handleTextMessage(env, lineUserId, "ช้อปปิ้ง", origin);
-check("clarification resolves into a saved transaction", categoryReply.includes("120"));
+const categoryPromptReply = await handleTextMessage(env, lineUserId, "ช้อปปิ้ง", origin);
+check(
+  "clarification resolves into a confirmation prompt, not an immediate save",
+  categoryPromptReply.includes("120") && categoryPromptReply.includes("ใช่ไหม")
+);
+const categoryReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("confirming saves the transaction", categoryReply.includes("120"));
 check("second row written to the sheet", sheetRows.length === 2 && sheetRows[1][3] === 120);
 
 // 5. Monthly summary command reads back what was written.
@@ -605,8 +658,8 @@ check("summary mentions total expense", summaryReply.includes("180"));
 
 // 6. More transactions to exercise the report commands with real spread:
 // food (100 total, 2 entries), shopping (120, 1 entry), income (5000).
-await handleTextMessage(env, lineUserId, "ข้าว 40", origin);
-await handleTextMessage(env, lineUserId, "เงินเดือนเข้า 5000", origin);
+await logAndConfirm(lineUserId, "ข้าว 40");
+await logAndConfirm(lineUserId, "เงินเดือนเข้า 5000");
 
 const todayReply = await handleTextMessage(env, lineUserId, "วันนี้ใช้ไปเท่าไหร่", origin);
 check("today's summary totals all three expenses (220)", todayReply.includes("220"));
@@ -637,6 +690,61 @@ check("search finds the matching transaction", searchReply.includes("40"));
 const recentReply = await handleTextMessage(env, lineUserId, "รายการล่าสุด", origin);
 check("recent transactions list is returned", recentReply.includes("5 รายการล่าสุด"));
 
+// Regression test for a real bug found in review: isAffirmative only
+// matched a bare exact word, so a natural reply like "ใช่ครับ"/"ใช่ค่ะ" to
+// the bot's own "...ใช่ไหม?" confirmation prompt failed the check and
+// silently discarded the pending draft — money the user believed they'd
+// just confirmed never got saved. Now matters far more than before PLAN.md
+// 17.9 (previously only calendar/diary/delete needed a confirm word at
+// all; now every transaction does too).
+const politeConfirmPromptReply = await handleTextMessage(env, lineUserId, "ค่าไฟ 45", origin);
+check("asks to confirm before saving (setup for the polite-confirmation check below)", politeConfirmPromptReply.includes("ใช่ไหม"));
+const rowCountBeforePoliteConfirm = sheetRows.length;
+const politeConfirmReply = await handleTextMessage(env, lineUserId, "ใช่ค่ะ", origin);
+check(
+  "a natural polite confirmation (\"ใช่ค่ะ\", not the bare \"ใช่\") still saves the transaction",
+  politeConfirmReply.includes("45") && sheetRows.length === rowCountBeforePoliteConfirm + 1
+);
+
+// Regression test for a real bug found in review: resolveConfirmation used
+// to clear the pendingConfirmation *before* attempting the save, so a
+// transient failure while actually appending to the sheet (a Sheets API
+// hiccup, here simulated) threw the draft away along with the error —
+// "ลองใหม่อีกครั้งนะ" actually meant retyping the whole entry from scratch.
+// Now the pending draft survives a failed attempt, so retrying "ใช่" alone
+// is enough. Goes through the real webhook path (handleWebhook), not a
+// direct handleTextMessage call, since the graceful "เกิดข้อผิดพลาด..."
+// fallback for an uncaught throw lives in processWebhookEvents, not inside
+// handleTextMessage itself.
+const transientFailurePromptBody = JSON.stringify({ events: [personalTextEvent("ค่าเน็ต 89", "reply-transient-1")] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(transientFailurePromptBody, env.LINE_CHANNEL_SECRET) }, body: transientFailurePromptBody }),
+  env
+);
+check("asks to confirm before saving (setup for the transient-failure retry check below)", replies.at(-1).includes("ใช่ไหม"));
+
+const rowCountBeforeTransientFailure = sheetRows.length;
+simulateTransactionAppendFailureOnce = true;
+const transientFailureBody = JSON.stringify({ events: [personalTextEvent("ใช่", "reply-transient-2")] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(transientFailureBody, env.LINE_CHANNEL_SECRET) }, body: transientFailureBody }),
+  env
+);
+check(
+  "a transient save failure surfaces an error instead of a false success, without saving anything",
+  replies.at(-1).includes("เกิดข้อผิดพลาด") && sheetRows.length === rowCountBeforeTransientFailure
+);
+
+const transientRetryBody = JSON.stringify({ events: [personalTextEvent("ใช่", "reply-transient-3")] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(transientRetryBody, env.LINE_CHANNEL_SECRET) }, body: transientRetryBody }),
+  env
+);
+check(
+  "retrying \"ใช่\" alone (no retyping) succeeds, since the draft survived the earlier failed attempt",
+  replies.at(-1).includes("89") && sheetRows.length === rowCountBeforeTransientFailure + 1
+);
+
 // Regression test for a real report: "ยกเลิกรายการล่าสุด" contains
 // "รายการล่าสุด" as a substring, which commands.ts's includesAny-based
 // report matcher used to catch first, just showing the list again instead
@@ -664,8 +772,13 @@ check(
 // category, etc.) so its own rows don't perturb numbers those already
 // checked against a known, fixed set of prior transactions.
 const rowCountBeforeMultiline = sheetRows.length;
-const multilineReply = await handleTextMessage(env, lineUserId, "อเมริกาโน่ 50\nลาเต้ 40\nเค้ก 80", origin);
-check("a 3-line batch writes 3 separate rows, not one", sheetRows.length === rowCountBeforeMultiline + 3);
+const multilinePromptReply = await handleTextMessage(env, lineUserId, "อเมริกาโน่ 50\nลาเต้ 40\nเค้ก 80", origin);
+check(
+  "a 3-line batch asks to confirm all 3 items before saving any of them",
+  multilinePromptReply.includes("ใช่ไหม") && sheetRows.length === rowCountBeforeMultiline
+);
+const multilineReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("confirming a 3-line batch writes 3 separate rows, not one", sheetRows.length === rowCountBeforeMultiline + 3);
 check(
   "every amount made it into the sheet, not just the first line's",
   sheetRows
@@ -1154,7 +1267,7 @@ check(
 );
 
 const declineReply = await handleTextMessage(env, lineUserId, "ซื้อกาแฟ 60", origin);
-check("declining the switch still logs the unrelated message as an expense", declineReply.includes("60"));
+check("declining the switch still treats the unrelated message as a normal expense attempt", declineReply.includes("60"));
 const statusAfterDecline = await handleTextMessage(env, lineUserId, "ทริปตอนนี้", origin);
 check("declined switch leaves the original trip open", statusAfterDecline.includes("ทะเล"));
 
@@ -1240,6 +1353,85 @@ const wrongSignatureRequest = new Request("http://localhost:8787/webhook", {
 });
 const wrongSignatureResponse = await handleWebhook(wrongSignatureRequest, env);
 check("an invalid LINE signature is still rejected", wrongSignatureResponse.status === 401);
+
+// AI persona layer (PLAN.md 17.9): restyles every reply the bot actually
+// sends to LINE, but only at that real outgoing boundary — never inside
+// handleTextMessage/handleGroupTextMessage's own return value, which every
+// other test in this file relies on staying byte-exact deterministic text.
+// Proves both halves of that design: a real webhook-driven reply passes
+// through persona styling, and a direct call to handleTextMessage for the
+// exact same text does not.
+function personalTextEvent(text, replyToken = "reply-persona-1") {
+  return {
+    type: "message",
+    message: { type: "text", text },
+    source: { type: "user", userId: lineUserId },
+    replyToken,
+    timestamp: Date.now(),
+  };
+}
+
+const directPersonaReply = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "a direct handleTextMessage call is never persona-styled — stays exact deterministic text",
+  !directPersonaReply.startsWith("[persona]")
+);
+
+simulatePersonaRewrite = true;
+const personaWebhookBody = JSON.stringify({ events: [personalTextEvent("สรุปเดือนนี้")] });
+const personaWebhookSignature = await signLineBody(personaWebhookBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforePersona = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": personaWebhookSignature }, body: personaWebhookBody }),
+  env
+);
+check(
+  "the same text sent through a real webhook call comes back persona-styled",
+  replies.length === repliesBeforePersona + 1 && replies.at(-1).startsWith("[persona]")
+);
+
+// A persona call that fails (quota, network, timeout — all surface as a
+// thrown error from askGemini) must fall back to the original deterministic
+// text, never break or silence the reply.
+simulateGeminiFailure = true;
+const personaFailureWebhookBody = JSON.stringify({ events: [personalTextEvent("สรุปเดือนนี้", "reply-persona-2")] });
+const personaFailureWebhookSignature = await signLineBody(personaFailureWebhookBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforePersonaFailure = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": personaFailureWebhookSignature }, body: personaFailureWebhookBody }),
+  env
+);
+check(
+  "a failed persona call falls back to the original unstyled reply instead of breaking it",
+  replies.length === repliesBeforePersonaFailure + 1 &&
+    !replies.at(-1).startsWith("[persona]") &&
+    replies.at(-1) === directPersonaReply
+);
+
+// Regression test for a real bug found in review: applyPersona used to
+// trust the styled output unconditionally — if Gemini dropped or reworded
+// a quoted instruction like '"ใช่"' despite being told not to (an
+// instruction, not a guarantee), the styled reply would go out with a
+// confirmation instruction the exact-match isAffirmative check could never
+// recognize, silently breaking the user's ability to confirm at all. Now
+// verifies every quoted span from the original survived, falling back to
+// the unstyled text otherwise.
+simulatePersonaDropQuote = true;
+const quoteDropWebhookBody = JSON.stringify({ events: [personalTextEvent("ชานมไข่มุก 25", "reply-persona-3")] });
+const quoteDropWebhookSignature = await signLineBody(quoteDropWebhookBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeQuoteDrop = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": quoteDropWebhookSignature }, body: quoteDropWebhookBody }),
+  env
+);
+check(
+  "a persona call that drops a quoted confirmation instruction falls back to the original reply, keeping the exact \"ใช่\" instruction intact",
+  replies.length === repliesBeforeQuoteDrop + 1 && replies.at(-1).includes('"ใช่"')
+);
+// Clean up the dangling pendingConfirmation this created directly (rather
+// than through a chat message, which would have side effects of its own),
+// so it doesn't interfere with anything later in the file sharing lineUserId.
+await kv.delete(`confirm:${lineUserId}`);
 
 // Regression test for a review finding on the fast-ack PR: the invalid-
 // signature check above only exercised handleWebhook directly, not the
@@ -1351,7 +1543,7 @@ check("no stray calendar event was created either", calendarEvents.length === ca
 // (no space before it, e.g. "ค่านัดหมอ") must NOT be hijacked into a
 // calendar-command attempt — the heuristic above only fires when "นัด" is a
 // standalone, whitespace-separated word.
-const doctorFeeReply = await handleTextMessage(env, lineUserId, "ค่านัดหมอ 500", origin);
+const doctorFeeReply = await logAndConfirm(lineUserId, "ค่านัดหมอ 500");
 check(
   "an expense with 'นัด' glued onto another word is still logged as money",
   doctorFeeReply.includes("500") && sheetRows.length === sheetRowsBeforeNadMisfire + 1
@@ -1931,8 +2123,13 @@ await setAccountLink(kv, `group:${groupId}`, {
 // account).
 groupMemberDisplayNames[groupSenderA] = "สมชาย";
 const groupSheetRowsBeforeLog = sheetRows.length;
-const groupLogReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ซื้อกาแฟ 60", origin);
-check("a clear expense logs in group mode same as personal mode", groupLogReply.includes("60"));
+const groupLogPromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ซื้อกาแฟ 60", origin);
+check(
+  "a clear expense asks to confirm in group mode too, same as personal mode, doesn't save immediately",
+  groupLogPromptReply.includes("ใช่ไหม") && sheetRows.length === groupSheetRowsBeforeLog
+);
+const groupLogReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ใช่", origin);
+check("confirming logs the expense in group mode", groupLogReply.includes("60"));
 check("exactly one row was appended to the group's own spreadsheet", sheetRows.length === groupSheetRowsBeforeLog + 1);
 const loggedGroupRow = sheetRows.at(-1);
 check(
@@ -1944,6 +2141,10 @@ check(
 // the question, sender B (a different person) answers it, and it still
 // resolves, matching how a question posed to a group chat naturally works
 // (unlike personal mode, where only one person could ever be replying).
+// Attribution is fixed to whoever actually completed the draft (sender B,
+// who answered the amount) at the moment the confirmation prompt is built —
+// not whoever happens to confirm it afterward, which anyone in the group
+// can do (checked below via groupSenderA confirming sender B's draft).
 const groupSheetRowsBeforeShared = sheetRows.length;
 // "ซื้อกาแฟ" (no amount) rather than something like "ซื้อของ" — "กาแฟ" alone
 // already resolves to a specific category (same convention used throughout
@@ -1952,24 +2153,40 @@ const groupSheetRowsBeforeShared = sheetRows.length;
 const groupAskReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ซื้อกาแฟ", origin);
 check("an ambiguous message still asks a clarifying question in group mode", groupAskReply.includes("จำนวนเงินเท่าไหร่"));
 groupMemberDisplayNames[groupSenderB] = "สมหญิง";
-const groupAnswerReply = await handleGroupTextMessage(env, groupId, groupSenderB, "80", origin);
+const groupAnswerPromptReply = await handleGroupTextMessage(env, groupId, groupSenderB, "80", origin);
 check(
-  "a different group member answering the pending question resolves it",
+  "a different group member answering the pending question resolves it into a confirmation prompt, not an immediate save",
+  groupAnswerPromptReply.includes("80") && groupAnswerPromptReply.includes("ใช่ไหม") && sheetRows.length === groupSheetRowsBeforeShared
+);
+const groupAnswerReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ใช่", origin);
+check(
+  "any group member (not just whoever completed the draft) can confirm it, saving the entry",
   groupAnswerReply.includes("80") && sheetRows.length === groupSheetRowsBeforeShared + 1
 );
-check("the resolved entry is attributed to whoever actually answered it", sheetRows.at(-1)[7] === groupSenderB);
+check("the resolved entry is attributed to whoever actually answered the clarification, not whoever confirmed it", sheetRows.at(-1)[7] === groupSenderB);
 
 // 5. Attribution degrades gracefully when LINE didn't include a sender
 // userId at all (see LineEventSource's comment in line.ts for when that
 // happens) — never blocks the save over what's a cosmetic detail.
-const groupNoSenderReply = await handleGroupTextMessage(env, groupId, undefined, "ข้าว 30", origin);
+const groupNoSenderPromptReply = await handleGroupTextMessage(env, groupId, undefined, "ข้าว 30", origin);
+check(
+  "a message with no sender userId still prompts to confirm",
+  groupNoSenderPromptReply.includes("30") && groupNoSenderPromptReply.includes("ใช่ไหม")
+);
+const groupNoSenderReply = await handleGroupTextMessage(env, groupId, undefined, "ใช่", origin);
 check(
   "a message with no sender userId still logs, with a generic attribution label",
   groupNoSenderReply.includes("30") && sheetRows.at(-1)[7] === "unknown" && sheetRows.at(-1)[8] === "สมาชิกกลุ่ม"
 );
 
+// simulateGroupMemberProfileFailure must fail the lookup that happens while
+// building the confirmation *prompt* (attribution is resolved and baked in
+// then, not at confirm time) — set right before the prompt call, not the
+// confirm call.
 simulateGroupMemberProfileFailure = true;
-const groupProfileFailureReply = await handleGroupTextMessage(env, groupId, groupSenderA, "น้ำ 20", origin);
+const groupProfileFailurePromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "น้ำ 20", origin);
+check("still asks to confirm even when the profile lookup for attribution fails", groupProfileFailurePromptReply.includes("ใช่ไหม"));
+const groupProfileFailureReply = await handleGroupTextMessage(env, groupId, groupSenderA, "ใช่", origin);
 check(
   "a failed member-profile lookup still logs the transaction, with the generic label",
   groupProfileFailureReply.includes("20") && sheetRows.at(-1)[8] === "สมาชิกกลุ่ม"

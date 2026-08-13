@@ -1,4 +1,4 @@
-import { handleUserMessage, isGreeting, type TransactionDraft } from "../../app/src/lib/chatEngine.ts";
+import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { matchAiCommand } from "./aiCommands.ts";
 import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";
@@ -33,7 +33,7 @@ import {
   type LineVideoMessageEvent,
   type LineWebhookBody,
 } from "./line.ts";
-import { appendTransaction, canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
+import { canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
 import { signState, verifyState } from "./signedState.ts";
 import {
   getAccountLink,
@@ -45,9 +45,11 @@ import {
   type AccountLink,
   type ActionCtx,
   type ActiveTrip,
+  type TransactionAttribution,
 } from "./state.ts";
+import { applyPersona } from "./persona.ts";
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
-import { matchTransactionCommand } from "./transactionCommands.ts";
+import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
 import { matchTripCommand } from "./tripCommands.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
@@ -457,57 +459,23 @@ export async function handleTextMessage(
 
   // transactionDrafts (plural) is set instead of transactionDraft when one
   // message contained several separate items — see parseMultilineTransactions
-  // in chatEngine.ts. Both are handled the same way, looped for the plural
-  // case — see saveTransactionDrafts.
+  // in chatEngine.ts. Both are handled the same way (promptTransactionCreate
+  // takes the whole array). PLAN.md 17.9: a ready draft no longer saves
+  // immediately, even when unambiguous — it always asks to confirm first,
+  // same as every other create/delete action already did, so
+  // result.botMessage (chatEngine's own "saved" text) is never used for a
+  // successful draft; promptTransactionCreate's confirmation text replaces it.
   const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
   if (drafts.length > 0) {
-    await saveTransactionDrafts(env, link, drafts, text, { addedBy: lineUserId, addedByName: "LINE" }, tokenCache);
+    return promptTransactionCreate(
+      { kv: env.ACCOUNTS, lineUserId },
+      drafts,
+      text,
+      { addedBy: lineUserId, addedByName: "LINE" }
+    );
   }
 
   return result.botMessage;
-}
-
-interface TransactionAttribution {
-  addedBy: string;
-  addedByName: string;
-}
-
-// Shared by personal mode (handleTextMessage, above) and group mode
-// (handleGroupTextMessage, below) — the only real difference between them
-// is who gets credited: personal mode always attributes to "LINE" (no
-// informational value in a 1:1 chat — it's always just "you"), group mode
-// attributes to whichever member actually sent the message.
-async function saveTransactionDrafts(
-  env: Env,
-  link: AccountLink,
-  drafts: TransactionDraft[],
-  rawText: string,
-  attribution: TransactionAttribution,
-  tokenCache?: TokenCache
-): Promise<void> {
-  const now = new Date().toISOString();
-  await withFreshAccessToken(
-    env,
-    link.refreshToken,
-    (accessToken) =>
-      Promise.all(
-        drafts.map((draft) =>
-          appendTransaction(accessToken, link.spreadsheetId, {
-            id: crypto.randomUUID(),
-            date: now.slice(0, 10),
-            type: draft.type,
-            amount: draft.amount,
-            categoryId: draft.categoryId,
-            note: draft.note,
-            rawText,
-            addedBy: attribution.addedBy,
-            addedByName: attribution.addedByName,
-            createdAt: now,
-          })
-        )
-      ),
-    tokenCache
-  );
 }
 
 // Group mode (PLAN.md 17) — now at near-full parity with personal mode's
@@ -554,10 +522,16 @@ export async function handleGroupTextMessage(
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, subjectId, result.pending);
 
+  // PLAN.md 17.9: same as personal mode — asks to confirm before saving,
+  // never immediately. Attribution is resolved now (whoever's message
+  // actually completed this draft) and baked into the pending confirmation,
+  // since it's stored until the group confirms — anyone can confirm it
+  // (see the shared pending-clarification comment above), but credit always
+  // stays with whoever actually entered the data.
   const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
   if (drafts.length > 0) {
     const attribution = await resolveGroupAttribution(env, groupId, senderUserId);
-    await saveTransactionDrafts(env, link, drafts, text, attribution, tokenCache);
+    return promptTransactionCreate({ kv: env.ACCOUNTS, lineUserId: subjectId }, drafts, text, attribution);
   }
 
   return result.botMessage;
@@ -725,16 +699,23 @@ function mediaSubjectId(source: LineEventSource): string {
 // (or groupId, in group mode) directly, so they're immune to token expiry
 // — falling back to one here means the user always hears back even if the
 // reply attempt lost the race.
+//
+// This is also the single choke point nearly every outgoing chat reply
+// passes through (PLAN.md 17.9's persona layer), so the AI-styled text is
+// computed once here and reused for both the reply attempt and its push
+// fallback, rather than restyling twice (wasted Gemini quota) or, worse,
+// styling it differently on each attempt.
 async function replyOrPush(
   event: { replyToken: string; source: LineEventSource },
   text: string,
-  channelAccessToken: string
+  env: Env
 ): Promise<void> {
+  const styledText = await applyPersona(text, env.GEMINI_API_KEY);
   try {
-    await replyToLine(event.replyToken, text, channelAccessToken);
+    await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
   } catch (err) {
     console.error("line reply failed, falling back to push", err);
-    await pushToLine(pushTargetId(event.source), text, channelAccessToken);
+    await pushToLine(pushTargetId(event.source), styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
   }
 }
 
@@ -824,11 +805,7 @@ async function resolveMediaBatchContext(
     // reply at all while an unrelated batch in a different webhook call
     // succeeded normally.
     if (!isGroup) {
-      await replyOrPush(
-        events[0],
-        await buildUnlinkedPrompt(env, subjectId, origin),
-        env.LINE_CHANNEL_ACCESS_TOKEN
-      ).catch(() => undefined);
+      await replyOrPush(events[0], await buildUnlinkedPrompt(env, subjectId, origin), env).catch(() => undefined);
     }
     return null;
   }
@@ -838,7 +815,7 @@ async function resolveMediaBatchContext(
       await replyOrPush(
         events[0],
         'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งรูป/คลิปตามมาได้เลย',
-        env.LINE_CHANNEL_ACCESS_TOKEN
+        env
       ).catch(() => undefined);
     }
     return null;
@@ -884,11 +861,9 @@ async function handleQueuedMediaBatch(
     // reply below also fails there's genuinely nothing more that can be
     // done for this specific attempt.
     console.error("handleQueuedMediaBatch failed", err);
-    await replyOrPush(
-      events[0],
-      "ขอโทษด้วย เกิดข้อผิดพลาดตอนรับไฟล์ ลองส่งรูป/คลิปใหม่อีกครั้งนะ",
-      env.LINE_CHANNEL_ACCESS_TOKEN
-    ).catch(() => undefined);
+    await replyOrPush(events[0], "ขอโทษด้วย เกิดข้อผิดพลาดตอนรับไฟล์ ลองส่งรูป/คลิปใหม่อีกครั้งนะ", env).catch(
+      () => undefined
+    );
   }
 }
 
@@ -956,25 +931,17 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
           if (!selfMention) return;
           const text = stripSelfMention(event.message.text, selfMention);
           const reply = await handleGroupTextMessage(env, event.source.groupId, event.source.userId, text, origin, tokenCache);
-          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+          await replyOrPush(event, reply, env);
           return;
         }
         const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
-        await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+        await replyOrPush(event, reply, env);
       } else if (isUnsupportedMessageEvent(event)) {
-        await replyOrPush(
-          event,
-          "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ",
-          env.LINE_CHANNEL_ACCESS_TOKEN
-        );
+        await replyOrPush(event, "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ", env);
       }
     } catch (err) {
       if (isTextMessageEvent(event) || isUnsupportedMessageEvent(event)) {
-        await replyOrPush(
-          event,
-          "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ",
-          env.LINE_CHANNEL_ACCESS_TOKEN
-        ).catch(() => undefined);
+        await replyOrPush(event, "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ", env).catch(() => undefined);
       }
       console.error("webhook handling failed", err);
     }
@@ -1105,7 +1072,8 @@ export async function drainUploadQueue(env: Env): Promise<void> {
     // pushTarget, not lineUserId — a group's push target is the real
     // groupId, not the synthesized "group:<groupId>" subject id lineUserId
     // holds in that case (see QueuedUpload's own comment).
-    await pushToLine(summary.pushTarget, parts.join(" "), env.LINE_CHANNEL_ACCESS_TOKEN).catch((err) =>
+    const styledSummary = await applyPersona(parts.join(" "), env.GEMINI_API_KEY);
+    await pushToLine(summary.pushTarget, styledSummary, env.LINE_CHANNEL_ACCESS_TOKEN).catch((err) =>
       console.error("drain summary push failed", err)
     );
   }
