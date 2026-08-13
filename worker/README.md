@@ -443,10 +443,17 @@ The one feature in this bot that isn't rule-based — see PLAN.md 15.10 for the 
 rationale on why this is a deliberate, documented exception rather than a quiet drift away
 from the "free forever, no AI" approach everything else follows.
 
-- `ถาม <คำถาม>` — e.g. "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด" or "ถาม นัดพรุ่งนี้มีไหม". Sends the
-  question, plus this month's transactions/diary entries (with precomputed totals) and
-  upcoming Calendar events (today through 30 days ahead), to Google Gemini (free tier) and
-  replies with its answer.
+- `ถาม <คำถาม>` — e.g. "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", "ถาม นัดพรุ่งนี้มีไหม", or "ถาม สภาพ
+  อากาศวันนี้เป็นไง" (needs a province set — see `ตั้งจังหวัด` under Morning briefing below). Sends
+  the question, plus this month's transactions/diary entries (with precomputed totals), upcoming
+  Calendar events (today through 30 days ahead), and current weather if a province is set, to
+  Google Gemini (free tier) and replies with its answer.
+- `ถาม ข่าวหุ้น` (or anything matching a finance keyword — Bitcoin, gold, "การเงินสหรัฐ", etc.,
+  see `FINANCE_KEYWORDS` in `aiCommands.ts`) — routes to a dedicated finance-news summary
+  (CNBC's RSS feed, summarized by Gemini) instead of the personal-data pipeline above, since a
+  finance-news question has nothing to do with your own money/calendar/diary. The prompt for
+  this one carries its own extra guardrail: never state a price/index number from a headline as
+  the *current* price — financial figures go stale far faster than the news events around them.
 - `วิเคราะห์` (with or without extra text after it) — shortcut for an open-ended "analyze my
   spending and diary this month" request, without having to phrase it as a question yourself.
 - **Money never gets computed by the AI.** Every number in the prompt (`aiCommands.ts`) is
@@ -454,22 +461,25 @@ from the "free forever, no AI" approach everything else follows.
   handed to Gemini pre-labeled as the only numbers it's allowed to quote — the raw
   transaction/diary rows included alongside are for pattern questions ("ซื้อกาแฟกี่ครั้งแล้ว"),
   not for the model to re-sum itself. A wrong total is structurally impossible this way, not
-  just unlikely. Similarly, the prompt tells Gemini its three data sources (money, diary,
-  calendar) are separate and must not be mixed — an earlier bug had it answering "any
+  just unlikely. Similarly, the prompt tells Gemini its data sources (money, diary, calendar,
+  weather) are separate and must not be mixed — an earlier bug had it answering "any
   appointments?" by pattern-matching a similarly-worded Diary entry instead of using real
-  Calendar data, since at the time it had no Calendar data at all.
+  Calendar data, since at the time it had no Calendar data at all (and separately, it had no
+  weather data at all until this was added, so a weather question got a flat "no data" reply
+  even with a province already set).
 - Checked ahead of every other command matcher in `handleTextMessage`, not just the
   hardcoded report shortcuts: `matchCalendarCommand` in particular matches "นัด" anywhere in
   the text, not just at the start, so "ถาม นัด...มีไหม" used to get swallowed as a failed
   appointment-creation attempt and never reach the AI at all.
-- If `GEMINI_API_KEY` isn't set, Gemini's free-tier quota is exhausted, or Calendar access
-  fails for whatever reason (including an older-linked account missing the `calendar.events`
-  scope) — degrades gracefully (a plain apology, or answering without Calendar data and
-  saying so) instead of erroring or staying silent — see `gemini.ts`/`aiCommands.ts`.
+- If `GEMINI_API_KEY` isn't set, Gemini's free-tier quota is exhausted, or Calendar/weather
+  access fails for whatever reason (including an older-linked account missing the
+  `calendar.events` scope) — degrades gracefully (a plain apology, or answering without that
+  one data source and saying so) instead of erroring or staying silent — see
+  `gemini.ts`/`aiCommands.ts`.
 - This is the only feature that sends your data (this month's spending/diary text, upcoming
-  Calendar events) to a third party outside the Google Sheets/Drive/Calendar/LINE ecosystem
-  the rest of the bot stays within — see setup step 4 above for the free-tier data-usage
-  disclosure before turning it on.
+  Calendar events, current weather) to a third party outside the Google Sheets/Drive/Calendar/
+  LINE/Open-Meteo ecosystem the rest of the bot stays within — see setup step 4 above for the
+  free-tier data-usage disclosure before turning it on.
 
 ### Morning briefing (PLAN.md 15.11)
 

@@ -81,6 +81,7 @@ let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, t
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
+let simulateFinanceNewsFetchFailure = false; // makes the next CNBC RSS request fail, to exercise graceful degradation
 const GEOCODE_RESULTS = {
   เชียงใหม่: { name: "เชียงใหม่", latitude: 18.7883, longitude: 98.9853 },
 };
@@ -346,6 +347,19 @@ globalThis.fetch = async (url, init = {}) => {
       "<?xml version=\"1.0\"?><rss><channel>",
       "<item><title><![CDATA[Test headline one]]></title></item>",
       "<item><title>Test headline two</title></item>",
+      "</channel></rss>",
+    ].join("");
+    return new Response(rss, { status: 200 });
+  }
+  if (u.includes("cnbc.com/id/10000664/device/rss/rss.html")) {
+    if (simulateFinanceNewsFetchFailure) {
+      simulateFinanceNewsFetchFailure = false;
+      return new Response("simulated finance RSS fetch failure", { status: 500 });
+    }
+    const rss = [
+      "<?xml version=\"1.0\"?><rss><channel>",
+      "<item><title>Stocks rally as tech earnings beat expectations</title></item>",
+      "<item><title>Bitcoin holds steady above key support level</title></item>",
       "</channel></rss>",
     ].join("");
     return new Response(rss, { status: 200 });
@@ -1363,6 +1377,42 @@ check(
   "the prompt states today's actual date explicitly, not left for Gemini to infer",
   lastGeminiRequest.systemInstruction.includes(`วันนี้คือวันที่ ${formatThaiDateLabel(bangkokDateKey())}`) &&
     lastGeminiRequest.systemInstruction.includes("ห้ามเดาหรือคำนวณเอง")
+);
+// Regression test for a real report: "ถาม สภาพอากาศวันนี้เป็นไง" got told
+// there was no weather data at all, even though a province had already
+// been set via "ตั้งจังหวัด" (see the morning-briefing tests earlier in
+// this file) — buildSystemInstruction never fetched weather at all before
+// this fix, only the separate morning-briefing code path did.
+check(
+  "once a province is set, the AI prompt includes real weather too, not just money/calendar/diary",
+  lastGeminiRequest.systemInstruction.includes("เชียงใหม่") &&
+    lastGeminiRequest.systemInstruction.includes("สภาพอากาศตอนนี้")
+);
+
+// New capability requested directly: "ถาม ข่าวหุ้น" (or similar finance
+// keywords) routes to a dedicated finance-news summary instead of the
+// personal-data Q&A pipeline — verified by confirming it does NOT touch
+// Sheets/Calendar (no new geminiRequests entry has money/calendar/diary
+// framing) and does use the CNBC-mocked headlines.
+const geminiRequestsBeforeFinance = geminiRequests.length;
+const financeNewsReply = await handleTextMessage(env, lineUserId, "ถาม ข่าวหุ้น", origin);
+check(
+  "\"ถาม ข่าวหุ้น\" routes to the finance-news summary, using the CNBC-mocked headlines",
+  financeNewsReply.includes("[mock AI answer]") && financeNewsReply.includes("tech earnings")
+);
+check("finance news doesn't touch the money/calendar/diary Q&A pipeline", geminiRequests.length === geminiRequestsBeforeFinance + 1);
+const lastFinanceGeminiRequest = geminiRequests.at(-1);
+check(
+  "the finance-news prompt has its own guardrail against stating stale prices as current",
+  lastFinanceGeminiRequest.systemInstruction.includes("ห้ามระบุตัวเลขราคา") &&
+    !lastFinanceGeminiRequest.systemInstruction.includes("รายรับรวม")
+);
+
+simulateFinanceNewsFetchFailure = true;
+const financeNewsFailureReply = await handleTextMessage(env, lineUserId, "ถาม ราคาบิตคอยน์วันนี้", origin);
+check(
+  "a finance-news RSS failure degrades to the friendly fallback, not a crash",
+  financeNewsFailureReply.includes("ระบบ AI ขัดข้อง")
 );
 
 const aiAnalyzeReply = await handleTextMessage(env, lineUserId, "วิเคราะห์", origin);

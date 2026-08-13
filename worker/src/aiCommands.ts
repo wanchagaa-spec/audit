@@ -13,9 +13,11 @@
 import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
+import { fetchFinanceNewsSummary } from "./news.ts";
 import { readAllDiaryEntries, readAllTransactions, type DiaryRow, type TransactionRow } from "./sheets.ts";
+import { getUserProvince, type ActionCtx } from "./state.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokStartOfDayIso, formatThaiDateLabel } from "./thaiDate.ts";
-import type { ActionCtx } from "./state.ts";
+import { fetchWeatherSummary } from "./weather.ts";
 
 // How far ahead of today to pull real Calendar events for — calendar
 // questions ("นัดพรุ่งนี้มีไหม", "เช็คนัดวันที่ ...") are inherently
@@ -54,6 +56,21 @@ function parseAiRequest(text: string): { question: string } | null {
   return null;
 }
 
+// A question matching any of these routes to fetchFinanceNewsSummary
+// instead of the personal-data Q&A pipeline below — "ถาม ข่าวหุ้น" and
+// similar have nothing to do with the user's own money/calendar/diary, so
+// there's no reason to fetch any of that just to answer them.
+const FINANCE_KEYWORDS = [
+  "ข่าวหุ้น", "หุ้นสหรัฐ", "ตลาดหุ้น", "หุ้นอเมริกา", "บิตคอยน์", "บิทคอยน์", "คริปโต",
+  "ราคาทอง", "ข่าวทอง", "ข่าวการเงิน", "การเงินสหรัฐ", "เศรษฐกิจสหรัฐ",
+  "bitcoin", "crypto", "nasdaq", "dow jones", "s&p", "wall street",
+];
+
+function isFinanceNewsQuestion(question: string): boolean {
+  const lower = question.toLowerCase();
+  return FINANCE_KEYWORDS.some((k) => lower.includes(k.toLowerCase()));
+}
+
 function totals(rows: TransactionRow[]): { income: number; expense: number } {
   return {
     income: rows.filter((r) => r.type === "income").reduce((s, r) => s + r.amount, 0),
@@ -83,6 +100,7 @@ function topCategories(rows: TransactionRow[], limit = 5): string[] {
 // calendar, which would otherwise read as "you have no appointments."
 function buildSystemInstruction(
   todayLabel: string,
+  weatherLine: string | null,
   month: string,
   txRows: TransactionRow[],
   diaryRows: DiaryRow[],
@@ -114,6 +132,10 @@ function buildSystemInstruction(
     // something this code already knows for certain.
     `วันนี้คือวันที่ ${todayLabel} (ใช้วันที่นี้เท่านั้นเวลาตอบคำถามเกี่ยวกับ "วันนี้"/"พรุ่งนี้"/วันที่ปัจจุบัน ห้ามเดาหรือคำนวณเอง)`,
     "",
+    weatherLine
+      ? `สภาพอากาศตอนนี้ (ข้อมูลจริง ใช้ค่านี้เท่านั้นถ้าถามเรื่องอากาศ ห้ามเดาเอง): ${weatherLine}`
+      : 'ยังไม่มีข้อมูลสภาพอากาศ (ผู้ใช้ยังไม่ได้ตั้งจังหวัด) — ถ้าถามเรื่องอากาศ ให้บอกว่ายังไม่รู้พื้นที่ แนะนำให้พิมพ์ "ตั้งจังหวัด <ชื่อ>" ก่อน',
+    "",
     `ตัวเลขที่คำนวณไว้แล้วสำหรับเดือน ${month} (ใช้ตัวเลขชุดนี้เท่านั้นเวลาตอบคำถามเกี่ยวกับยอดเงิน ห้ามคำนวณหรือเดาตัวเลขเอง):`,
     `- รายรับรวม: ${formatBaht(income)} บาท`,
     `- รายจ่ายรวม: ${formatBaht(expense)} บาท`,
@@ -143,6 +165,22 @@ export async function matchAiCommand(text: string): Promise<Handler | null> {
 
   if (!request.question) {
     return async () => USAGE_HINT;
+  }
+
+  // Checked before touching any of the user's own Sheets/Calendar/Diary
+  // data — a finance-news question is a completely different kind of
+  // request (world news, not personal data), so there's nothing to gain
+  // from fetching any of that just to answer it.
+  if (isFinanceNewsQuestion(request.question)) {
+    return async (ctx) => {
+      try {
+        const summary = await fetchFinanceNewsSummary(ctx.geminiApiKey);
+        return summary ?? FALLBACK_MESSAGE;
+      } catch (err) {
+        console.error("fetchFinanceNewsSummary failed", err);
+        return FALLBACK_MESSAGE;
+      }
+    };
   }
 
   return async (ctx) => {
@@ -176,10 +214,22 @@ export async function matchAiCommand(text: string): Promise<Handler | null> {
       calendarEvents = null;
     }
 
+    // Same best-effort treatment as Calendar above: no province set at all
+    // is a normal, expected state (not an error), and a transient weather
+    // API failure must not block an unrelated money/calendar/diary question.
+    let weatherLine: string | null = null;
+    try {
+      const province = await getUserProvince(ctx.kv, ctx.lineUserId);
+      if (province) weatherLine = await fetchWeatherSummary(province);
+    } catch (err) {
+      console.error("askGemini: fetching weather failed, continuing without it", err);
+    }
+
     const monthTx = allTx.filter((r) => r.date?.startsWith(month));
     const monthDiary = allDiary.filter((r) => r.date?.startsWith(month));
     const systemInstruction = buildSystemInstruction(
       formatThaiDateLabel(today),
+      weatherLine,
       month,
       monthTx,
       monthDiary,
