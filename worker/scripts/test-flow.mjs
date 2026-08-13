@@ -103,7 +103,8 @@ let simulateInterpreterFailure = false; // one-shot: fails the next AI-interpret
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
 let simulateFinanceNewsFetchFailure = false; // makes the next CNBC RSS request fail, to exercise graceful degradation
-let simulateMarketDataFetchFailure = false; // makes the next batch of market-data requests (BTC/gold/S&P 500/movers) fail, to exercise graceful degradation
+let simulateMarketDataFetchFailure = false; // makes the next batch of market-data requests (BTC/gold/movers) fail, to exercise graceful degradation
+let simulateEconomicCalendarFetchFailure = false; // makes the next Forex Factory calendar request fail, to exercise "couldn't check" vs "confirmed empty" degradation
 const GEOCODE_RESULTS = {
   เชียงใหม่: { name: "เชียงใหม่", latitude: 18.7883, longitude: 98.9853 },
 };
@@ -542,22 +543,35 @@ globalThis.fetch = async (url, init = {}) => {
       simulateMarketDataFetchFailure = false;
       return new Response("simulated market data fetch failure", { status: 500 });
     }
-    return new Response(JSON.stringify({ bitcoin: { usd: 65000 } }), { status: 200 });
+    return new Response(JSON.stringify({ bitcoin: { usd: 60000, usd_24h_change: -5.23 } }), { status: 200 });
   }
-  if (u.includes("api.gold-api.com/price/XAU")) {
+  if (u.includes("data-asg.goldprice.org/dbXRates/USD")) {
     if (simulateMarketDataFetchFailure) {
       simulateMarketDataFetchFailure = false;
       return new Response("simulated market data fetch failure", { status: 500 });
     }
-    return new Response(JSON.stringify({ price: 2345.6 }), { status: 200 });
+    return new Response(JSON.stringify({ items: [{ xauPrice: 4413.6, pcXau: 1.25 }] }), { status: 200 });
   }
-  if (u.includes("query1.finance.yahoo.com/v8/finance/chart")) {
-    if (simulateMarketDataFetchFailure) {
-      simulateMarketDataFetchFailure = false;
-      return new Response("simulated market data fetch failure", { status: 500 });
+  if (u.includes("nfs.faireconomy.media/ff_calendar_thisweek.json")) {
+    if (simulateEconomicCalendarFetchFailure) {
+      simulateEconomicCalendarFetchFailure = false;
+      return new Response("simulated economic calendar fetch failure", { status: 500 });
     }
+    // A fixed "today" (Bangkok) event plus deliberate noise the code/prompt
+    // is expected to filter out: a non-USD event, a Low-impact USD event,
+    // and a High-impact USD event on a different day.
+    const todayBangkok = bangkokDateKey();
+    const [y, m, d] = todayBangkok.split("-").map(Number);
+    const todayIso = (hour, minute) =>
+      new Date(Date.UTC(y, m - 1, d, hour - 7, minute)).toISOString();
+    const otherDayIso = new Date(Date.UTC(y, m - 1, d - 3, 5, 0)).toISOString();
     return new Response(
-      JSON.stringify({ chart: { result: [{ meta: { regularMarketPrice: 5555.55 } }] } }),
+      JSON.stringify([
+        { title: "Unemployment Claims", country: "USD", impact: "Medium", date: todayIso(19, 30) },
+        { title: "German Factory Orders", country: "EUR", impact: "High", date: todayIso(14, 0) },
+        { title: "Retail Sales m/m", country: "USD", impact: "Low", date: todayIso(20, 0) },
+        { title: "Fed Chair Speaks", country: "USD", impact: "High", date: otherDayIso },
+      ]),
       { status: 200 }
     );
   }
@@ -593,7 +607,7 @@ const {
 } = await import("../src/index.ts");
 const { setAccountLink, getAccountLink, getPending } = await import("../src/state.ts");
 const { verifyState, signState, signViewToken, verifyViewToken } = await import("../src/signedState.ts");
-const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
+const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel, formatThaiDateLabelFull, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
@@ -2004,16 +2018,42 @@ check(
   lastFinanceGeminiRequest.systemInstruction.includes("ห้ามระบุตัวเลขราคา") &&
     !lastFinanceGeminiRequest.systemInstruction.includes("รายรับรวม")
 );
-// New capability requested directly: gold/BTC/S&P 500/top-mover numbers from
-// marketData.ts (free no-key APIs) get folded into the finance-news prompt
-// as labeled ground truth, alongside the RSS headlines.
+
+// PLAN.md 15.13: the requested format — gold/BTC/top-mover numbers are no
+// longer handed to Gemini to restate at all. They're deterministic text
+// (marketData.ts's buildMarketHeaderBlock) prepended to the reply, so the
+// exact "* ทองคำ : $4,413.6 (+1.25%)"-style lines can never drift under
+// paraphrasing — checked directly on the final reply, not the Gemini prompt.
 check(
-  "the finance-news prompt includes real market numbers fetched fresh (BTC/gold/S&P 500/top movers)",
-  lastFinanceGeminiRequest.question.includes("ข้อมูลราคาล่าสุด") &&
-    lastFinanceGeminiRequest.question.includes("65,000") &&
-    lastFinanceGeminiRequest.question.includes("2,345.6") &&
-    lastFinanceGeminiRequest.question.includes("AAAA") &&
-    lastFinanceGeminiRequest.question.includes("CCCC")
+  "the finance-news reply leads with a deterministic date + gold/BTC/movers header, never touched by Gemini",
+  financeNewsReply.startsWith(`ข้อมูล ณ วันที่ ${formatThaiDateLabelFull(bangkokDateKey())}`) &&
+    financeNewsReply.includes("* ทองคำ : $4,413.6 (+1.25%)") &&
+    financeNewsReply.includes("* บิตคอยน์ : $60,000 (-5.23%)") &&
+    financeNewsReply.includes("* หุ้นสหรัฐฯ เคลื่อนไหวมากที่สุด") &&
+    financeNewsReply.includes("AAAA (+18.20%)") &&
+    financeNewsReply.includes("CCCC (-16.50%)")
+);
+
+// PLAN.md 15.13: today's US economic calendar (Forex Factory) is folded
+// into the prompt as labeled ground truth for Gemini to select from — only
+// USD, medium/high-impact, and dated today should survive the filter in
+// forexCalendar.ts; the mock deliberately includes a non-USD event, a
+// low-impact USD event, and a high-impact USD event on a different day, none
+// of which should appear.
+check(
+  "the finance-news prompt includes today's real USD economic-calendar events, filtered correctly",
+  lastFinanceGeminiRequest.question.includes("เวลาไทย 19:30 น. Unemployment Claims (ผลกระทบ: Medium)") &&
+    !lastFinanceGeminiRequest.question.includes("German Factory Orders") &&
+    !lastFinanceGeminiRequest.question.includes("Retail Sales") &&
+    !lastFinanceGeminiRequest.question.includes("Fed Chair Speaks")
+);
+
+simulateEconomicCalendarFetchFailure = true;
+const financeNoCalendarReply = await handleTextMessage(env, lineUserId, "ถาม ข่าวหุ้นวันนี้มีอะไรบ้าง", origin);
+const noCalendarRequest = geminiRequests.at(-1);
+check(
+  "an economic-calendar fetch failure still produces a finance-news answer, labeled as 'couldn't check' not 'no news'",
+  financeNoCalendarReply.includes("[mock AI answer]") && noCalendarRequest.question.includes("ดึงปฏิทินข่าวเศรษฐกิจไม่ได้ตอนนี้")
 );
 
 simulateFinanceNewsFetchFailure = true;
@@ -2024,16 +2064,16 @@ check(
 );
 
 // Market-data fetches are independent of the RSS fetch and of each other —
-// one endpoint failing (here, only the first of the five concurrent calls,
-// BTC) must not block the headline summary or the other numbers.
+// one endpoint failing (here, gold — the first of the four concurrent
+// calls in fetchMarketSnapshot, so the first to consume the one-shot flag)
+// must not block the headline summary, the other price, or the movers list.
 simulateMarketDataFetchFailure = true;
 const financePartialFailureReply = await handleTextMessage(env, lineUserId, "ถาม ข่าวหุ้นวันนี้เป็นไง", origin);
-const partialFailureRequest = geminiRequests.at(-1);
 check(
   "a partial market-data fetch failure still produces a finance-news answer, just missing that one number",
   financePartialFailureReply.includes("[mock AI answer]") &&
-    !partialFailureRequest.question.includes("บิตคอยน์") &&
-    partialFailureRequest.question.includes("ทองคำ")
+    !financePartialFailureReply.includes("ทองคำ") &&
+    financePartialFailureReply.includes("บิตคอยน์")
 );
 
 // New capability requested directly: "ถาม ข่าววันนี้" (or similar general

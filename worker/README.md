@@ -457,17 +457,26 @@ from the "free forever, no AI" approach everything else follows.
   Calendar events (today through 30 days ahead), and current weather if a province is set, to
   Google Gemini (free tier) and replies with its answer.
 - `ถาม ข่าวหุ้น` (or anything matching a finance keyword — Bitcoin, gold, "การเงินสหรัฐ", etc.,
-  see `FINANCE_KEYWORDS` in `aiCommands.ts`) — routes to a dedicated finance-news summary
-  (CNBC's RSS feed, summarized by Gemini) instead of the personal-data pipeline above, since a
-  finance-news question has nothing to do with your own money/calendar/diary. Also folds in real
-  numbers from `marketData.ts` — BTC/USD (CoinGecko), gold/USD (`gold-api.com`), the S&P 500
-  index value, and up to 2 top US gainers + 2 top losers (both unofficial Yahoo Finance
-  endpoints) — all free, no API key. These are fetched fresh in code and handed to Gemini as a
-  labeled fact block it must quote exactly; the prompt's older guardrail (never state a
-  price/index number from a *headline* as current, since financial figures go stale far faster
-  than the news events around them) still applies to everything outside that fact block. Every
-  one of these five fetches degrades independently — a broken/changed endpoint just drops that
-  one number instead of failing the whole summary.
+  see `FINANCE_KEYWORDS` in `aiCommands.ts`) — routes to a dedicated finance-news summary instead
+  of the personal-data pipeline above, since a finance-news question has nothing to do with your
+  own money/calendar/diary. Format (PLAN.md 15.13/15.14), top to bottom:
+  1. A deterministic header (`marketData.ts`'s `buildMarketHeaderBlock`, never touched by
+     Gemini): "ข้อมูล ณ วันที่ &lt;full Thai date&gt;", then gold/USD and BTC/USD each with a % change
+     (`* ทองคำ : $4,413.6 (+1.25%)`) from goldprice.org and CoinGecko (both free, no API key,
+     `include_24hr_change`/`pcXau` fields), then up to 2 top US gainers + 2 top losers
+     (unofficial Yahoo Finance screener endpoint) under a "* หุ้นสหรัฐฯ เคลื่อนไหวมากที่สุด" line.
+     Building this as plain text instead of asking Gemini to restate the numbers (the older
+     design) removes any chance of the model paraphrasing, rounding, or mistyping a price.
+  2. A Gemini-composed summary of CNBC's finance RSS headlines (3-5 short bullets).
+  3. A curated list of today's US economic-calendar events that could move gold — real
+     events/times fetched from `forexCalendar.ts` (Forex Factory's community calendar feed,
+     free/no-key, filtered to USD + medium/high impact + today's Bangkok date) and handed to
+     Gemini as labeled ground truth; picking *which* of those actually tends to move gold (rate
+     decisions, employment data, inflation) is the one judgment call left to the model — it never
+     invents an event or a time. Explicitly distinguishes "couldn't check the calendar right now"
+     from "checked, there's nothing today" rather than treating both the same.
+  Every fetch (gold, BTC, movers, economic calendar) degrades independently — a broken/changed
+  endpoint just drops that one part instead of failing the whole summary.
 - `ถาม ข่าววันนี้` (or anything matching a general news keyword — see `DOMESTIC_NEWS_KEYWORDS` in
   `aiCommands.ts`) — routes to the same Thai daily-news summary the morning briefing uses
   (`fetchNewsSummary`, Bangkok Post RSS), on demand instead of only once a day.
