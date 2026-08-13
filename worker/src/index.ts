@@ -1,4 +1,4 @@
-import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
+import { handleUserMessage, isGreeting, type TransactionDraft } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { matchAiCommand } from "./aiCommands.ts";
 import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";
@@ -16,13 +16,18 @@ import {
 } from "./greetingCommands.ts";
 import {
   fetchLineMediaContent,
+  findSelfMention,
+  getGroupMemberProfile,
+  getGroupSummary,
   isImageMessageEvent,
   isTextMessageEvent,
   isUnsupportedMessageEvent,
   isVideoMessageEvent,
   pushToLine,
   replyToLine,
+  stripSelfMention,
   verifyLineSignature,
+  type LineEventSource,
   type LineImageMessageEvent,
   type LineVideoMessageEvent,
   type LineWebhookBody,
@@ -36,6 +41,7 @@ import {
   getPendingConfirmation,
   setAccountLink,
   setPending,
+  type AccountLink,
   type ActionCtx,
   type ActiveTrip,
 } from "./state.ts";
@@ -83,22 +89,48 @@ function html(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-function renderLinkedPage(): string {
+// Group mode (PLAN.md 17) reuses every personal-mode function that's
+// already generic over an opaque "subject id" string (getAccountLink,
+// getPending, setPendingConfirmation, etc. — see state.ts, none of them
+// know or care whether the id is a real LINE userId) by synthesizing one
+// for the group instead: "group:<groupId>". A LINE userId can never
+// collide with this (LINE userIds don't contain colons), so a group and a
+// personal account can never accidentally share state.
+const GROUP_SUBJECT_PREFIX = "group:";
+
+function groupSubjectId(groupId: string): string {
+  return `${GROUP_SUBJECT_PREFIX}${groupId}`;
+}
+
+function groupIdFromSubject(subjectId: string): string | null {
+  return subjectId.startsWith(GROUP_SUBJECT_PREFIX) ? subjectId.slice(GROUP_SUBJECT_PREFIX.length) : null;
+}
+
+function renderLinkedPage(isGroup: boolean): string {
+  const heading = isGroup ? "เชื่อมบัญชีกลุ่มสำเร็จ ✅" : "เชื่อมบัญชีสำเร็จ ✅";
+  const body = isGroup
+    ? "ปิดหน้าต่างนี้แล้วกลับไปที่กลุ่มใน LINE ได้เลย ทุกคนในกลุ่มใช้บัญชีนี้ร่วมกันได้ทันที"
+    : "ปิดหน้าต่างนี้แล้วกลับไปแชทกับบอทใน LINE ได้เลย";
   return `<!doctype html>
 <html lang="th">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>เชื่อมบัญชีสำเร็จ</title>
+<title>${heading}</title>
 <style>
   body { font-family: system-ui, sans-serif; padding: 2rem 1.5rem; text-align: center; color: #1c1e21; }
 </style>
 </head>
 <body>
-  <h2>เชื่อมบัญชีสำเร็จ ✅</h2>
-  <p>ปิดหน้าต่างนี้แล้วกลับไปแชทกับบอทใน LINE ได้เลย</p>
+  <h2>${heading}</h2>
+  <p>${body}</p>
 </body>
 </html>`;
+}
+
+async function buildGroupSpreadsheetName(env: Env, groupId: string): Promise<string> {
+  const summary = await getGroupSummary(groupId, env.LINE_CHANNEL_ACCESS_TOKEN);
+  return summary ? `สมุดกลุ่ม - ${summary.groupName}` : "สมุดกลุ่ม";
 }
 
 async function handleOAuthCallback(request: Request, env: Env): Promise<Response> {
@@ -107,8 +139,8 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
   const state = url.searchParams.get("state");
   if (!code || !state) return html("ลิงก์ไม่ถูกต้อง", 400);
 
-  const lineUserId = await verifyState(state, env.STATE_SIGNING_SECRET);
-  if (!lineUserId) return html("ลิงก์หมดอายุหรือไม่ถูกต้อง กลับไปกดลิงก์ใหม่ใน LINE", 400);
+  const subjectId = await verifyState(state, env.STATE_SIGNING_SECRET);
+  if (!subjectId) return html("ลิงก์หมดอายุหรือไม่ถูกต้อง กลับไปกดลิงก์ใหม่ใน LINE", 400);
 
   const redirectUri = `${url.origin}/oauth/callback`;
   const tokens = await exchangeCodeForTokens({
@@ -124,17 +156,35 @@ async function handleOAuthCallback(request: Request, env: Env): Promise<Response
     );
   }
 
-  const existing = await getAccountLink(env.ACCOUNTS, lineUserId);
-  const spreadsheetId =
-    existing?.spreadsheetId ?? (await createBookSpreadsheet(tokens.access_token, "สมุดส่วนตัว"));
+  const groupId = groupIdFromSubject(subjectId);
+  const existing = await getAccountLink(env.ACCOUNTS, subjectId);
 
-  await setAccountLink(env.ACCOUNTS, lineUserId, {
+  // A group's authorize link is posted into the shared chat, not DM'd
+  // (unlike personal mode — see buildGroupUnlinkedPrompt), so unlike a
+  // personal re-link (always expected to be the same person, re-authing
+  // for more scope — safe to overwrite in place, see
+  // buildCalendarRelinkPrompt), a *second* completed OAuth flow for an
+  // already-linked group could easily be a different person entirely,
+  // clicking the same still-valid link with their own separate Google
+  // account. Overwriting refreshToken in that case would silently break
+  // every future read/write — the new token has no access to the old
+  // token's spreadsheet, since two different Google accounts made it. A
+  // group that's already linked treats further completions as a no-op
+  // rather than risking that.
+  if (groupId && existing) {
+    return html("กลุ่มนี้เชื่อมบัญชีไว้แล้ว ✅ ไม่ต้องเชื่อมซ้ำอีก ปิดหน้าต่างนี้แล้วกลับไปที่กลุ่มได้เลย");
+  }
+
+  const defaultName = groupId ? await buildGroupSpreadsheetName(env, groupId) : "สมุดส่วนตัว";
+  const spreadsheetId = existing?.spreadsheetId ?? (await createBookSpreadsheet(tokens.access_token, defaultName));
+
+  await setAccountLink(env.ACCOUNTS, subjectId, {
     spreadsheetId,
     refreshToken: tokens.refresh_token,
-    displayName: "สมุดส่วนตัว",
+    displayName: defaultName,
   });
 
-  return html(renderLinkedPage());
+  return html(renderLinkedPage(groupId !== null));
 }
 
 // Refresh tokens obtained per user per webhook call, keyed by refreshToken.
@@ -174,13 +224,26 @@ async function buildUnlinkedPrompt(env: Env, lineUserId: string, origin: string)
   return `ยังไม่ได้เชื่อมบัญชี Google เลย กดลิงก์นี้เพื่อเชื่อมก่อนเริ่มใช้งานนะ\n${authorizeUrl}`;
 }
 
-async function buildAuthorizeUrl(env: Env, lineUserId: string, origin: string): Promise<string> {
-  const state = await signState(lineUserId, env.STATE_SIGNING_SECRET);
+async function buildAuthorizeUrl(env: Env, subjectId: string, origin: string): Promise<string> {
+  const state = await signState(subjectId, env.STATE_SIGNING_SECRET);
   return buildGoogleAuthorizeUrl({
     clientId: env.GOOGLE_CLIENT_ID,
     redirectUri: `${origin}/oauth/callback`,
     state,
   });
+}
+
+// Posted straight into the group (not DM'd, unlike the personal prompt) —
+// the authorize link itself doesn't grant anything or expose anyone's
+// data on its own, it only starts Google's own consent screen, and Google
+// asks whoever actually clicks it which of *their* Google accounts to
+// authorize. Whoever completes that step is simply who ends up as the
+// group's linked account — there's no LINE API for "who is the group
+// admin" to check against instead, so this is the natural, honest
+// approach rather than trying to simulate a permission this bot can't see.
+async function buildGroupUnlinkedPrompt(env: Env, groupId: string, origin: string): Promise<string> {
+  const authorizeUrl = await buildAuthorizeUrl(env, groupSubjectId(groupId), origin);
+  return `กลุ่มนี้ยังไม่ได้เชื่อมบัญชี Google เลย ใครก็ได้ในกลุ่มกดลิงก์นี้เพื่อเชื่อมบัญชีของตัวเองให้กลุ่มนี้ใช้ร่วมกัน (ข้อมูลจะเห็นเหมือนกันหมดทุกคนในกลุ่ม):\n${authorizeUrl}`;
 }
 
 // Accounts linked before the calendar feature shipped only granted the
@@ -358,36 +421,152 @@ export async function handleTextMessage(
 
   // transactionDrafts (plural) is set instead of transactionDraft when one
   // message contained several separate items — see parseMultilineTransactions
-  // in chatEngine.ts. Both are handled the same way here, just looped for
-  // the plural case, sharing one fetched access token for the whole batch.
+  // in chatEngine.ts. Both are handled the same way, looped for the plural
+  // case — see saveTransactionDrafts.
   const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
   if (drafts.length > 0) {
-    const now = new Date().toISOString();
-    await withFreshAccessToken(
+    await saveTransactionDrafts(env, link, drafts, text, { addedBy: lineUserId, addedByName: "LINE" }, tokenCache);
+  }
+
+  return result.botMessage;
+}
+
+interface TransactionAttribution {
+  addedBy: string;
+  addedByName: string;
+}
+
+// Shared by personal mode (handleTextMessage, above) and group mode
+// (handleGroupTextMessage, below) — the only real difference between them
+// is who gets credited: personal mode always attributes to "LINE" (no
+// informational value in a 1:1 chat — it's always just "you"), group mode
+// attributes to whichever member actually sent the message.
+async function saveTransactionDrafts(
+  env: Env,
+  link: AccountLink,
+  drafts: TransactionDraft[],
+  rawText: string,
+  attribution: TransactionAttribution,
+  tokenCache?: TokenCache
+): Promise<void> {
+  const now = new Date().toISOString();
+  await withFreshAccessToken(
+    env,
+    link.refreshToken,
+    (accessToken) =>
+      Promise.all(
+        drafts.map((draft) =>
+          appendTransaction(accessToken, link.spreadsheetId, {
+            id: crypto.randomUUID(),
+            date: now.slice(0, 10),
+            type: draft.type,
+            amount: draft.amount,
+            categoryId: draft.categoryId,
+            note: draft.note,
+            rawText,
+            addedBy: attribution.addedBy,
+            addedByName: attribution.addedByName,
+            createdAt: now,
+          })
+        )
+      ),
+    tokenCache
+  );
+}
+
+// Group mode (PLAN.md 17) — a deliberately smaller command set than
+// personal mode's handleTextMessage: money logging (natural-language
+// parsing + "ลบรายการล่าสุด") and the read-only report shortcuts
+// (matchCommand — "สรุปเดือนนี้" etc., pure reads, no per-user state, so
+// there's no reason to hold them back). AI/calendar/diary/trip/province/
+// view-link stay personal-only for now — held back deliberately, not
+// forgotten, since they need more thought in a shared-account context
+// (e.g. who can trigger a Calendar write, whether "ทริป" photos from
+// different members should even land in the same folder) than this first
+// pass was worth risking.
+export async function handleGroupTextMessage(
+  env: Env,
+  groupId: string,
+  senderUserId: string | undefined,
+  text: string,
+  origin: string,
+  tokenCache?: TokenCache
+): Promise<string> {
+  const subjectId = groupSubjectId(groupId);
+  const link = await getAccountLink(env.ACCOUNTS, subjectId);
+  if (!link) return buildGroupUnlinkedPrompt(env, groupId, origin);
+
+  const actionCtx = (accessToken: string): ActionCtx => ({
+    accessToken,
+    kv: env.ACCOUNTS,
+    lineUserId: subjectId,
+    spreadsheetId: link.spreadsheetId,
+    geminiApiKey: env.GEMINI_API_KEY,
+  });
+
+  const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, subjectId);
+  if (pendingConfirmation) {
+    const reply = await withFreshAccessToken(
       env,
       link.refreshToken,
-      (accessToken) =>
-        Promise.all(
-          drafts.map((draft) =>
-            appendTransaction(accessToken, link.spreadsheetId, {
-              id: crypto.randomUUID(),
-              date: now.slice(0, 10),
-              type: draft.type,
-              amount: draft.amount,
-              categoryId: draft.categoryId,
-              note: draft.note,
-              rawText: text,
-              addedBy: lineUserId,
-              addedByName: "LINE",
-              createdAt: now,
-            })
-          )
-        ),
+      (accessToken) => resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation),
+      tokenCache
+    );
+    if (reply) return reply;
+    // Not an affirmative reply — falls through and handles `text` normally,
+    // same as personal mode.
+  }
+
+  const transactionHandler = await matchTransactionCommand(text);
+  if (transactionHandler) {
+    return await withFreshAccessToken(
+      env,
+      link.refreshToken,
+      (accessToken) => transactionHandler(actionCtx(accessToken)),
       tokenCache
     );
   }
 
+  const reportHandler = await matchCommand(text);
+  if (reportHandler) {
+    return withFreshAccessToken(
+      env,
+      link.refreshToken,
+      (accessToken) => reportHandler(accessToken, link.spreadsheetId),
+      tokenCache
+    );
+  }
+
+  // Pending clarifications (PENDING_TTL_SECONDS in state.ts) are shared by
+  // the whole group, not just whoever the bot originally asked — anyone
+  // replying "60" to "จำนวนเงินเท่าไหร่คะ" resolves it, matching how a
+  // question posed to a group chat naturally works.
+  const pending = await getPending(env.ACCOUNTS, subjectId);
+  const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
+  await setPending(env.ACCOUNTS, subjectId, result.pending);
+
+  const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
+  if (drafts.length > 0) {
+    const attribution = await resolveGroupAttribution(env, groupId, senderUserId);
+    await saveTransactionDrafts(env, link, drafts, text, attribution, tokenCache);
+  }
+
   return result.botMessage;
+}
+
+const UNKNOWN_GROUP_MEMBER_LABEL = "สมาชิกกลุ่ม";
+
+async function resolveGroupAttribution(
+  env: Env,
+  groupId: string,
+  senderUserId: string | undefined
+): Promise<TransactionAttribution> {
+  // senderUserId can be missing (see LineEventSource's comment in line.ts)
+  // — degrades to a generic label rather than skipping attribution
+  // entirely or blocking the save over what's a cosmetic detail.
+  if (!senderUserId) return { addedBy: "unknown", addedByName: UNKNOWN_GROUP_MEMBER_LABEL };
+  const profile = await getGroupMemberProfile(groupId, senderUserId, env.LINE_CHANNEL_ACCESS_TOKEN);
+  return { addedBy: senderUserId, addedByName: profile?.displayName ?? UNKNOWN_GROUP_MEMBER_LABEL };
 }
 
 function extensionForContentType(contentType: string, kind: "image" | "video"): string {
@@ -512,6 +691,13 @@ export async function handleVideoMessage(
   return handleTripMediaMessage(env, lineUserId, messageId, timestampMs, origin, "video", tokenCache);
 }
 
+function pushTargetId(source: LineEventSource): string {
+  // A group's push target is the group itself, not whoever happened to
+  // send the triggering message — there is no per-member push target
+  // that would even make sense here.
+  return source.type === "group" ? source.groupId : source.userId;
+}
+
 // LINE reply tokens are single-use and short-lived. Sending several photos
 // or clips together bundles many events into one webhook call, and each
 // Drive upload takes real network time — replying to event N only after
@@ -519,10 +705,11 @@ export async function handleVideoMessage(
 // window, and a failed reply threw straight into the catch block below,
 // which retried the *same* (still-expired) token and swallowed that
 // failure too, producing total silence. Push messages target the userId
-// directly, so they're immune to token expiry — falling back to one here
-// means the user always hears back even if the reply attempt lost the race.
+// (or groupId, in group mode) directly, so they're immune to token expiry
+// — falling back to one here means the user always hears back even if the
+// reply attempt lost the race.
 async function replyOrPush(
-  event: { replyToken: string; source: { userId: string } },
+  event: { replyToken: string; source: LineEventSource },
   text: string,
   channelAccessToken: string
 ): Promise<void> {
@@ -530,7 +717,7 @@ async function replyOrPush(
     await replyToLine(event.replyToken, text, channelAccessToken);
   } catch (err) {
     console.error("line reply failed, falling back to push", err);
-    await pushToLine(event.source.userId, text, channelAccessToken);
+    await pushToLine(pushTargetId(event.source), text, channelAccessToken);
   }
 }
 
@@ -745,6 +932,20 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
   await processWithConcurrencyLimit(otherEvents, WEBHOOK_EVENT_CONCURRENCY, async (event) => {
     try {
       if (isTextMessageEvent(event)) {
+        if (event.source.type === "group") {
+          // Every message in a group the bot belongs to reaches this
+          // webhook, addressed to the bot or not — LINE does no filtering
+          // on its side (PLAN.md 17). Silently skip anything that doesn't
+          // tag the bot, without touching any state at all, so ordinary
+          // conversation between group members never gets treated as a
+          // command or a pending-clarification answer.
+          const selfMention = findSelfMention(event.message);
+          if (!selfMention) return;
+          const text = stripSelfMention(event.message.text, selfMention);
+          const reply = await handleGroupTextMessage(env, event.source.groupId, event.source.userId, text, origin, tokenCache);
+          await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+          return;
+        }
         const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
         await replyOrPush(event, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
       } else if (isUnsupportedMessageEvent(event)) {

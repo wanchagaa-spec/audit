@@ -158,6 +158,13 @@ commands on purpose — commands that need more input from you (`เริ่ม
 `ไดอารี่ <ข้อความ>`, `ถาม <คำถาม>`) can't be a single tap, so those stay as typed commands (see
 `วิธีใช้` for the full list).
 
+### 8. (optional) Allow the bot to join group chats
+
+Only needed for group mode (PLAN.md 17, see below) — skip this if you only want 1:1 use.
+In LINE Developers Console → your Messaging API channel → **Messaging API** tab, turn on
+**"Allow bot to join group chats"**. Without this the OA can't be added to a group at all,
+regardless of anything on the Worker side.
+
 ## Try it
 
 Add the Official Account as a friend in LINE. First message should prompt you to tap a
@@ -548,6 +555,38 @@ and trip photos (`/view/trips`) — all sharing one token via a small nav bar.
   Photos are proxied through the Worker rather than linked directly, since uploaded files use the
   `drive.file` scope and aren't publicly reachable — grid thumbnails are the same full-resolution
   proxied image, just CSS-scaled down (no separate lightweight-thumbnail endpoint yet).
+
+### Group mode (PLAN.md 17)
+
+Add the bot to a LINE group (needs setup step 8 above) and it responds only when @-mentioned,
+using one shared Google account for the whole group instead of everyone's own personal account.
+
+- **No new Google sign-in flow.** Whoever's unlinked group @-mentions the bot gets a Google OAuth
+  link posted straight into the group (not DM'd, unlike the personal-linking prompt — the link
+  itself grants nothing and reveals nothing on its own, it just opens Google's consent screen for
+  whoever clicks it, and *they* choose which of their own Google accounts to authorize). Whoever
+  completes that step is simply who ends up as the group's linked account — there's no LINE API
+  for "who is the group admin" to check against instead.
+- Reuses the exact same account-linking/pending-state/confirmation machinery as personal mode
+  (`state.ts`'s functions never actually validate that the id they're given is a real LINE
+  userId — it's just an opaque KV key namespace) by synthesizing a `"group:<groupId>"` id instead
+  of using a real one. A pending clarification ("จำนวนเงินเท่าไหร่คะ") is answerable by *any* group
+  member, not just whoever triggered it, which falls out of this for free.
+- **Silent unless @-mentioned.** LINE delivers every message sent in a group the bot belongs to
+  to the webhook, mentioned or not — there's no server-side filtering, so the bot checks
+  `message.mention.mentionees[].isSelf === true` itself and ignores everything else without
+  touching any state.
+- **Deliberately smaller command set for this first pass**: money logging (natural language +
+  "ลบรายการล่าสุด") and the read-only report shortcuts ("สรุปเดือนนี้" etc. — pure reads, no
+  per-user state, essentially free to include). AI/calendar/diary/trip/province/web-viewer stay
+  personal-only for now; each raises questions worth thinking through separately in a
+  shared-account context (who can create/delete a shared Calendar event, whether different
+  members' trip photos should land in the same folder) rather than being enabled by default.
+- Transactions logged in group mode are attributed to whoever actually sent them (`addedBy`/
+  `addedByName`), fetched via `GET /v2/bot/group/{groupId}/member/{userId}` — unlike the general
+  profile API, this works even for members who've never added the OA as a friend. Falls back to
+  a generic "สมาชิกกลุ่ม" label if that lookup fails or LINE didn't include a sender id at all
+  (both treated as cosmetic-detail failures, never worth blocking the save over).
 
 ## Local development
 

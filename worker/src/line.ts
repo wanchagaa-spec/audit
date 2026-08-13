@@ -1,7 +1,26 @@
+// A message from a 1:1 chat always has a userId; a message from a group
+// chat (PLAN.md 17 — group mode) carries the groupId instead, plus the
+// sender's userId when LINE includes it (it's omitted for senders on old
+// LINE client versions, and possibly in other edge cases — never assume
+// it's present for a group-sourced event).
+export type LineEventSource = { type: "user"; userId: string } | { type: "group"; groupId: string; userId?: string };
+
+/** One `@name` tag inside a text message. `userId`/`isSelf` are only set
+ * when `type === "user"` — `isSelf: true` means this mentionee is the bot
+ * itself (the one that received the webhook), which is how group mode
+ * detects "was the bot actually addressed" (see findSelfMention). */
+export interface MentionSpan {
+  index: number;
+  length: number;
+  type: "user" | "all";
+  userId?: string;
+  isSelf?: boolean;
+}
+
 export interface LineMessageEvent {
   type: "message";
-  message: { type: "text"; text: string };
-  source: { type: "user"; userId: string };
+  message: { type: "text"; text: string; mention?: { mentionees: MentionSpan[] } };
+  source: LineEventSource;
   replyToken: string;
   timestamp: number;
 }
@@ -74,14 +93,40 @@ export async function verifyLineSignature(
 export function isTextMessageEvent(
   event: LineWebhookBody["events"][number]
 ): event is LineMessageEvent {
+  const sourceType = (event as LineMessageEvent).source?.type;
   return (
     event.type === "message" &&
     "message" in event &&
     (event as LineMessageEvent).message?.type === "text" &&
-    (event as LineMessageEvent).source?.type === "user"
+    (sourceType === "user" || sourceType === "group")
   );
 }
 
+/** The bot's own @mention span in a text message, or null if it wasn't
+ * tagged — group mode (PLAN.md 17) only responds when this is non-null,
+ * since every message in a group the bot belongs to reaches this webhook
+ * whether the bot was addressed or not (LINE does no filtering on its
+ * side). */
+export function findSelfMention(message: LineMessageEvent["message"]): MentionSpan | null {
+  return (message.mention?.mentionees ?? []).find((m) => m.type === "user" && m.isSelf === true) ?? null;
+}
+
+/** Removes the bot's own @mention span from the message text, trimming the
+ * whitespace it leaves behind — "@BotName ซื้อกาแฟ 60" -> "ซื้อกาแฟ 60". */
+export function stripSelfMention(text: string, mention: MentionSpan): string {
+  return (text.slice(0, mention.index) + text.slice(mention.index + mention.length)).trim();
+}
+
+// isImageMessageEvent/isVideoMessageEvent/isUnsupportedMessageEvent below
+// still require source.type === "user" — deliberate, not an oversight:
+// LINE's @mention feature only exists on text messages, so there's no way
+// for a group member to "address" a photo/sticker/other non-text message
+// to the bot the way findSelfMention lets them address a text one.
+// Responding to every non-text message any group member sends (the only
+// alternative to requiring "user" source here) would defeat the entire
+// point of gating group mode on being addressed — so these stay silently
+// excluded from group chats for now, same as trip/calendar/diary/AI (see
+// PLAN.md 17.4), rather than picked up as a partial, inconsistent case.
 export function isImageMessageEvent(
   event: LineWebhookBody["events"][number]
 ): event is LineImageMessageEvent {
@@ -168,11 +213,12 @@ export async function replyToLine(
   }
 }
 
-/** Push messages target a userId directly instead of a one-time replyToken,
- * so — unlike replyToLine — they can't fail from a token that's expired or
- * already been used. Used as a fallback when a reply attempt fails, so slow
- * processing (e.g. a big trip-photo batch) never results in total silence. */
-export async function pushToLine(userId: string, text: string, channelAccessToken: string): Promise<void> {
+/** Push messages target an id directly (a userId, or a groupId for group
+ * mode) instead of a one-time replyToken, so — unlike replyToLine — they
+ * can't fail from a token that's expired or already been used. Used as a
+ * fallback when a reply attempt fails, so slow processing (e.g. a big
+ * trip-photo batch) never results in total silence. */
+export async function pushToLine(to: string, text: string, channelAccessToken: string): Promise<void> {
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
@@ -180,11 +226,53 @@ export async function pushToLine(userId: string, text: string, channelAccessToke
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      to: userId,
+      to,
       messages: [{ type: "text", text: text.slice(0, 5000) }],
     }),
   });
   if (!res.ok) {
     throw new Error(`LINE push API error (${res.status}): ${await res.text()}`);
+  }
+}
+
+/** A group member's display name, even if they've never added the OA as a
+ * friend — unlike the general profile API (`/v2/bot/profile/:userId`,
+ * which requires a friend relationship), this group-scoped endpoint works
+ * for any member of a group the bot is still in. Used for attribution
+ * ("who logged this") in group mode — purely cosmetic, so any failure
+ * (member left, bot removed from group, network error) just degrades to
+ * null rather than throwing. */
+export async function getGroupMemberProfile(
+  groupId: string,
+  userId: string,
+  channelAccessToken: string
+): Promise<{ displayName: string } | null> {
+  try {
+    const res = await fetch(`https://api.line.me/v2/bot/group/${groupId}/member/${userId}`, {
+      headers: { Authorization: `Bearer ${channelAccessToken}` },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { displayName?: string };
+    return data.displayName ? { displayName: data.displayName } : null;
+  } catch (err) {
+    console.error("getGroupMemberProfile failed", err);
+    return null;
+  }
+}
+
+/** A group's own name, used to label its spreadsheet more usefully than a
+ * generic "สมุดกลุ่ม" when a group first links its account — same
+ * best-effort treatment as getGroupMemberProfile, never blocks linking. */
+export async function getGroupSummary(groupId: string, channelAccessToken: string): Promise<{ groupName: string } | null> {
+  try {
+    const res = await fetch(`https://api.line.me/v2/bot/group/${groupId}/summary`, {
+      headers: { Authorization: `Bearer ${channelAccessToken}` },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { groupName?: string };
+    return data.groupName ? { groupName: data.groupName } : null;
+  } catch (err) {
+    console.error("getGroupSummary failed", err);
+    return null;
   }
 }
