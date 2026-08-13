@@ -1,11 +1,25 @@
 import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
-import { matchAiCommand } from "./aiCommands.ts";
+import { answerQuestion, matchAiCommand } from "./aiCommands.ts";
+import { interpretMessage, type InterpretedIntent } from "./aiInterpreter.ts";
 import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";
-import { matchCalendarCommand } from "./calendarCommands.ts";
-import { matchCommand } from "./commands.ts";
+import {
+  answerCalendarQuery,
+  matchCalendarCommand,
+  promptCalendarCreateFromDraft,
+  promptCalendarDeleteByKeyword,
+  promptCalendarEditByKeyword,
+} from "./calendarCommands.ts";
+import { buildHelpText, matchCommand } from "./commands.ts";
+import { appendConversationTurn, getConversationHistory } from "./conversationHistory.ts";
 import { resolveConfirmation } from "./confirmations.ts";
-import { matchDiaryCommand } from "./diaryCommands.ts";
+import {
+  answerDiaryByDate,
+  answerDiaryMonthSummary,
+  answerDiarySearch,
+  matchDiaryCommand,
+  promptDiaryCreateFromDraft,
+} from "./diaryCommands.ts";
 import { uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
@@ -14,6 +28,7 @@ import {
   buildReturnGreeting,
   classifyGreeting,
   matchProvinceCommand,
+  setProvinceByName,
 } from "./greetingCommands.ts";
 import {
   fetchLineMediaContent,
@@ -50,7 +65,7 @@ import {
 import { applyPersona } from "./persona.ts";
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
-import { matchTripCommand } from "./tripCommands.ts";
+import { endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
@@ -272,18 +287,29 @@ async function buildCalendarRelinkPrompt(env: Env, lineUserId: string, origin: s
 const CALENDAR_API_DISABLED_MESSAGE =
   'ปฏิทินยังใช้ไม่ได้ เพราะ "Google Calendar API" ยังไม่ได้เปิดใช้งานในโปรเจกต์ Google Cloud (คนละเรื่องกับสิทธิ์ของบัญชีที่เชื่อมไว้ เชื่อมบัญชีใหม่ไม่ช่วย) ผู้ดูแลต้องไปที่ Google Cloud Console → APIs & Services → Library → ค้นหา "Google Calendar API" → กด Enable แล้วลองพิมพ์คำสั่งปฏิทินใหม่อีกครั้ง';
 
-// The full matcher-dispatch chain shared by personal mode (handleTextMessage)
-// and group mode (handleGroupTextMessage) below — every command that both
-// modes support, in the exact precedence order both rely on. Used to be two
-// hand-copied ~90-line blocks that had to be kept in sync by hand on every
-// change (a real risk: a fix or a new matcher applied to only one of the two
-// silently makes the modes diverge, with no compiler or test signal beyond
-// whichever mode someone happens to add a test for). Returns null when
-// nothing matched, meaning "fall through to the pending-clarification /
-// chatEngine handling", which is genuinely different between the two modes
-// (personal mode's greeting handling in particular has no group equivalent)
-// and stays in each caller rather than being forced into this shared shape.
-async function dispatchCoreCommands(
+// Builds the ActionCtx factory shared by dispatch functions below — pulled
+// out once so resolvePendingConfirmation, dispatchLegacyCommands, and
+// runInterpretedIntent (the AI interpreter's own routing table) all build it
+// identically.
+function makeActionCtxFactory(env: Env, subjectId: string, link: AccountLink) {
+  return (accessToken: string): ActionCtx => ({
+    accessToken,
+    kv: env.ACCOUNTS,
+    lineUserId: subjectId,
+    spreadsheetId: link.spreadsheetId,
+    geminiApiKey: env.GEMINI_API_KEY,
+  });
+}
+
+// A pending "ใช่/ไม่ใช่" confirmation (trip switch, calendar create/edit/
+// delete, diary entry, transaction — PLAN.md 15.3/15.4/17.9) always resolves
+// deterministically, checked before anything else including the AI
+// interpreter below — an "ใช่" reply must always confirm the actual pending
+// action via isAffirmative's exact-match check (confirmations.ts), never get
+// re-read as free-form chitchat by the AI. Split out from the old
+// dispatchCoreCommands (see dispatchLegacyCommands below) so the AI
+// interpreter can be tried in between this and the legacy matcher chain.
+async function resolvePendingConfirmation(
   env: Env,
   subjectId: string,
   link: AccountLink,
@@ -291,28 +317,145 @@ async function dispatchCoreCommands(
   origin: string,
   tokenCache: TokenCache | undefined
 ): Promise<string | null> {
-  const actionCtx = (accessToken: string): ActionCtx => ({
-    accessToken,
-    kv: env.ACCOUNTS,
-    lineUserId: subjectId,
-    spreadsheetId: link.spreadsheetId,
-    geminiApiKey: env.GEMINI_API_KEY,
-  });
-
+  const actionCtx = makeActionCtxFactory(env, subjectId, link);
   try {
     const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, subjectId);
-    if (pendingConfirmation) {
-      const reply = await withFreshAccessToken(
-        env,
-        link.refreshToken,
-        (accessToken) => resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation),
-        tokenCache
-      );
-      if (reply) return reply;
-      // Not an affirmative reply — the pending question is already cleared
-      // (see confirmations.ts), fall through and handle `text` normally.
-    }
+    if (!pendingConfirmation) return null;
+    const reply = await withFreshAccessToken(
+      env,
+      link.refreshToken,
+      (accessToken) => resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation),
+      tokenCache
+    );
+    // null means "not an affirmative reply" — the pending question is
+    // already cleared (see confirmations.ts), fall through and handle
+    // `text` normally.
+    return reply;
+  } catch (err) {
+    if (err instanceof CalendarApiDisabledError) return CALENDAR_API_DISABLED_MESSAGE;
+    if (err instanceof InsufficientCalendarScopeError) return buildCalendarRelinkPrompt(env, subjectId, origin);
+    throw err;
+  }
+}
 
+// Executes whichever intent the AI interpreter (aiInterpreter.ts) decided on
+// for a fresh message, routing to the exact same deterministic
+// apply/prompt/answer functions the regex matchers below use — this never
+// writes to Sheets/Calendar/Drive itself, and anything that saves data still
+// goes through the normal confirm-before-save step (promptTransactionCreate/
+// promptCalendarCreateFromDraft/etc. only ever set a pendingConfirmation,
+// never call the apply* functions directly). `getAttribution` is lazy (only
+// called for the "transaction" intent) so group mode doesn't pay for a group
+// member profile lookup on every single message, only when a transaction is
+// actually being logged — same reasoning as the original group draft path.
+async function runInterpretedIntent(
+  env: Env,
+  subjectId: string,
+  link: AccountLink,
+  intent: InterpretedIntent,
+  rawText: string,
+  origin: string,
+  tokenCache: TokenCache | undefined,
+  getAttribution: () => Promise<TransactionAttribution>
+): Promise<string> {
+  const actionCtx = makeActionCtxFactory(env, subjectId, link);
+  const withToken = <T>(fn: (ctx: ActionCtx) => Promise<T>): Promise<T> =>
+    withFreshAccessToken(env, link.refreshToken, (accessToken) => fn(actionCtx(accessToken)), tokenCache);
+
+  try {
+    switch (intent.intent) {
+      case "transaction": {
+        const attribution = await getAttribution();
+        return promptTransactionCreate({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.transactions, rawText, attribution);
+      }
+      case "calendar_create":
+        return withToken((ctx) =>
+          promptCalendarCreateFromDraft(ctx, {
+            title: intent.calendarTitle,
+            dateKey: intent.calendarDateKey,
+            time: intent.calendarTime,
+          })
+        );
+      case "calendar_delete":
+        return withToken((ctx) => promptCalendarDeleteByKeyword(ctx, intent.calendarKeyword));
+      case "calendar_edit":
+        return withToken((ctx) =>
+          promptCalendarEditByKeyword(ctx, intent.calendarKeyword, intent.calendarDateKey, intent.calendarTime)
+        );
+      case "calendar_query":
+        return withToken((ctx) =>
+          answerCalendarQuery(ctx, intent.calendarRangeFromKey, intent.calendarRangeToKeyExclusive, intent.calendarRangeLabel)
+        );
+      case "diary_create":
+        return withToken((ctx) =>
+          promptDiaryCreateFromDraft(ctx, { category: intent.diaryCategory, text: intent.diaryText })
+        );
+      case "diary_query_date":
+        return withToken((ctx) => answerDiaryByDate(ctx, intent.diaryDateKey));
+      case "diary_query_month":
+        return withToken((ctx) => answerDiaryMonthSummary(ctx));
+      case "diary_search":
+        return withToken((ctx) => answerDiarySearch(ctx, intent.diarySearchTerm));
+      case "trip_start":
+        return withToken((ctx) => promptOrStartTrip(ctx, intent.tripName));
+      case "trip_end":
+        return withToken((ctx) => endTrip(ctx));
+      case "trip_status":
+        return withToken((ctx) => tripStatus(ctx));
+      case "set_province":
+        return setProvinceByName(env.ACCOUNTS, subjectId, intent.provinceName);
+      case "question":
+        return withToken((ctx) => answerQuestion(ctx, intent.question));
+      case "help":
+        return buildHelpText();
+      case "chitchat":
+      case "unclear":
+        return intent.reply;
+    }
+  } catch (err) {
+    if (err instanceof CalendarApiDisabledError) return CALENDAR_API_DISABLED_MESSAGE;
+    if (err instanceof InsufficientCalendarScopeError) return buildCalendarRelinkPrompt(env, subjectId, origin);
+    throw err;
+  }
+}
+
+// Best-effort: recording a turn is a nice-to-have for future context, never
+// something that should turn a successful reply into a failure — a KV
+// hiccup here must not surface as an error to the user after their message
+// already succeeded.
+async function recordConversationTurn(env: Env, subjectId: string, userText: string, botText: string): Promise<void> {
+  try {
+    await appendConversationTurn(env.ACCOUNTS, subjectId, userText, botText);
+  } catch (err) {
+    console.error("recordConversationTurn failed", err);
+  }
+}
+
+// The regex/keyword matcher-dispatch chain shared by personal mode
+// (handleTextMessage) and group mode (handleGroupTextMessage) below — every
+// command that both modes support, in the exact precedence order both rely
+// on. This is now the *fallback* path (PLAN.md 17.11): tried only when the
+// AI interpreter's own call fails outright (timeout, API error, malformed
+// JSON) or wasn't attempted at all (a pending clarification is active — see
+// handleTextMessage). Used to be two hand-copied ~90-line blocks that had to
+// be kept in sync by hand on every change (a real risk: a fix or a new
+// matcher applied to only one of the two silently makes the modes diverge,
+// with no compiler or test signal beyond whichever mode someone happens to
+// add a test for). Returns null when nothing matched, meaning "fall through
+// to the chatEngine handling", which is genuinely different between the two
+// modes and stays in each caller rather than being forced into this shared
+// shape.
+async function dispatchLegacyCommands(
+  env: Env,
+  subjectId: string,
+  link: AccountLink,
+  text: string,
+  origin: string,
+  tokenCache: TokenCache | undefined
+): Promise<string | null> {
+  const actionCtx = makeActionCtxFactory(env, subjectId, link);
+
+  try {
     // Checked before every other matcher below, not just matchCommand's
     // report shortcuts: "ถาม"/"วิเคราะห์" is an explicit, unambiguous signal
     // that this message is for the AI, and several other matchers key off
@@ -431,13 +574,56 @@ export async function handleTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
 
-  const coreReply = await dispatchCoreCommands(env, lineUserId, link, text, origin, tokenCache);
-  if (coreReply !== null) return coreReply;
+  const confirmationReply = await resolvePendingConfirmation(env, lineUserId, link, text, origin, tokenCache);
+  if (confirmationReply !== null) {
+    await recordConversationTurn(env, lineUserId, text, confirmationReply);
+    return confirmationReply;
+  }
 
   const pending = await getPending(env.ACCOUNTS, lineUserId);
 
-  // Checked after every real command above so "วิธีใช้"/"help" (also in
-  // chatEngine's GREETINGS) still get the detailed list from matchCommand
+  // PLAN.md 17.11: every fresh message is interpreted by AI first — full
+  // free-form understanding plus recent conversation history, instead of
+  // only recognizing known command phrases. Skipped only when a chatEngine
+  // clarification is already in flight (`pending`, e.g. "จำนวนเงินเท่าไหร่คะ")
+  // — that specific continuation stays on the deterministic path that
+  // originally asked it, below, rather than being handed to the AI
+  // mid-clarification. Tried *before* the legacy matcher chain (including
+  // "วิธีใช้"/greeting handling right below it) so the AI genuinely gets
+  // first say over everything, exactly as requested — a well-known phrase
+  // like "วิธีใช้" still resolves correctly either way, since the AI
+  // interpreter's own "help" intent routes to the exact same buildHelpText()
+  // the legacy path would have used (see runInterpretedIntent).
+  if (!pending) {
+    const history = await getConversationHistory(env.ACCOUNTS, lineUserId).catch((err) => {
+      console.error("getConversationHistory failed, continuing without history", err);
+      return [];
+    });
+    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history);
+    if (intent) {
+      const reply = await runInterpretedIntent(env, lineUserId, link, intent, text, origin, tokenCache, async () => ({
+        addedBy: lineUserId,
+        addedByName: "LINE",
+      }));
+      await recordConversationTurn(env, lineUserId, text, reply);
+      return reply;
+    }
+    // interpretMessage returned null: the call itself failed (timeout, API
+    // error, malformed/invalid JSON) — fall through to the same
+    // deterministic matcher chain this codebase always used, so an AI
+    // hiccup degrades to the old, fully rule-based behavior instead of ever
+    // blocking a reply.
+  }
+
+  const legacyReply = await dispatchLegacyCommands(env, lineUserId, link, text, origin, tokenCache);
+  if (legacyReply !== null) {
+    await recordConversationTurn(env, lineUserId, text, legacyReply);
+    return legacyReply;
+  }
+
+  // Checked after every deterministic command above (including matchCommand's
+  // HELP_TEST branch inside dispatchLegacyCommands) so "วิธีใช้"/"help" (also
+  // in chatEngine's GREETINGS) still gets the detailed list from matchCommand
   // instead of being shadowed by this shorter welcome blurb — and only when
   // there's no dangling money clarification, so a stray greeting mid-flow
   // still cancels it properly via chatEngine's own greeting handling instead
@@ -446,12 +632,21 @@ export async function handleTextMessage(
   // yet for a weather/news briefing); the first greeting of each Bangkok
   // calendar day after that gets the full morning briefing (PLAN.md 15.11);
   // any later greeting the same day just gets a short prompt instead of
-  // repeating it.
+  // repeating it. This stateful once-a-day logic stays fully deterministic
+  // rather than being handed to the AI interpreter to reinvent (PLAN.md
+  // 17.11) — it's only reached here because the interpreter itself failed
+  // (see the fallback comment above); when it succeeds, a greeting is one of
+  // "chitchat"/"help" and is handled by the interpreter branch instead.
   if (!pending && isGreeting(text)) {
     const greetingKind = await classifyGreeting(env.ACCOUNTS, lineUserId);
-    if (greetingKind === "welcome") return WELCOME_MESSAGE;
-    if (greetingKind === "briefing") return buildMorningBriefing(env, env.ACCOUNTS, lineUserId);
-    return buildReturnGreeting();
+    const reply =
+      greetingKind === "welcome"
+        ? WELCOME_MESSAGE
+        : greetingKind === "briefing"
+          ? await buildMorningBriefing(env, env.ACCOUNTS, lineUserId)
+          : buildReturnGreeting();
+    await recordConversationTurn(env, lineUserId, text, reply);
+    return reply;
   }
 
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
@@ -467,14 +662,17 @@ export async function handleTextMessage(
   // successful draft; promptTransactionCreate's confirmation text replaces it.
   const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
   if (drafts.length > 0) {
-    return promptTransactionCreate(
+    const reply = await promptTransactionCreate(
       { kv: env.ACCOUNTS, lineUserId },
       drafts,
       text,
       { addedBy: lineUserId, addedByName: "LINE" }
     );
+    await recordConversationTurn(env, lineUserId, text, reply);
+    return reply;
   }
 
+  await recordConversationTurn(env, lineUserId, text, result.botMessage);
   return result.botMessage;
 }
 
@@ -511,14 +709,46 @@ export async function handleGroupTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, subjectId);
   if (!link) return buildGroupUnlinkedPrompt(env, groupId, origin);
 
-  const coreReply = await dispatchCoreCommands(env, subjectId, link, text, origin, tokenCache);
-  if (coreReply !== null) return coreReply;
+  const confirmationReply = await resolvePendingConfirmation(env, subjectId, link, text, origin, tokenCache);
+  if (confirmationReply !== null) {
+    await recordConversationTurn(env, subjectId, text, confirmationReply);
+    return confirmationReply;
+  }
 
   // Pending clarifications (PENDING_TTL_SECONDS in state.ts) are shared by
   // the whole group, not just whoever the bot originally asked — anyone
   // replying "60" to "จำนวนเงินเท่าไหร่คะ" resolves it, matching how a
   // question posed to a group chat naturally works.
   const pending = await getPending(env.ACCOUNTS, subjectId);
+
+  // PLAN.md 17.11: same AI-interpreter-first flow as personal mode. No
+  // group-specific greeting check to skip here first — group mode never had
+  // one (see this function's own comment above), so this is the very next
+  // gate after pendingConfirmation/pendingClarification. Attribution is
+  // resolved lazily (only inside runInterpretedIntent's "transaction" case)
+  // so an ordinary non-money message in a group doesn't pay for a member
+  // profile lookup it doesn't need.
+  if (!pending) {
+    const history = await getConversationHistory(env.ACCOUNTS, subjectId).catch((err) => {
+      console.error("getConversationHistory failed, continuing without history", err);
+      return [];
+    });
+    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history);
+    if (intent) {
+      const reply = await runInterpretedIntent(env, subjectId, link, intent, text, origin, tokenCache, () =>
+        resolveGroupAttribution(env, groupId, senderUserId)
+      );
+      await recordConversationTurn(env, subjectId, text, reply);
+      return reply;
+    }
+  }
+
+  const legacyReply = await dispatchLegacyCommands(env, subjectId, link, text, origin, tokenCache);
+  if (legacyReply !== null) {
+    await recordConversationTurn(env, subjectId, text, legacyReply);
+    return legacyReply;
+  }
+
   const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, subjectId, result.pending);
 
@@ -531,9 +761,12 @@ export async function handleGroupTextMessage(
   const drafts = result.transactionDrafts ?? (result.transactionDraft ? [result.transactionDraft] : []);
   if (drafts.length > 0) {
     const attribution = await resolveGroupAttribution(env, groupId, senderUserId);
-    return promptTransactionCreate({ kv: env.ACCOUNTS, lineUserId: subjectId }, drafts, text, attribution);
+    const reply = await promptTransactionCreate({ kv: env.ACCOUNTS, lineUserId: subjectId }, drafts, text, attribution);
+    await recordConversationTurn(env, subjectId, text, reply);
+    return reply;
   }
 
+  await recordConversationTurn(env, subjectId, text, result.botMessage);
   return result.botMessage;
 }
 

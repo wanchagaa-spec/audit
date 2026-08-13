@@ -632,6 +632,45 @@ Two things, requested together:
   draft the other had only just replaced. Different subjects still process concurrently, so an
   ordinary batch (almost always different senders) keeps the same throughput as before.
 
+### Full AI message interpretation + conversation memory (PLAN.md 17.11)
+
+Every fresh message is now interpreted by Gemini first (`aiInterpreter.ts`'s `interpretMessage`) —
+free-form understanding of the whole sentence, plus a rolling window of recent conversation history
+per subject (`conversationHistory.ts`, KV, 12 messages / 24h TTL) — instead of only recognizing
+known command phrases. This is a deliberate, explicitly requested reversal of this codebase's
+original guarantee that money is never decided by AI (PLAN.md 15.10); the confirm-before-save
+safety net (17.9) is what stays in place to bound the risk:
+
+- `interpretMessage` never writes to Sheets/Calendar/Drive itself — it only returns a structured,
+  validated `InterpretedIntent`, which `index.ts`'s `runInterpretedIntent` routes to the **exact
+  same** deterministic functions the regex matchers already used (`promptTransactionCreate`,
+  `promptCalendarCreateFromDraft`, `promptDiaryCreateFromDraft`, etc.). Anything that saves data
+  still always asks to confirm first — nothing about 17.9's guarantee changed, only *who decides
+  what a message means* did.
+- `validateIntent` never trusts the model's JSON blindly: a `categoryId` must actually exist in
+  `DEFAULT_CATEGORIES` with a matching type, dates/times must be real and correctly formatted — a
+  syntactically valid but semantically wrong intent (an invented category, an impossible date) is
+  rejected outright, treated exactly like a failed call.
+- **Graceful degradation is the default, not an edge case**: if the interpreter call fails
+  (timeout, API error, malformed/invalid JSON), the message falls straight through to the original
+  deterministic matcher chain (`dispatchLegacyCommands`, renamed from the old `dispatchCoreCommands`)
+  and, after that, the original chatEngine parser — the exact same behavior this codebase always
+  had. A pending "ใช่/ไม่ใช่" confirmation is still always resolved deterministically first, never
+  handed to the AI, and a chatEngine mid-clarification (`pending`) skips the interpreter entirely
+  for that one reply.
+- An `"unclear"` intent asks the AI's own clarifying question directly, without ever touching
+  chatEngine's `PendingClarification` state — the next message goes through the interpreter again
+  with updated conversation history, rather than being forced into chatEngine's fixed
+  amount/category question flow.
+- Calendar/diary/trip/province command logic was refactored to expose the underlying
+  apply/prompt/answer functions (e.g. `promptCalendarDeleteByKeyword`, `answerDiarySearch`,
+  `promptOrStartTrip`, `setProvinceByName`) so both the regex matchers and the AI interpreter call
+  the same code — no duplicated logic to keep in sync by hand.
+- **Cost tradeoff, accepted knowingly**: a message can now trigger up to two sequential Gemini
+  calls (interpret, then persona-style the reply) — real additional quota usage and latency on top
+  of 17.9's already-accepted persona cost. `INTERPRETER_TIMEOUT_MS` (3s) keeps a slow/hanging call
+  from blocking a reply for long, same reasoning as persona's own timeout.
+
 ## Local development
 
 ```bash

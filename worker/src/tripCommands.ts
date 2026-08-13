@@ -28,40 +28,50 @@ async function startTrip(ctx: ActionCtx, name: string): Promise<string> {
   return `เริ่มทริป "${name}" แล้ว ส่งรูป/คลิปเข้ามาได้เลย จะเก็บให้อัตโนมัติ พิมพ์ "จบทริป" ตอนเสร็จทริปนะ`;
 }
 
+// Shared by the regex matcher below and the AI interpreter's routing table
+// (aiInterpreter.ts, dispatched in index.ts) — same reasoning as
+// calendarCommands.ts/diaryCommands.ts's prompt*/answer* exports.
+
+export async function promptOrStartTrip(ctx: ActionCtx, newName: string): Promise<string> {
+  const existing = await getActiveTrip(ctx.kv, ctx.lineUserId);
+  if (existing && existing.name === newName) {
+    return `ทริป "${newName}" เปิดอยู่แล้ว ส่งรูป/คลิปเข้ามาได้เลย`;
+  }
+  if (existing) {
+    await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "tripSwitch", newName });
+    return `ยังไม่ได้ปิดทริป "${existing.name}" เลย จะปิดแล้วเริ่มทริป "${newName}" แทนเลยไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+  }
+  return startTrip(ctx, newName);
+}
+
+export async function endTrip(ctx: ActionCtx): Promise<string> {
+  const existing = await getActiveTrip(ctx.kv, ctx.lineUserId);
+  if (!existing) return "ตอนนี้ไม่มีทริปที่เปิดอยู่นะ";
+  await setActiveTrip(ctx.kv, ctx.lineUserId, null);
+  return `ปิดทริป "${existing.name}" แล้ว`;
+}
+
+export async function tripStatus(ctx: ActionCtx): Promise<string> {
+  const existing = await getActiveTrip(ctx.kv, ctx.lineUserId);
+  if (!existing) {
+    return 'ตอนนี้ไม่มีทริปที่เปิดอยู่ ส่งรูป/คลิปตอนนี้จะไม่ถูกเก็บอัตโนมัติ พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ';
+  }
+  const startedDate = existing.startedAt.slice(0, 10);
+  return `กำลังเปิดทริป "${existing.name}" อยู่ (เริ่มเมื่อ ${startedDate}) ส่งรูป/คลิปเข้ามาได้เลย พิมพ์ "จบทริป" เมื่อเสร็จ`;
+}
+
 export async function matchTripCommand(text: string): Promise<Handler | null> {
   const newName = parseStartTrip(text);
   if (newName) {
-    return async (ctx) => {
-      const existing = await getActiveTrip(ctx.kv, ctx.lineUserId);
-      if (existing && existing.name === newName) {
-        return `ทริป "${newName}" เปิดอยู่แล้ว ส่งรูป/คลิปเข้ามาได้เลย`;
-      }
-      if (existing) {
-        await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "tripSwitch", newName });
-        return `ยังไม่ได้ปิดทริป "${existing.name}" เลย จะปิดแล้วเริ่มทริป "${newName}" แทนเลยไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
-      }
-      return startTrip(ctx, newName);
-    };
+    return (ctx) => promptOrStartTrip(ctx, newName);
   }
 
   if (isEndTrip(text)) {
-    return async (ctx) => {
-      const existing = await getActiveTrip(ctx.kv, ctx.lineUserId);
-      if (!existing) return "ตอนนี้ไม่มีทริปที่เปิดอยู่นะ";
-      await setActiveTrip(ctx.kv, ctx.lineUserId, null);
-      return `ปิดทริป "${existing.name}" แล้ว`;
-    };
+    return (ctx) => endTrip(ctx);
   }
 
   if (isTripStatus(text)) {
-    return async (ctx) => {
-      const existing = await getActiveTrip(ctx.kv, ctx.lineUserId);
-      if (!existing) {
-        return 'ตอนนี้ไม่มีทริปที่เปิดอยู่ ส่งรูป/คลิปตอนนี้จะไม่ถูกเก็บอัตโนมัติ พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ';
-      }
-      const startedDate = existing.startedAt.slice(0, 10);
-      return `กำลังเปิดทริป "${existing.name}" อยู่ (เริ่มเมื่อ ${startedDate}) ส่งรูป/คลิปเข้ามาได้เลย พิมพ์ "จบทริป" เมื่อเสร็จ`;
-    };
+    return (ctx) => tripStatus(ctx);
   }
 
   return null;

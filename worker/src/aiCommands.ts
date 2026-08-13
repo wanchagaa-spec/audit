@@ -172,6 +172,101 @@ function buildSystemInstruction(
   ].join("\n");
 }
 
+// Answers any free-form question about the user's own money/calendar/diary,
+// or general finance/domestic news — the full pipeline behind "ถาม"/
+// "วิเคราะห์" (matchAiCommand below), factored out so the AI interpreter's
+// "question" intent (aiInterpreter.ts, dispatched in index.ts) can reuse the
+// exact same guarded flow for a question it extracted itself from free-form
+// text, instead of re-fetching data or re-building a system instruction.
+export async function answerQuestion(ctx: ActionCtx, question: string): Promise<string> {
+  // Checked before touching any of the user's own Sheets/Calendar/Diary
+  // data — a finance-news question is a completely different kind of
+  // request (world news, not personal data), so there's nothing to gain
+  // from fetching any of that just to answer it.
+  if (isFinanceNewsQuestion(question)) {
+    try {
+      const summary = await fetchFinanceNewsSummary(ctx.geminiApiKey);
+      return summary ?? FALLBACK_MESSAGE;
+    } catch (err) {
+      console.error("fetchFinanceNewsSummary failed", err);
+      return FALLBACK_MESSAGE;
+    }
+  }
+
+  // Same reasoning as the finance branch above — general daily-news
+  // questions aren't about the user's own money/calendar/diary either.
+  if (isDomesticNewsQuestion(question)) {
+    try {
+      const summary = await fetchNewsSummary(ctx.geminiApiKey);
+      return summary ?? FALLBACK_MESSAGE;
+    } catch (err) {
+      console.error("fetchNewsSummary failed", err);
+      return FALLBACK_MESSAGE;
+    }
+  }
+
+  const month = bangkokMonthKey();
+  const today = bangkokDateKey();
+  const rangeEndExclusive = addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS);
+  const calendarRangeLabel = `${formatThaiDateLabel(today)} ถึง ${formatThaiDateLabel(
+    addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS - 1)
+  )}`;
+
+  const [allTx, allDiary] = await Promise.all([
+    readAllTransactions(ctx.accessToken, ctx.spreadsheetId),
+    readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv),
+  ]);
+  // Calendar access needs its own OAuth scope some already-linked accounts
+  // never granted, and can fail for other transient reasons too — fetched
+  // separately (not in the Promise.all above) and caught locally so a
+  // calendar hiccup degrades to "couldn't check calendar" instead of
+  // blocking money/diary questions that don't even need it, the way it
+  // would if this threw uncaught up to handleTextMessage's calendar-scope
+  // handling (which would show a relink prompt instead of any AI answer).
+  let calendarEvents: CalendarEventSummary[] | null;
+  try {
+    calendarEvents = await listCalendarEvents(
+      ctx.accessToken,
+      bangkokStartOfDayIso(today),
+      bangkokStartOfDayIso(rangeEndExclusive)
+    );
+  } catch (err) {
+    console.error("askGemini: fetching calendar events failed, continuing without them", err);
+    calendarEvents = null;
+  }
+
+  // Same best-effort treatment as Calendar above: no province set at all is
+  // a normal, expected state (not an error), and a transient weather API
+  // failure must not block an unrelated money/calendar/diary question.
+  let weatherLine: string | null = null;
+  try {
+    const province = await getUserProvince(ctx.kv, ctx.lineUserId);
+    if (province) weatherLine = await fetchWeatherSummary(province);
+  } catch (err) {
+    console.error("askGemini: fetching weather failed, continuing without it", err);
+  }
+
+  const monthTx = allTx.filter((r) => r.date?.startsWith(month));
+  const monthDiary = allDiary.filter((r) => r.date?.startsWith(month));
+  const systemInstruction = buildSystemInstruction(
+    formatThaiDateLabel(today),
+    weatherLine,
+    month,
+    monthTx,
+    monthDiary,
+    calendarEvents,
+    calendarRangeLabel
+  );
+
+  try {
+    return await askGemini(ctx.geminiApiKey, systemInstruction, question);
+  } catch (err) {
+    console.error("askGemini failed", err);
+    if (err instanceof GeminiError) return FALLBACK_MESSAGE;
+    throw err;
+  }
+}
+
 export async function matchAiCommand(text: string): Promise<Handler | null> {
   const request = parseAiRequest(text);
   if (!request) return null;
@@ -180,96 +275,5 @@ export async function matchAiCommand(text: string): Promise<Handler | null> {
     return async () => USAGE_HINT;
   }
 
-  // Checked before touching any of the user's own Sheets/Calendar/Diary
-  // data — a finance-news question is a completely different kind of
-  // request (world news, not personal data), so there's nothing to gain
-  // from fetching any of that just to answer it.
-  if (isFinanceNewsQuestion(request.question)) {
-    return async (ctx) => {
-      try {
-        const summary = await fetchFinanceNewsSummary(ctx.geminiApiKey);
-        return summary ?? FALLBACK_MESSAGE;
-      } catch (err) {
-        console.error("fetchFinanceNewsSummary failed", err);
-        return FALLBACK_MESSAGE;
-      }
-    };
-  }
-
-  // Same reasoning as the finance branch above — general daily-news
-  // questions aren't about the user's own money/calendar/diary either.
-  if (isDomesticNewsQuestion(request.question)) {
-    return async (ctx) => {
-      try {
-        const summary = await fetchNewsSummary(ctx.geminiApiKey);
-        return summary ?? FALLBACK_MESSAGE;
-      } catch (err) {
-        console.error("fetchNewsSummary failed", err);
-        return FALLBACK_MESSAGE;
-      }
-    };
-  }
-
-  return async (ctx) => {
-    const month = bangkokMonthKey();
-    const today = bangkokDateKey();
-    const rangeEndExclusive = addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS);
-    const calendarRangeLabel = `${formatThaiDateLabel(today)} ถึง ${formatThaiDateLabel(
-      addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS - 1)
-    )}`;
-
-    const [allTx, allDiary] = await Promise.all([
-      readAllTransactions(ctx.accessToken, ctx.spreadsheetId),
-      readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv),
-    ]);
-    // Calendar access needs its own OAuth scope some already-linked accounts
-    // never granted, and can fail for other transient reasons too — fetched
-    // separately (not in the Promise.all above) and caught locally so a
-    // calendar hiccup degrades to "couldn't check calendar" instead of
-    // blocking money/diary questions that don't even need it, the way it
-    // would if this threw uncaught up to handleTextMessage's calendar-scope
-    // handling (which would show a relink prompt instead of any AI answer).
-    let calendarEvents: CalendarEventSummary[] | null;
-    try {
-      calendarEvents = await listCalendarEvents(
-        ctx.accessToken,
-        bangkokStartOfDayIso(today),
-        bangkokStartOfDayIso(rangeEndExclusive)
-      );
-    } catch (err) {
-      console.error("askGemini: fetching calendar events failed, continuing without them", err);
-      calendarEvents = null;
-    }
-
-    // Same best-effort treatment as Calendar above: no province set at all
-    // is a normal, expected state (not an error), and a transient weather
-    // API failure must not block an unrelated money/calendar/diary question.
-    let weatherLine: string | null = null;
-    try {
-      const province = await getUserProvince(ctx.kv, ctx.lineUserId);
-      if (province) weatherLine = await fetchWeatherSummary(province);
-    } catch (err) {
-      console.error("askGemini: fetching weather failed, continuing without it", err);
-    }
-
-    const monthTx = allTx.filter((r) => r.date?.startsWith(month));
-    const monthDiary = allDiary.filter((r) => r.date?.startsWith(month));
-    const systemInstruction = buildSystemInstruction(
-      formatThaiDateLabel(today),
-      weatherLine,
-      month,
-      monthTx,
-      monthDiary,
-      calendarEvents,
-      calendarRangeLabel
-    );
-
-    try {
-      return await askGemini(ctx.geminiApiKey, systemInstruction, request.question);
-    } catch (err) {
-      console.error("askGemini failed", err);
-      if (err instanceof GeminiError) return FALLBACK_MESSAGE;
-      throw err;
-    }
-  };
+  return (ctx) => answerQuestion(ctx, request.question);
 }

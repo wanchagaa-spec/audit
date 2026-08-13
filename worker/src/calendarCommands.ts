@@ -90,6 +90,60 @@ async function findExactlyOne(
   return { event: matches[0] };
 }
 
+// The following prompt* functions do the actual work for create/delete/edit,
+// each shared by two callers: the regex matcher below (matchCalendarCommand,
+// which extracts arguments from a fixed phrase pattern) and the AI
+// interpreter's routing table (aiInterpreter.ts's runInterpretedIntent in
+// index.ts, which extracts the same arguments itself from free-form text).
+// Keeping the argument-to-confirmation-prompt logic in one place means both
+// paths behave identically once they've settled on the same arguments,
+// regardless of how those arguments were extracted.
+
+export async function promptCalendarCreateFromDraft(ctx: ActionCtx, draft: EventDraft): Promise<string> {
+  await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "calendarCreate", ...draft });
+  return `จะสร้างนัด: "${draft.title}" วันที่ ${formatThaiDateLabel(draft.dateKey)} เวลา ${draft.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+}
+
+export async function promptCalendarDeleteByKeyword(ctx: ActionCtx, keyword: string): Promise<string> {
+  const found = await findExactlyOne(ctx, keyword);
+  if ("message" in found) return found.message;
+  const { event } = found;
+  await setPendingConfirmation(ctx.kv, ctx.lineUserId, {
+    kind: "calendarDelete",
+    eventId: event.id,
+    title: event.title,
+    dateKey: event.dateKey,
+    time: event.time,
+  });
+  return `จะลบนัด "${event.title}" วันที่ ${formatThaiDateLabel(event.dateKey)} เวลา ${event.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+}
+
+export async function promptCalendarEditByKeyword(
+  ctx: ActionCtx,
+  keyword: string,
+  newDateKey: string | undefined,
+  newTime: string | undefined
+): Promise<string> {
+  const found = await findExactlyOne(ctx, keyword);
+  if ("message" in found) return found.message;
+  const { event } = found;
+  if (!newDateKey && !newTime) {
+    return 'ไม่พบวันที่หรือเวลาใหม่เลยนะ ลองพิมพ์แบบ "แก้นัด ประชุมทีม เป็น 13/1/2569 14:00" ดู';
+  }
+  const draft = { title: event.title, dateKey: newDateKey ?? event.dateKey, time: newTime ?? event.time };
+  await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "calendarEdit", eventId: event.id, ...draft });
+  return `จะแก้นัด "${event.title}" เป็นวันที่ ${formatThaiDateLabel(draft.dateKey)} เวลา ${draft.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+}
+
+export async function answerCalendarQuery(
+  ctx: ActionCtx,
+  fromKey: string,
+  toKeyExclusive: string,
+  label: string
+): Promise<string> {
+  return listRange(ctx, fromKey, toKeyExclusive, label);
+}
+
 export async function matchCalendarCommand(text: string): Promise<Handler | null> {
   const trimmed = text.trim();
 
@@ -101,14 +155,14 @@ export async function matchCalendarCommand(text: string): Promise<Handler | null
   if (["มีนัดอะไรวันนี้", "นัดวันนี้", "วันนี้มีนัดอะไร"].includes(trimmed)) {
     return async (ctx) => {
       const today = bangkokDateKey();
-      return listRange(ctx, today, addDaysToDateKey(today, 1), "วันนี้");
+      return answerCalendarQuery(ctx, today, addDaysToDateKey(today, 1), "วันนี้");
     };
   }
 
   if (["มีนัดอะไรพรุ่งนี้", "นัดพรุ่งนี้", "พรุ่งนี้มีนัดอะไร"].includes(trimmed)) {
     return async (ctx) => {
       const tomorrow = addDaysToDateKey(bangkokDateKey(), 1);
-      return listRange(ctx, tomorrow, addDaysToDateKey(tomorrow, 1), "พรุ่งนี้");
+      return answerCalendarQuery(ctx, tomorrow, addDaysToDateKey(tomorrow, 1), "พรุ่งนี้");
     };
   }
 
@@ -116,48 +170,24 @@ export async function matchCalendarCommand(text: string): Promise<Handler | null
     return async (ctx) => {
       const today = bangkokDateKey();
       const startOfWeek = addDaysToDateKey(today, -bangkokWeekdayIndex());
-      return listRange(ctx, startOfWeek, addDaysToDateKey(startOfWeek, 7), "สัปดาห์นี้");
+      return answerCalendarQuery(ctx, startOfWeek, addDaysToDateKey(startOfWeek, 7), "สัปดาห์นี้");
     };
   }
 
   const deleteMatch = trimmed.match(/^ลบนัด\s+(.+)$/s);
   if (deleteMatch) {
     const keyword = deleteMatch[1].trim();
-    return async (ctx) => {
-      const found = await findExactlyOne(ctx, keyword);
-      if ("message" in found) return found.message;
-      const { event } = found;
-      await setPendingConfirmation(ctx.kv, ctx.lineUserId, {
-        kind: "calendarDelete",
-        eventId: event.id,
-        title: event.title,
-        dateKey: event.dateKey,
-        time: event.time,
-      });
-      return `จะลบนัด "${event.title}" วันที่ ${formatThaiDateLabel(event.dateKey)} เวลา ${event.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
-    };
+    return (ctx) => promptCalendarDeleteByKeyword(ctx, keyword);
   }
 
   const editMatch = trimmed.match(/^แก้นัด\s+(.+?)\s+เป็น\s+(.+)$/s);
   if (editMatch) {
     const keyword = editMatch[1].trim();
     const newInfoText = editMatch[2].trim();
-    return async (ctx) => {
-      const found = await findExactlyOne(ctx, keyword);
-      if ("message" in found) return found.message;
-      const { event } = found;
+    return (ctx) => {
       const newDate = extractDate(newInfoText, bangkokYear());
       const newTime = extractTime(newInfoText);
-      if (!newDate && !newTime) {
-        return 'ไม่พบวันที่หรือเวลาใหม่เลยนะ ลองพิมพ์แบบ "แก้นัด ประชุมทีม เป็น 13/1/2569 14:00" ดู';
-      }
-      const draft = {
-        title: event.title,
-        dateKey: newDate ? newDate.dateKey : event.dateKey,
-        time: newTime ? newTime.time : event.time,
-      };
-      await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "calendarEdit", eventId: event.id, ...draft });
-      return `จะแก้นัด "${event.title}" เป็นวันที่ ${formatThaiDateLabel(draft.dateKey)} เวลา ${draft.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+      return promptCalendarEditByKeyword(ctx, keyword, newDate?.dateKey, newTime?.time);
     };
   }
 
@@ -173,10 +203,7 @@ export async function matchCalendarCommand(text: string): Promise<Handler | null
       return async () =>
         'ไม่พบวันที่/เวลาในข้อความนะ ลองพิมพ์แบบ "นัด ประชุมทีม 12/1/2569 13:00" หรือ "นัด ประชุมทีม 12 ม.ค. 13:00" ดู';
     }
-    return async (ctx) => {
-      await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "calendarCreate", ...draft });
-      return `จะสร้างนัด: "${draft.title}" วันที่ ${formatThaiDateLabel(draft.dateKey)} เวลา ${draft.time} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
-    };
+    return (ctx) => promptCalendarCreateFromDraft(ctx, draft);
   }
 
   return null;

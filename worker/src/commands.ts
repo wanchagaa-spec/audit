@@ -88,7 +88,7 @@ function searchMatch(text: string): string | null {
 
 const HELP_TEST = (t: string) => includesAny(t, ["วิธีใช้", "คำสั่ง", "help", "ช่วยเหลือ"]);
 
-function buildHelpText(): string {
+export function buildHelpText(): string {
   const sections = [
     "💰 จดเงิน",
     "• พิมพ์รายการตรงๆ เช่น \"ซื้อกาแฟ 60\" หรือ \"เงินเดือนเข้า 25000\" (ถ้าข้อมูลไม่ครบ ฉันจะถามกลับเอง)",

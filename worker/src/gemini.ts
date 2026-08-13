@@ -27,7 +27,12 @@ export async function askGemini(
   apiKey: string,
   systemInstruction: string,
   userQuestion: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  // Set by aiInterpreter.ts: constrains Gemini to emit valid JSON syntax
+  // (still no guarantee it matches *our* schema — validateIntent there
+  // checks that separately, the same "verify, don't just trust" pattern as
+  // every other AI-touching file in this codebase).
+  jsonMode?: boolean
 ): Promise<string> {
   const res = await fetch(GEMINI_ENDPOINT, {
     method: "POST",
@@ -40,7 +45,10 @@ export async function askGemini(
       contents: [{ role: "user", parts: [{ text: userQuestion }] }],
       // Keeps replies within LINE's comfortable message length without
       // relying on the model to police its own length.
-      generationConfig: { maxOutputTokens: 800 },
+      generationConfig: {
+        maxOutputTokens: 800,
+        ...(jsonMode ? { responseMimeType: "application/json" } : {}),
+      },
     }),
     signal,
   });
