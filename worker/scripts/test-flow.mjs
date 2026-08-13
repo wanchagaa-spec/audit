@@ -95,6 +95,7 @@ const GEOCODE_RESULTS = {
 let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to verify it's 1-per-file
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
+let simulateSpreadsheetAccessDeniedOnce = false; // makes the next canAccessSpreadsheet check (group OAuth relink) fail, to simulate a different Google account than the one that owns the group's spreadsheet
 
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
@@ -116,6 +117,13 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response(JSON.stringify(body), { status: 200 });
   }
   if (u.endsWith("/v4/spreadsheets")) {
+    return new Response(JSON.stringify({ spreadsheetId: "fake-sheet-id" }), { status: 200 });
+  }
+  if (u.includes("?fields=spreadsheetId")) {
+    if (simulateSpreadsheetAccessDeniedOnce) {
+      simulateSpreadsheetAccessDeniedOnce = false;
+      return new Response(JSON.stringify({ error: { message: "The caller does not have permission" } }), { status: 403 });
+    }
     return new Response(JSON.stringify({ spreadsheetId: "fake-sheet-id" }), { status: 200 });
   }
   if (u.includes("?fields=sheets.properties") && !u.includes(".title")) {
@@ -2077,6 +2085,9 @@ check(
 const linkAfterA = await getAccountLink(kv, raceSubjectId);
 check("the group's refresh token matches person A's completed exchange", linkAfterA?.refreshToken === "fake-refresh-token-for-code-person-a");
 
+// Person B's access token can't reach person A's spreadsheet — a different
+// Google account, exactly the race this guard exists for.
+simulateSpreadsheetAccessDeniedOnce = true;
 const oauthCallbackB = await worker.fetch(
   new Request(`${origin}/oauth/callback?code=code-person-b&state=${encodeURIComponent(raceState)}`),
   env,
@@ -2090,6 +2101,28 @@ const linkAfterB = await getAccountLink(kv, raceSubjectId);
 check(
   "the group's refresh token is still person A's after a second, different person's completion attempt",
   linkAfterB?.refreshToken === "fake-refresh-token-for-code-person-a" && linkAfterB?.spreadsheetId === linkAfterA?.spreadsheetId
+);
+
+// Regression test for the fix to the above guard: it must not also block a
+// *legitimate* rescope by person A themselves (e.g. re-consenting after
+// InsufficientCalendarScopeError). person A's new token can still reach the
+// group's existing spreadsheet (canAccessSpreadsheet succeeds, the default
+// mock behavior), so this completion should update the refresh token in
+// place rather than being treated as a no-op.
+const oauthCallbackRescope = await worker.fetch(
+  new Request(`${origin}/oauth/callback?code=code-person-a-rescope&state=${encodeURIComponent(raceState)}`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "the same Google account re-consenting with broader scope actually updates the group's refresh token",
+  oauthCallbackRescope.status === 200 && (await oauthCallbackRescope.text()).includes("เชื่อมบัญชีกลุ่มสำเร็จ")
+);
+const linkAfterRescope = await getAccountLink(kv, raceSubjectId);
+check(
+  "the rescoped refresh token replaced the old one, spreadsheetId unchanged",
+  linkAfterRescope?.refreshToken === "fake-refresh-token-for-code-person-a-rescope" &&
+    linkAfterRescope?.spreadsheetId === linkAfterA?.spreadsheetId
 );
 
 // Group mode, second pass (PLAN.md 17.7): province/calendar/diary/trip
@@ -2223,6 +2256,93 @@ check("the drain actually uploads the group's queued photo into the trip's own f
 check(
   "the drain confirmation pushes to the group itself, not to whichever member happened to send the photo",
   pushes.length === pushesBeforeGroupDrain + 1 && pushes.at(-1).to === groupId && pushes.at(-1).text.includes("ทริปกลุ่ม")
+);
+
+// Regression test for a real bug caught in code review: media events used
+// to be fully processed *before* any text event in the same webhook call —
+// so a mentioned "เริ่มทริป" bundled into the same LINE webhook body as a
+// multi-selected photo send (a real, not just theoretical, case LINE can
+// deliver) would see "no active trip yet" for the photo and, in group
+// mode, silently drop it, even though the trip got created moments later
+// in that very call. Text now always runs first.
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin); // back to a clean "no active trip" state
+const sameBatchBody = JSON.stringify({
+  events: [
+    groupTextEvent({
+      text: "@BotName เริ่มทริป ทริปพร้อมกัน",
+      mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] },
+    }),
+    groupImageEvent({ messageId: "same-batch-img-1", userId: groupSenderB }),
+  ],
+});
+const sameBatchSignature = await signLineBody(sameBatchBody, env.LINE_CHANNEL_SECRET);
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": sameBatchSignature }, body: sameBatchBody }),
+  env
+);
+check(
+  "a photo bundled in the same webhook call as the mentioned trip-start command still queues, not silently dropped",
+  (await countQueuedForUser(kv, `group:${groupId}`)) === 1
+);
+const sameBatchTripFolderId = driveFolders.find((f) => f.name === "ทริปพร้อมกัน")?.id;
+await drainUploadQueue(env);
+check(
+  "the drain uploads that photo into the trip that was started in the very same webhook call",
+  driveUploads.at(-1).parentId === sameBatchTripFolderId
+);
+
+// Regression test for a real bug caught in code review: drainUploadQueue
+// used to key its per-drain summary by subject id alone, so a batch
+// spanning two different trips for the same subject collapsed both
+// succeeded counts into one summary labeled with whichever job happened to
+// be processed last — silently mislabeling which trip some of the
+// uploaded files actually went into. Summaries are now keyed by
+// (subject, tripFolderId), so this must produce two separate, correctly
+// labeled pushes instead of one.
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin);
+const tripOneStartBody = JSON.stringify({
+  events: [groupTextEvent({ text: "@BotName เริ่มทริป ทริปหนึ่ง", mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] } })],
+});
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripOneStartBody, env.LINE_CHANNEL_SECRET) }, body: tripOneStartBody }),
+  env
+);
+const tripOnePhotoBody = JSON.stringify({ events: [groupImageEvent({ messageId: "two-trip-img-1" })] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripOnePhotoBody, env.LINE_CHANNEL_SECRET) }, body: tripOnePhotoBody }),
+  env
+);
+const tripOneFolderId = driveFolders.find((f) => f.name === "ทริปหนึ่ง")?.id;
+
+await handleGroupTextMessage(env, groupId, groupSenderA, "จบทริป", origin);
+const tripTwoStartBody = JSON.stringify({
+  events: [groupTextEvent({ text: "@BotName เริ่มทริป ทริปสอง", mention: { mentionees: [{ index: 0, length: 8, type: "user", isSelf: true }] } })],
+});
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripTwoStartBody, env.LINE_CHANNEL_SECRET) }, body: tripTwoStartBody }),
+  env
+);
+const tripTwoPhotoBody = JSON.stringify({ events: [groupImageEvent({ messageId: "two-trip-img-2" })] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": await signLineBody(tripTwoPhotoBody, env.LINE_CHANNEL_SECRET) }, body: tripTwoPhotoBody }),
+  env
+);
+const tripTwoFolderId = driveFolders.find((f) => f.name === "ทริปสอง")?.id;
+
+check("both trips' photos are queued going into the shared-summary drain", (await countQueuedForUser(kv, `group:${groupId}`)) === 2);
+const pushesBeforeTwoTripDrain = pushes.length;
+await drainUploadQueue(env);
+const twoTripPushes = pushes.slice(pushesBeforeTwoTripDrain);
+check(
+  "draining a batch spanning two trips for the same group sends two separate, correctly labeled pushes",
+  twoTripPushes.length === 2 &&
+    twoTripPushes.some((p) => p.text.includes('"ทริปหนึ่ง"')) &&
+    twoTripPushes.some((p) => p.text.includes('"ทริปสอง"'))
+);
+check(
+  "each trip's photo landed in its own trip folder, not mixed up",
+  driveUploads.some((u) => u.parentId === tripOneFolderId && u.name.includes("two-trip-img-1")) &&
+    driveUploads.some((u) => u.parentId === tripTwoFolderId && u.name.includes("two-trip-img-2"))
 );
 
 // Migration safety: a queue entry written before pushTarget existed (the
