@@ -101,26 +101,45 @@ export async function fetchNewsSummary(geminiApiKey: string): Promise<string | n
   );
 }
 
-/** Formats today's economic-events list for the prompt, or a labeled reason
- * there's nothing to show — distinguishing "couldn't check" (fetch failed)
- * from "checked, confirmed empty" the same way calendar/weather prompts
- * elsewhere in this codebase do, so Gemini reports the right one instead of
- * silently treating both the same. */
+// Bracketed all-caps markers, not natural Thai sentences — found in a real
+// report: the model copied an earlier, more sentence-like version of this
+// "no data" placeholder verbatim into its reply (a long parenthetical the
+// user never should have seen). A marker that reads unmistakably as
+// internal/non-prose data, paired with an explicit "never echo bracketed
+// markers" rule in FINANCE_SYSTEM_INSTRUCTION below, closes that off — the
+// model is told exactly what short Thai sentence to write for each one
+// instead of being left to improvise from the label text itself.
+const CALENDAR_STATUS_UNAVAILABLE = "[CALENDAR_STATUS: UNAVAILABLE]";
+const CALENDAR_STATUS_NONE_TODAY = "[CALENDAR_STATUS: NONE_TODAY]";
+
+/** Formats today's economic-events list for the prompt, or a status marker
+ * distinguishing "couldn't check" (fetch failed) from "checked, confirmed
+ * empty" the same way calendar/weather prompts elsewhere in this codebase
+ * do, so Gemini reports the right one instead of silently treating both
+ * the same. */
 function formatEconomicEventsForPrompt(events: EconomicEvent[] | null): string {
-  if (events === null) return "(ดึงปฏิทินข่าวเศรษฐกิจไม่ได้ตอนนี้ — ถ้าถูกถามให้บอกตรงๆ ว่าเช็คไม่ได้ตอนนี้ แทนที่จะบอกว่าไม่มีข่าว)";
-  if (events.length === 0) return "(เช็คแล้ว ไม่มีข่าวเศรษฐกิจสหรัฐผลกระทบระดับกลาง-สูงวันนี้ตามปฏิทิน)";
+  if (events === null) return CALENDAR_STATUS_UNAVAILABLE;
+  if (events.length === 0) return CALENDAR_STATUS_NONE_TODAY;
   return events.map((e) => `- เวลาไทย ${e.timeThai} น. ${e.title} (ผลกระทบ: ${e.impact})`).join("\n");
 }
 
 const FINANCE_SYSTEM_INSTRUCTION = [
   "คุณช่วยสรุปข่าวการเงิน/ตลาดหุ้นให้ผู้ใช้แชท LINE อ่าน เกี่ยวกับตลาดหุ้นสหรัฐ คริปโต ทองคำ และเศรษฐกิจสหรัฐ",
   "ตอบเป็นภาษาไทยเท่านั้น ไม่ต้องมีคำนำหรือคำลงท้าย ตอบตามโครงสร้างนี้เป๊ะๆ:",
-  '1) สรุปหัวข้อข่าวจาก "หัวข้อข่าวล่าสุดจาก CNBC" ด้านล่าง เป็น bullet ขึ้นต้นแต่ละบรรทัดด้วย "* " จำนวน 3-5 หัวข้อสั้นๆ',
+  // Explicit "แปล" here, not just the general Thai-only rule above — found
+  // in a real report: without this, the model just re-listed the English
+  // CNBC titles as bullets verbatim instead of translating them.
+  '1) แปลและสรุปหัวข้อข่าวจาก "หัวข้อข่าวล่าสุดจาก CNBC" ด้านล่าง (ภาษาอังกฤษ) ให้เป็นภาษาไทยล้วนๆ เป็น bullet ขึ้นต้นแต่ละบรรทัดด้วย "* " จำนวน 3-5 หัวข้อสั้นๆ ห้ามคัดลอกประโยคภาษาอังกฤษมาทั้งดุ้นโดยไม่แปล',
   '2) เว้นบรรทัดว่าง 1 บรรทัด แล้วขึ้นบรรทัดใหม่ว่า "* ข่าวเศรษฐกิจสหรัฐที่ส่งผลต่อทองวันนี้"',
   // The events/times here are real (forexCalendar.ts) — Gemini's only job
   // is picking which ones are actually gold-relevant, never inventing one.
-  '3) ใต้บรรทัดนั้น ให้ดูรายการใน "ปฏิทินข่าวเศรษฐกิจสหรัฐวันนี้จาก Forex Factory" ด้านล่าง แล้วเลือกเฉพาะรายการที่น่าจะส่งผลต่อราคาทองจริงๆ เท่านั้น (เช่น การประกาศ/มติดอกเบี้ยของเฟด ถ้อยแถลงประธานเฟด ตัวเลขการจ้างงาน/คนว่างงาน เงินเฟ้อ/CPI/PCE) แต่ละรายการขึ้นบรรทัดใหม่ รูปแบบ "เวลาไทย <เวลาที่ให้มา> น. <ชื่อข่าว>" ห้ามเปลี่ยนเวลาหรือชื่อข่าวจากที่ให้มา ห้ามใส่รายการที่ไม่เกี่ยวกับทอง',
-  '4) ถ้าไม่มีรายการไหนเข้าเกณฑ์เลย หรือข้อมูลปฏิทินไม่มี ให้เขียนบรรทัดเดียวแทนว่า "วันนี้ยังไม่มีข่าวเศรษฐกิจที่ส่งผลต่อทองนะ" (หรือถ้าเช็คปฏิทินไม่ได้ ให้บอกตามข้อมูลที่ให้มา)',
+  `3) ใต้บรรทัดนั้น ดูรายการใน "ปฏิทินข่าวเศรษฐกิจสหรัฐวันนี้จาก Forex Factory" ด้านล่าง:
+   - ถ้าเจอ ${CALENDAR_STATUS_UNAVAILABLE} ให้เขียนบรรทัดเดียวสั้นๆ ว่า "ตอนนี้เช็คปฏิทินข่าวเศรษฐกิจไม่ได้นะ"
+   - ถ้าเจอ ${CALENDAR_STATUS_NONE_TODAY} ให้เขียนบรรทัดเดียวสั้นๆ ว่า "วันนี้ยังไม่มีข่าวเศรษฐกิจที่ส่งผลต่อทองเลยนะ"
+   - ถ้าเป็นรายการข่าวจริง ให้เลือกเฉพาะรายการที่น่าจะส่งผลต่อราคาทองจริงๆ เท่านั้น (เช่น การประกาศ/มติดอกเบี้ยของเฟด ถ้อยแถลงประธานเฟด ตัวเลขการจ้างงาน/คนว่างงาน เงินเฟ้อ/CPI/PCE) แต่ละรายการขึ้นบรรทัดใหม่ รูปแบบ "เวลาไทย <เวลาที่ให้มา> น. <ชื่อข่าวแปลเป็นไทยสั้นๆ>" ห้ามเปลี่ยนเวลาจากที่ให้มา ถ้าไม่มีรายการไหนเข้าเกณฑ์เลยในลิสต์ ให้เขียนบรรทัดเดียวสั้นๆ ว่า "วันนี้ยังไม่มีข่าวเศรษฐกิจที่ส่งผลต่อทองเลยนะ" แทน`,
+  // Guards the exact failure mode found in the report: the model must never
+  // paste a bracketed status marker straight into the reply.
+  "ห้ามพิมพ์ข้อความในวงเล็บเหลี่ยม [ ] หรือป้ายกำกับสถานะใดๆ ลงในคำตอบเด็ดขาด ป้ายพวกนี้มีไว้บอกสถานะให้คุณอ่านเท่านั้น ไม่ใช่ข้อความสำหรับผู้ใช้ ให้เขียนประโยคของตัวเองตามกติกาข้อ 3 แทนเสมอ",
   "ห้ามระบุตัวเลขราคา/ดัชนีใดๆ เพิ่มเติมนอกจากที่ปรากฏในหัวข้อข่าวหรือปฏิทินที่ให้มา ห้ามสร้างข่าว เวลา หรือเหตุการณ์ที่ไม่มีในข้อมูลที่ให้มาเด็ดขาด",
 ].join("\n");
 

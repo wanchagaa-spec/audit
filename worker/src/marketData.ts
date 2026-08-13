@@ -35,12 +35,19 @@ export interface MarketSnapshot {
   topLosers: MoverQuote[];
 }
 
-const YAHOO_HEADERS = { "User-Agent": "Mozilla/5.0" };
+// Sent on every market-data fetch below, not just Yahoo's — found in a real
+// report: gold and BTC both came back empty in production while movers
+// (already sent with this header) worked fine. A bare Cloudflare Workers
+// fetch() sends no User-Agent at all, and several of these free/unofficial
+// endpoints appear to reject or bot-filter requests that look nothing like a
+// browser — the same reasoning Yahoo's endpoints already needed this for.
+const BROWSER_LIKE_HEADERS = { "User-Agent": "Mozilla/5.0" };
 
 async function fetchBitcoinQuote(): Promise<Quote | null> {
   try {
     const res = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true"
+      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true",
+      { headers: BROWSER_LIKE_HEADERS }
     );
     if (!res.ok) return null;
     const data: any = await res.json();
@@ -56,7 +63,7 @@ async function fetchBitcoinQuote(): Promise<Quote | null> {
 
 async function fetchGoldQuote(): Promise<Quote | null> {
   try {
-    const res = await fetch("https://data-asg.goldprice.org/dbXRates/USD");
+    const res = await fetch("https://data-asg.goldprice.org/dbXRates/USD", { headers: BROWSER_LIKE_HEADERS });
     if (!res.ok) return null;
     const data: any = await res.json();
     const item = data?.items?.[0];
@@ -73,7 +80,7 @@ async function fetchGoldQuote(): Promise<Quote | null> {
 async function fetchMovers(scrId: "day_gainers" | "day_losers", count: number): Promise<MoverQuote[]> {
   try {
     const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?count=${count}&scrIds=${scrId}&lang=en-US&region=US`;
-    const res = await fetch(url, { headers: YAHOO_HEADERS });
+    const res = await fetch(url, { headers: BROWSER_LIKE_HEADERS });
     if (!res.ok) return [];
     const data: any = await res.json();
     const quotes = data?.finance?.result?.[0]?.quotes;

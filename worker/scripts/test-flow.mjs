@@ -2053,7 +2053,7 @@ const financeNoCalendarReply = await handleTextMessage(env, lineUserId, "ถา�
 const noCalendarRequest = geminiRequests.at(-1);
 check(
   "an economic-calendar fetch failure still produces a finance-news answer, labeled as 'couldn't check' not 'no news'",
-  financeNoCalendarReply.includes("[mock AI answer]") && noCalendarRequest.question.includes("ดึงปฏิทินข่าวเศรษฐกิจไม่ได้ตอนนี้")
+  financeNoCalendarReply.includes("[mock AI answer]") && noCalendarRequest.question.includes("[CALENDAR_STATUS: UNAVAILABLE]")
 );
 
 simulateFinanceNewsFetchFailure = true;
