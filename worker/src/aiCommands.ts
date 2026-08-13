@@ -13,7 +13,7 @@
 import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
-import { fetchFinanceNewsSummary } from "./news.ts";
+import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
 import { readAllDiaryEntries, readAllTransactions, type DiaryRow, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokStartOfDayIso, formatThaiDateLabel } from "./thaiDate.ts";
@@ -69,6 +69,19 @@ const FINANCE_KEYWORDS = [
 function isFinanceNewsQuestion(question: string): boolean {
   const lower = question.toLowerCase();
   return FINANCE_KEYWORDS.some((k) => lower.includes(k.toLowerCase()));
+}
+
+// Same idea as FINANCE_KEYWORDS, for general Thai daily-news questions —
+// "ถาม ข่าววันนี้" also has nothing to do with the user's own data. Checked
+// after isFinanceNewsQuestion (below), so a more specific finance phrase
+// like "ข่าวหุ้น" is never shadowed by the generic "ข่าว" catch-all here.
+const DOMESTIC_NEWS_KEYWORDS = [
+  "ข่าววันนี้", "ข่าวประจำวัน", "ข่าวไทย", "ข่าวในประเทศ", "ข่าวสารวันนี้", "ข่าวล่าสุด", "ข่าว",
+];
+
+function isDomesticNewsQuestion(question: string): boolean {
+  const lower = question.toLowerCase();
+  return DOMESTIC_NEWS_KEYWORDS.some((k) => lower.includes(k.toLowerCase()));
 }
 
 function totals(rows: TransactionRow[]): { income: number; expense: number } {
@@ -178,6 +191,20 @@ export async function matchAiCommand(text: string): Promise<Handler | null> {
         return summary ?? FALLBACK_MESSAGE;
       } catch (err) {
         console.error("fetchFinanceNewsSummary failed", err);
+        return FALLBACK_MESSAGE;
+      }
+    };
+  }
+
+  // Same reasoning as the finance branch above — general daily-news
+  // questions aren't about the user's own money/calendar/diary either.
+  if (isDomesticNewsQuestion(request.question)) {
+    return async (ctx) => {
+      try {
+        const summary = await fetchNewsSummary(ctx.geminiApiKey);
+        return summary ?? FALLBACK_MESSAGE;
+      } catch (err) {
+        console.error("fetchNewsSummary failed", err);
         return FALLBACK_MESSAGE;
       }
     };

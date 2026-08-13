@@ -82,6 +82,7 @@ const geminiRequests = []; // captures {systemInstruction, question, apiKey} per
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
 let simulateFinanceNewsFetchFailure = false; // makes the next CNBC RSS request fail, to exercise graceful degradation
+let simulateMarketDataFetchFailure = false; // makes the next batch of market-data requests (BTC/gold/S&P 500/movers) fail, to exercise graceful degradation
 const GEOCODE_RESULTS = {
   เชียงใหม่: { name: "เชียงใหม่", latitude: 18.7883, longitude: 98.9853 },
 };
@@ -363,6 +364,48 @@ globalThis.fetch = async (url, init = {}) => {
       "</channel></rss>",
     ].join("");
     return new Response(rss, { status: 200 });
+  }
+
+  if (u.includes("api.coingecko.com/api/v3/simple/price")) {
+    if (simulateMarketDataFetchFailure) {
+      simulateMarketDataFetchFailure = false;
+      return new Response("simulated market data fetch failure", { status: 500 });
+    }
+    return new Response(JSON.stringify({ bitcoin: { usd: 65000 } }), { status: 200 });
+  }
+  if (u.includes("api.gold-api.com/price/XAU")) {
+    if (simulateMarketDataFetchFailure) {
+      simulateMarketDataFetchFailure = false;
+      return new Response("simulated market data fetch failure", { status: 500 });
+    }
+    return new Response(JSON.stringify({ price: 2345.6 }), { status: 200 });
+  }
+  if (u.includes("query1.finance.yahoo.com/v8/finance/chart")) {
+    if (simulateMarketDataFetchFailure) {
+      simulateMarketDataFetchFailure = false;
+      return new Response("simulated market data fetch failure", { status: 500 });
+    }
+    return new Response(
+      JSON.stringify({ chart: { result: [{ meta: { regularMarketPrice: 5555.55 } }] } }),
+      { status: 200 }
+    );
+  }
+  if (u.includes("query1.finance.yahoo.com/v1/finance/screener/predefined/saved")) {
+    if (simulateMarketDataFetchFailure) {
+      simulateMarketDataFetchFailure = false;
+      return new Response("simulated market data fetch failure", { status: 500 });
+    }
+    const isGainers = u.includes("scrIds=day_gainers");
+    const quotes = isGainers
+      ? [
+          { symbol: "AAAA", regularMarketChangePercent: 18.2 },
+          { symbol: "BBBB", regularMarketChangePercent: 14.7 },
+        ]
+      : [
+          { symbol: "CCCC", regularMarketChangePercent: -16.5 },
+          { symbol: "DDDD", regularMarketChangePercent: -12.1 },
+        ];
+    return new Response(JSON.stringify({ finance: { result: [{ quotes }] } }), { status: 200 });
   }
 
   throw new Error(`unexpected fetch to ${u}`);
@@ -1407,12 +1450,64 @@ check(
   lastFinanceGeminiRequest.systemInstruction.includes("ห้ามระบุตัวเลขราคา") &&
     !lastFinanceGeminiRequest.systemInstruction.includes("รายรับรวม")
 );
+// New capability requested directly: gold/BTC/S&P 500/top-mover numbers from
+// marketData.ts (free no-key APIs) get folded into the finance-news prompt
+// as labeled ground truth, alongside the RSS headlines.
+check(
+  "the finance-news prompt includes real market numbers fetched fresh (BTC/gold/S&P 500/top movers)",
+  lastFinanceGeminiRequest.question.includes("ข้อมูลราคาล่าสุด") &&
+    lastFinanceGeminiRequest.question.includes("65,000") &&
+    lastFinanceGeminiRequest.question.includes("2,345.6") &&
+    lastFinanceGeminiRequest.question.includes("AAAA") &&
+    lastFinanceGeminiRequest.question.includes("CCCC")
+);
 
 simulateFinanceNewsFetchFailure = true;
 const financeNewsFailureReply = await handleTextMessage(env, lineUserId, "ถาม ราคาบิตคอยน์วันนี้", origin);
 check(
   "a finance-news RSS failure degrades to the friendly fallback, not a crash",
   financeNewsFailureReply.includes("ระบบ AI ขัดข้อง")
+);
+
+// Market-data fetches are independent of the RSS fetch and of each other —
+// one endpoint failing (here, only the first of the five concurrent calls,
+// BTC) must not block the headline summary or the other numbers.
+simulateMarketDataFetchFailure = true;
+const financePartialFailureReply = await handleTextMessage(env, lineUserId, "ถาม ข่าวหุ้นวันนี้เป็นไง", origin);
+const partialFailureRequest = geminiRequests.at(-1);
+check(
+  "a partial market-data fetch failure still produces a finance-news answer, just missing that one number",
+  financePartialFailureReply.includes("[mock AI answer]") &&
+    !partialFailureRequest.question.includes("บิตคอยน์") &&
+    partialFailureRequest.question.includes("ทองคำ")
+);
+
+// New capability requested directly: "ถาม ข่าววันนี้" (or similar general
+// news phrasing) routes to the daily domestic-news summary — same pattern
+// as the finance-news routing above, reusing fetchNewsSummary (Bangkok
+// Post RSS), which until now was only wired into the morning briefing.
+const geminiRequestsBeforeDomesticNews = geminiRequests.length;
+const domesticNewsReply = await handleTextMessage(env, lineUserId, "ถาม ข่าววันนี้", origin);
+check(
+  '"ถาม ข่าววันนี้" routes to the domestic daily-news summary, using the Bangkok Post-mocked headlines',
+  domesticNewsReply.includes("[mock AI answer]") && domesticNewsReply.includes("Test headline")
+);
+check(
+  "domestic news doesn't touch the money/calendar/diary Q&A pipeline",
+  geminiRequests.length === geminiRequestsBeforeDomesticNews + 1
+);
+const lastDomesticNewsRequest = geminiRequests.at(-1);
+check(
+  "the domestic-news prompt uses the daily-news framing, not money/calendar totals",
+  lastDomesticNewsRequest.systemInstruction.includes("ข่าวประจำวัน") &&
+    !lastDomesticNewsRequest.systemInstruction.includes("รายรับรวม")
+);
+
+simulateNewsFetchFailure = true;
+const domesticNewsFailureReply = await handleTextMessage(env, lineUserId, "ถาม ข่าวเช้านี้มีอะไรบ้าง", origin);
+check(
+  "a domestic-news RSS failure degrades to the friendly fallback, not a crash",
+  domesticNewsFailureReply.includes("ระบบ AI ขัดข้อง")
 );
 
 const aiAnalyzeReply = await handleTextMessage(env, lineUserId, "วิเคราะห์", origin);
