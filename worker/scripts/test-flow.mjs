@@ -72,6 +72,11 @@ let calendarIdSeq = 0;
 let simulateInsufficientCalendarScope = false;
 let simulateCalendarApiDisabled = false;
 
+const googleTasks = []; // simulates the Google Tasks @default list: {id, title, status}
+let taskIdSeq = 0;
+let simulateInsufficientTasksScope = false;
+let simulateTasksApiDisabled = false;
+
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
@@ -403,6 +408,49 @@ globalThis.fetch = async (url, init = {}) => {
       if (init.method === "DELETE") {
         const idx = calendarEvents.findIndex((e) => e.id === id);
         if (idx >= 0) calendarEvents.splice(idx, 1);
+        return new Response(null, { status: 204 });
+      }
+    }
+  }
+  if (u.startsWith("https://tasks.googleapis.com/tasks/v1/lists/@default/tasks")) {
+    if (simulateInsufficientTasksScope) return new Response("forbidden", { status: 403 });
+    if (simulateTasksApiDisabled) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 403,
+            message:
+              "Google Tasks API has not been used in project 123 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/tasks.googleapis.com/overview",
+            errors: [{ reason: "accessNotConfigured" }],
+          },
+        }),
+        { status: 403 }
+      );
+    }
+    const parsed = new URL(u);
+    if (parsed.pathname === "/tasks/v1/lists/@default/tasks") {
+      if (!init.method || init.method === "GET") {
+        const items = googleTasks.filter((t) => t.status !== "completed");
+        return new Response(JSON.stringify({ items }), { status: 200 });
+      }
+      if (init.method === "POST") {
+        const body = JSON.parse(init.body);
+        taskIdSeq += 1;
+        const id = `task-${taskIdSeq}`;
+        googleTasks.push({ id, title: body.title, status: "needsAction" });
+        return new Response(JSON.stringify({ id }), { status: 200 });
+      }
+    } else {
+      const id = parsed.pathname.split("/").pop();
+      if (init.method === "PATCH") {
+        const body = JSON.parse(init.body);
+        const t = googleTasks.find((t) => t.id === id);
+        if (t) Object.assign(t, body);
+        return new Response(JSON.stringify({ id }), { status: 200 });
+      }
+      if (init.method === "DELETE") {
+        const idx = googleTasks.findIndex((t) => t.id === id);
+        if (idx >= 0) googleTasks.splice(idx, 1);
         return new Response(null, { status: 204 });
       }
     }
@@ -900,7 +948,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("8 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("9 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -910,7 +958,7 @@ await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // tr
 const greetingWhilePendingReply = await handleTextMessage(env, lineUserId, "หวัดดีครับ", origin);
 check(
   "a greeting mid-clarification cancels it via chatEngine, not the rich welcome",
-  !greetingWhilePendingReply.includes("8 เรื่องหลักๆ")
+  !greetingWhilePendingReply.includes("9 เรื่องหลักๆ")
 );
 const afterGreetingReply = await handleTextMessage(env, lineUserId, "ข้าว 30", origin);
 check(
@@ -945,7 +993,7 @@ await env.ACCOUNTS.put(`last-greeting:${lineUserId}`, "2000-01-01");
 const briefingNoProvinceReply = await handleTextMessage(env, lineUserId, "มอนิ่ง", origin);
 check(
   "a first-greeting-of-the-day (not first-ever) gets the morning briefing, not the welcome message",
-  !briefingNoProvinceReply.includes("8 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
+  !briefingNoProvinceReply.includes("9 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
 );
 check(
   "with no province set, the briefing suggests setting one instead of showing weather",
@@ -1842,6 +1890,88 @@ check(
   apiDisabledReply.includes("Google Cloud Console") && !apiDisabledReply.includes("เชื่อมบัญชี Google ใหม่อีกครั้ง")
 );
 simulateCalendarApiDisabled = false;
+
+// 8.5. Tasks (PLAN.md 17.26): "สิ่งที่ต้องทำ" — a plain title-only to-do list
+// backed by Google Tasks. Confirm-before-you-do-it for create/complete/
+// delete, same discipline as calendar/diary/transactions.
+const listEmptyReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
+check("an empty task list says so instead of an empty list", listEmptyReply.includes("ไม่มีสิ่งที่ต้องทำค้างอยู่เลยนะ"));
+
+const taskCreatePromptReply = await handleTextMessage(env, lineUserId, "เพิ่มสิ่งที่ต้องทำ ซื้อของเข้าบ้าน", origin);
+check(
+  "task create asks to confirm before touching Google Tasks",
+  taskCreatePromptReply.includes("ซื้อของเข้าบ้าน") && googleTasks.length === 0
+);
+const taskCreateConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming creates the task",
+  taskCreateConfirmReply.includes("เพิ่มสิ่งที่ต้องทำแล้ว") && googleTasks.length === 1
+);
+
+await handleTextMessage(env, lineUserId, "เพิ่มสิ่งที่ต้องทำ จ่ายบิลค่าน้ำ", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("a second task can be added too", googleTasks.length === 2);
+
+const listWithTasksReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
+check(
+  "the task list shows every incomplete task",
+  listWithTasksReply.includes("ซื้อของเข้าบ้าน") && listWithTasksReply.includes("จ่ายบิลค่าน้ำ")
+);
+
+const completePromptReply = await handleTextMessage(env, lineUserId, "ทำเสร็จแล้ว ซื้อของเข้าบ้าน", origin);
+check(
+  "marking a task complete asks to confirm first",
+  completePromptReply.includes("ซื้อของเข้าบ้าน") && googleTasks.find((t) => t.title === "ซื้อของเข้าบ้าน").status !== "completed"
+);
+const completeConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming marks the task complete and it drops off the incomplete list",
+  completeConfirmReply.includes("เสร็จแล้ว") &&
+    googleTasks.find((t) => t.title === "ซื้อของเข้าบ้าน").status === "completed"
+);
+const listAfterCompleteReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
+check(
+  "a completed task no longer shows up in the list",
+  !listAfterCompleteReply.includes("ซื้อของเข้าบ้าน") && listAfterCompleteReply.includes("จ่ายบิลค่าน้ำ")
+);
+
+const deleteTaskPromptReply = await handleTextMessage(env, lineUserId, "ลบสิ่งที่ต้องทำ จ่ายบิลค่าน้ำ", origin);
+check("delete asks to confirm first", deleteTaskPromptReply.includes("จ่ายบิลค่าน้ำ") && googleTasks.length === 2);
+const deleteTaskConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming removes the task entirely",
+  deleteTaskConfirmReply.includes("ลบสิ่งที่ต้องทำ") && googleTasks.length === 1
+);
+
+const deleteTaskMissingReply = await handleTextMessage(env, lineUserId, "ลบสิ่งที่ต้องทำ ไม่มีจริง", origin);
+check("deleting a non-existent task says so instead of erroring", deleteTaskMissingReply.includes("ไม่พบสิ่งที่ต้องทำ"));
+
+// AI interpreter routing (PLAN.md 17.11/17.26): a natural-language task
+// request without the exact "เพิ่มสิ่งที่ต้องทำ"/"สิ่งที่ต้องทำ" phrasing still
+// reaches the same confirm-before-save flow via task_create/task_list.
+simulateInterpreterResult = { intent: "task_create", taskTitle: "โทรหาหมอ" };
+const interpTaskCreateReply = await handleTextMessage(env, lineUserId, "อย่าลืมโทรหาหมอด้วยนะ", origin);
+check("an AI-interpreted task create still asks to confirm first", interpTaskCreateReply.includes("โทรหาหมอ"));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+simulateInterpreterResult = { intent: "task_list" };
+const interpTaskListReply = await handleTextMessage(env, lineUserId, "มีอะไรต้องทำอีกไหม", origin);
+check("an AI-interpreted task list reaches the same answerTaskList function", interpTaskListReply.includes("โทรหาหมอ"));
+
+simulateInsufficientTasksScope = true;
+const taskRelinkReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
+check(
+  "a scope-less refresh token gets a re-link prompt for Tasks, not a crash",
+  taskRelinkReply.includes("สิทธิ์สิ่งที่ต้องทำเพิ่ม") && taskRelinkReply.includes("accounts.google.com")
+);
+simulateInsufficientTasksScope = false;
+
+simulateTasksApiDisabled = true;
+const taskApiDisabledReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
+check(
+  "a disabled Tasks API gets an 'enable it in Cloud Console' message, not a re-link loop",
+  taskApiDisabledReply.includes("Google Cloud Console") && !taskApiDisabledReply.includes("เชื่อมบัญชี Google ใหม่อีกครั้ง")
+);
+simulateTasksApiDisabled = false;
 
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
@@ -3067,6 +3197,17 @@ const groupDiaryPromptReply = await handleGroupTextMessage(env, groupId, groupSe
 check("diary create asks to confirm in group mode", groupDiaryPromptReply.includes("ใช่ไหม"));
 const groupDiaryConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
 check("confirming saves the diary entry in group mode, attributed to the group's own shared diary", groupDiaryConfirmReply.includes("บันทึกไดอารี่แล้ว"));
+
+// Tasks (PLAN.md 17.26) works in group mode too, for free — matchTaskCommand
+// runs through the same dispatchLegacyCommands every other feature does,
+// with no group-specific wiring needed.
+const groupTaskPromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "เพิ่มสิ่งที่ต้องทำ จองร้านอาหาร", origin);
+check("task create asks to confirm in group mode", groupTaskPromptReply.includes("จองร้านอาหาร"));
+const groupTaskConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
+check(
+  "any group member can confirm the shared pending task create, same as calendar/diary above",
+  groupTaskConfirmReply.includes("เพิ่มสิ่งที่ต้องทำแล้ว")
+);
 
 // Trip start/status via the real webhook path (mentioned, since these are
 // text commands) — sets up the group's active trip for the photo

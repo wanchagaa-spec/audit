@@ -2,9 +2,12 @@ const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 // drive.file: the Sheets spreadsheet + trip photo folders (PLAN.md 15.2)
 // calendar.events: creating/editing/deleting calendar entries (PLAN.md 15.3)
+// tasks: the to-do list feature (PLAN.md 17.26) — full read/write, same as
+// calendar.events, since creating/completing/deleting all need write access
 const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/tasks",
 ].join(" ");
 
 export function buildGoogleAuthorizeUrl(params: {

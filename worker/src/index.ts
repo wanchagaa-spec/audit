@@ -4,6 +4,7 @@ import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { answerQuestion, matchAiCommand } from "./aiCommands.ts";
 import { interpretMessage, type InterpretedIntent } from "./aiInterpreter.ts";
 import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";
+import { InsufficientTasksScopeError, TasksApiDisabledError } from "./tasks.ts";
 import {
   answerCalendarQuery,
   matchCalendarCommand,
@@ -23,6 +24,13 @@ import {
 } from "./diaryCommands.ts";
 import { uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
+import {
+  answerTaskList,
+  matchTaskCommand,
+  promptTaskComplete,
+  promptTaskCreate,
+  promptTaskDelete,
+} from "./taskCommands.ts";
 import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
 import {
   broadcastMorningBriefings,
@@ -93,13 +101,14 @@ export interface Env {
 }
 
 const WELCOME_MESSAGE = [
-  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 8 เรื่องหลักๆ:`,
+  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 9 เรื่องหลักๆ:`,
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
   "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
   "🗓️ ตารางเวร ติ๊กผ่านเว็บได้ แล้วถามผ่านแชทได้เลย เช่น \"มีเวรมั้ย\"",
+  "✅ สิ่งที่ต้องทำ พิมพ์ \"เพิ่มสิ่งที่ต้องทำ <ข้อความ>\" ขึ้น Google Tasks ให้อัตโนมัติ",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
   "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — หรือรอรับอัตโนมัติตอน 7 โมงเช้าทุกวันได้เลย ไม่ต้องทักก่อนก็ได้ พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
   "🌐 พิมพ์ \"เปิดเว็บดูข้อมูล\" เพื่อขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวรผ่านเว็บ",
@@ -291,6 +300,17 @@ async function buildCalendarRelinkPrompt(env: Env, lineUserId: string, origin: s
 const CALENDAR_API_DISABLED_MESSAGE =
   'ปฏิทินยังใช้ไม่ได้ เพราะ "Google Calendar API" ยังไม่ได้เปิดใช้งานในโปรเจกต์ Google Cloud (คนละเรื่องกับสิทธิ์ของบัญชีที่เชื่อมไว้ เชื่อมบัญชีใหม่ไม่ช่วย) ผู้ดูแลต้องไปที่ Google Cloud Console → APIs & Services → Library → ค้นหา "Google Calendar API" → กด Enable แล้วลองพิมพ์คำสั่งปฏิทินใหม่อีกครั้ง';
 
+// Same two functions as buildCalendarRelinkPrompt/CALENDAR_API_DISABLED_MESSAGE
+// above, for the Tasks feature (PLAN.md 17.26) — accounts linked before this
+// feature shipped only granted drive.file/calendar.events, not tasks.
+async function buildTasksRelinkPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
+  const authorizeUrl = await buildAuthorizeUrl(env, lineUserId, origin);
+  return `ต้องเชื่อมบัญชี Google ใหม่อีกครั้งเพื่อขอสิทธิ์สิ่งที่ต้องทำเพิ่ม (บัญชีเดิมยังไม่มีสิทธิ์นี้) กดลิงก์นี้แล้วเลือกบัญชีเดิมได้เลย ข้อมูลเก่าจะไม่หายนะ\n${authorizeUrl}`;
+}
+
+const TASKS_API_DISABLED_MESSAGE =
+  'สิ่งที่ต้องทำยังใช้ไม่ได้ เพราะ "Google Tasks API" ยังไม่ได้เปิดใช้งานในโปรเจกต์ Google Cloud (คนละเรื่องกับสิทธิ์ของบัญชีที่เชื่อมไว้ เชื่อมบัญชีใหม่ไม่ช่วย) ผู้ดูแลต้องไปที่ Google Cloud Console → APIs & Services → Library → ค้นหา "Google Tasks API" → กด Enable แล้วลองพิมพ์คำสั่งใหม่อีกครั้ง';
+
 // Builds the ActionCtx factory shared by dispatch functions below — pulled
 // out once so resolvePendingConfirmation, dispatchLegacyCommands, and
 // runInterpretedIntent (the AI interpreter's own routing table) all build it
@@ -338,6 +358,8 @@ async function resolvePendingConfirmation(
   } catch (err) {
     if (err instanceof CalendarApiDisabledError) return CALENDAR_API_DISABLED_MESSAGE;
     if (err instanceof InsufficientCalendarScopeError) return buildCalendarRelinkPrompt(env, subjectId, origin);
+    if (err instanceof TasksApiDisabledError) return TASKS_API_DISABLED_MESSAGE;
+    if (err instanceof InsufficientTasksScopeError) return buildTasksRelinkPrompt(env, subjectId, origin);
     throw err;
   }
 }
@@ -400,6 +422,14 @@ async function runInterpretedIntent(
         return withToken((ctx) => answerDiaryMonthSummary(ctx));
       case "diary_search":
         return withToken((ctx) => answerDiarySearch(ctx, intent.diarySearchTerm));
+      case "task_create":
+        return withToken((ctx) => promptTaskCreate(ctx, intent.taskTitle));
+      case "task_complete":
+        return withToken((ctx) => promptTaskComplete(ctx, intent.taskKeyword));
+      case "task_delete":
+        return withToken((ctx) => promptTaskDelete(ctx, intent.taskKeyword));
+      case "task_list":
+        return withToken((ctx) => answerTaskList(ctx));
       case "trip_start":
         return withToken((ctx) => promptOrStartTrip(ctx, intent.tripName));
       case "trip_end":
@@ -421,6 +451,8 @@ async function runInterpretedIntent(
   } catch (err) {
     if (err instanceof CalendarApiDisabledError) return CALENDAR_API_DISABLED_MESSAGE;
     if (err instanceof InsufficientCalendarScopeError) return buildCalendarRelinkPrompt(env, subjectId, origin);
+    if (err instanceof TasksApiDisabledError) return TASKS_API_DISABLED_MESSAGE;
+    if (err instanceof InsufficientTasksScopeError) return buildTasksRelinkPrompt(env, subjectId, origin);
     throw err;
   }
 }
@@ -503,6 +535,16 @@ async function dispatchLegacyCommands(
       );
     }
 
+    const taskHandler = await matchTaskCommand(text);
+    if (taskHandler) {
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => taskHandler(actionCtx(accessToken)),
+        tokenCache
+      );
+    }
+
     const diaryHandler = await matchDiaryCommand(text);
     if (diaryHandler) {
       return await withFreshAccessToken(
@@ -553,6 +595,12 @@ async function dispatchLegacyCommands(
     }
     if (err instanceof InsufficientCalendarScopeError) {
       return buildCalendarRelinkPrompt(env, subjectId, origin);
+    }
+    if (err instanceof TasksApiDisabledError) {
+      return TASKS_API_DISABLED_MESSAGE;
+    }
+    if (err instanceof InsufficientTasksScopeError) {
+      return buildTasksRelinkPrompt(env, subjectId, origin);
     }
     throw err;
   }

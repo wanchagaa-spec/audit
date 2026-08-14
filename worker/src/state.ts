@@ -82,6 +82,9 @@ export type PendingConfirmation =
   | { kind: "calendarDelete"; eventId: string; title: string; dateKey: string; time: string }
   | { kind: "calendarEdit"; eventId: string; title: string; dateKey: string; time: string }
   | { kind: "diaryCreate"; category: string; text: string }
+  | { kind: "taskCreate"; title: string }
+  | { kind: "taskComplete"; taskId: string; title: string }
+  | { kind: "taskDelete"; taskId: string; title: string }
   | { kind: "transactionDeleteLast" }
   // PLAN.md 17.9: money logging no longer saves immediately, even for an
   // unambiguous message — always confirms first, same as every other

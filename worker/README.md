@@ -46,14 +46,17 @@ must never reach a browser.
    complete sign-in. See PLAN.md for the tradeoff against submitting the app for Google
    verification instead.
 5. Under **APIs & Services → Library**, make sure **Google Sheets API**, **Google Drive
-   API**, and **Google Calendar API** are all "Enabled" for this project (search each by
-   name, click it, click Enable if it isn't already) — a disabled API fails with a clear
-   `has not been used in this project` error from Google, so this is worth checking first
-   if something that used to work suddenly errors after adding the calendar feature.
-6. **If you already linked accounts before the calendar feature existed**: those refresh
-   tokens only cover `drive.file`, not `calendar.events`. The bot detects this itself and
-   replies with a fresh link when someone tries a calendar command — no action needed here,
-   just know it'll ask once per already-linked person.
+   API**, **Google Calendar API**, and **Google Tasks API** are all "Enabled" for this
+   project (search each by name, click it, click Enable if it isn't already) — a disabled
+   API fails with a clear `has not been used in this project` error from Google, so this is
+   worth checking first if something that used to work suddenly errors after adding a new
+   feature.
+6. **If you already linked accounts before the calendar or tasks feature existed**: those
+   refresh tokens only cover whatever scopes existed at the time (e.g. `drive.file` alone,
+   or `drive.file` + `calendar.events` but not `tasks`). The bot detects this itself and
+   replies with a fresh link when someone tries a command that needs a scope they don't
+   have yet — no action needed here, just know it'll ask once per already-linked person,
+   per new scope.
 
 ### 4. Get a free Gemini API key (powers "ถาม <คำถาม>" / "วิเคราะห์")
 
@@ -425,6 +428,26 @@ messages you proactively, it only creates/reads/edits/deletes events when you as
 Needs the extra `calendar.events` OAuth scope (see setup step 3.6 above) — accounts linked
 before this feature existed will get a one-time re-link prompt the first time they try a
 calendar command.
+
+### Tasks (PLAN.md 17.26)
+
+A plain to-do list backed by Google Tasks — the fourth Google service this bot connects to
+(after Drive, Sheets, and Calendar). Deliberately scoped narrower than Calendar for v1: no
+due dates or reminders, just a title. Every item lives in your account's default Google
+Tasks list (`@default`, always present, no separate list picker):
+
+- `เพิ่มสิ่งที่ต้องทำ <ข้อความ>` — e.g. "เพิ่มสิ่งที่ต้องทำ ซื้อของเข้าบ้าน". Confirms before
+  actually adding it, same as calendar/diary.
+- `สิ่งที่ต้องทำ` (or `รายการที่ต้องทำ` / `มีอะไรต้องทำบ้าง`) — lists everything not yet marked
+  done.
+- `ทำเสร็จแล้ว <คำค้น>` / `ลบสิ่งที่ต้องทำ <คำค้น>` — searches your incomplete tasks by title
+  (Google Tasks has no server-side keyword search like Calendar's events do, so this fetches
+  the list and matches client-side); if more than one matches, it lists them and asks you to
+  be more specific. Both confirm before touching anything.
+
+Needs the extra `tasks` OAuth scope (see setup step 3.5/3.6 above) — accounts linked before
+this feature existed will get a one-time re-link prompt the first time they try a task
+command.
 
 ### Diary (PLAN.md 15.4)
 
