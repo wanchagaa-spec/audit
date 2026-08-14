@@ -557,6 +557,16 @@ noise than a personal DM is).
   mean one Gemini call per linked account firing within the same minute for no benefit.
 - Marks the same "already greeted today" state the reactive flow uses, so a "สวัสดี" later that
   day gets the short return-greeting instead of a duplicate full briefing.
+- **Broadcast-only extras (PLAN.md 17.22)**: on top of the date/weather/news the reactive greeting
+  also gets, the broadcast additionally includes today's gold/BTC price (`buildGoldBtcLines`,
+  reused from the finance-news feature, minus the stock movers — not personalized, fetched once
+  per run same as news), today's Calendar appointments, today's shift (from the shift-schedule
+  feature above), and a short AI reflection on yesterday's diary entries (or a plain "nothing
+  written" line if there's nothing to reflect on, no Gemini call needed for that case). These
+  three are per-user and need a fresh Google access token, unlike everything else in the
+  broadcast — a token refresh failure for one account degrades to just the base weather/news
+  briefing for that person rather than failing their whole broadcast, and each of the three is
+  independently best-effort on top of that (one failing never blocks the other two).
 
 ### Web viewer (PLAN.md 16)
 

@@ -5,12 +5,18 @@
 // prompt instead, so it doesn't repeat the whole briefing every time someone
 // says hi.
 
+import { listCalendarEvents } from "./calendar.ts";
+import { askGemini } from "./gemini.ts";
+import { refreshAccessToken } from "./googleAuth.ts";
 import { groupIdFromSubject } from "./groupSubject.ts";
 import { pushToLine } from "./line.ts";
+import { buildGoldBtcLines, fetchMarketSnapshot } from "./marketData.ts";
 import { fetchNewsSummary } from "./news.ts";
 import { applyPersona } from "./persona.ts";
+import { readAllDiaryEntries, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
 import { geocodeProvince, fetchWeatherSummary } from "./weather.ts";
 import {
+  getAccountLink,
   getLastBroadcastDate,
   getLastGreetingDate,
   getUserProvince,
@@ -18,7 +24,14 @@ import {
   setLastGreetingDate,
   setUserProvince,
 } from "./state.ts";
-import { bangkokDateKey, bangkokHourMinute, bangkokWeekdayIndex, formatThaiDateLabel } from "./thaiDate.ts";
+import {
+  addDaysToDateKey,
+  bangkokDateKey,
+  bangkokHourMinute,
+  bangkokStartOfDayIso,
+  bangkokWeekdayIndex,
+  formatThaiDateLabel,
+} from "./thaiDate.ts";
 import type { Env } from "./index.ts";
 
 const WEEKDAY_TH = ["วันจันทร์", "วันอังคาร", "วันพุธ", "วันพฤหัสบดี", "วันศุกร์", "วันเสาร์", "วันอาทิตย์"];
@@ -147,6 +160,74 @@ async function processInBatches<T>(items: T[], limit: number, handler: (item: T)
 // this must stay in sync with those if that ever changes.
 const ACCOUNT_LINK_PREFIX = "link:";
 
+// Broadcast-only extras (PLAN.md 17.22): gold/BTC price, today's Calendar
+// appointments, today's shift, and a short AI reflection on yesterday's
+// diary — added only to the 7:00 broadcast below, not the reactive "สวัสดี"
+// greeting (buildMorningBriefing above), since these all need the account's
+// own Google access token, unlike weather/news which need none at all. Each
+// is independently best-effort: a failure here degrades to omitting just
+// that one line, exactly like weather/news above, never blocking the rest
+// of the broadcast for that user.
+
+async function buildTodayCalendarLine(accessToken: string, today: string): Promise<string> {
+  try {
+    const events = await listCalendarEvents(
+      accessToken,
+      bangkokStartOfDayIso(today),
+      bangkokStartOfDayIso(addDaysToDateKey(today, 1))
+    );
+    if (events.length === 0) return "📅 วันนี้ไม่มีนัดเลยนะ";
+    const lines = events.map((e) => `${e.time || "-"} ${e.title}`);
+    return ["📅 นัดวันนี้:", ...lines].join("\n");
+  } catch (err) {
+    console.error("buildTodayCalendarLine failed", err);
+    return "";
+  }
+}
+
+async function buildTodayShiftLine(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  today: string
+): Promise<string> {
+  try {
+    const monthKey = today.slice(0, 7);
+    const day = Number(today.slice(8, 10));
+    const grid = await readShiftGrid(accessToken, spreadsheetId, kv, monthKey);
+    const todayTypes = SHIFT_TYPES.filter((t) => grid.checked[t].includes(day));
+    return todayTypes.length > 0 ? `🗓️ วันนี้เข้าเวร: ${todayTypes.join(", ")}` : "🗓️ วันนี้ไม่มีเวรนะ";
+  } catch (err) {
+    console.error("buildTodayShiftLine failed", err);
+    return "";
+  }
+}
+
+async function buildYesterdayDiaryLine(
+  env: Env,
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  yesterday: string
+): Promise<string> {
+  try {
+    const all = await readAllDiaryEntries(accessToken, spreadsheetId, kv);
+    const entries = all.filter((r) => r.date === yesterday);
+    if (entries.length === 0) return "📔 เมื่อวานไม่ได้เขียนไดอารี่ไว้เลยนะ";
+    const diaryText = entries.map((r) => `[${r.category}] ${r.text}`).join("\n");
+    const systemInstruction = [
+      "คุณเป็นผู้ช่วยส่วนตัวที่เป็นมิตร กำลังอ่านบันทึกไดอารี่ของผู้ใช้เมื่อวานที่ผ่านมา",
+      "เขียนสรุป/ข้อสังเกตสั้นๆ 2-3 ประโยค ให้กำลังใจหรือชวนคิดต่อได้ ห้ามเดาเติมเรื่องที่ไม่ได้เขียนไว้ในบันทึกจริง",
+      "ตอบเป็นภาษาไทยล้วนๆ ตอบเนื้อความเลย ไม่ต้องมีหัวข้อหรือคำนำ",
+    ].join("\n");
+    const analysis = await askGemini(env.GEMINI_API_KEY, systemInstruction, diaryText);
+    return `📔 ไดอารี่เมื่อวาน:\n${analysis}`;
+  } catch (err) {
+    console.error("buildYesterdayDiaryLine failed", err);
+    return "";
+  }
+}
+
 /** Daily 7:00 broadcast (PLAN.md 17.21): pushes the same morning briefing
  * every personal account would otherwise only get reactively, on their own
  * first "สวัสดี" of the day, to every linked personal account without
@@ -178,14 +259,47 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
     .filter((subjectId) => groupIdFromSubject(subjectId) === null);
 
   // Fetched once for the whole run and shared across every user (see
-  // buildBriefingBody's own comment) — the news itself isn't personalized,
-  // only the weather is.
+  // buildBriefingBody's own comment) — neither the news nor the gold/BTC
+  // price is personalized, only the weather (and the Calendar/shift/diary
+  // extras below) is.
   const newsBlock = await fetchDailyNewsBlock(env);
+  const marketSnapshot = await fetchMarketSnapshot();
+  const marketLines = buildGoldBtcLines(marketSnapshot);
+  const marketBlock = marketLines.length > 0 ? marketLines.join("\n") : null;
+  const yesterday = addDaysToDateKey(today, -1);
 
   await processInBatches(personalUserIds, BROADCAST_CONCURRENCY_LIMIT, async (lineUserId) => {
     try {
       const body = await buildBriefingBody(env, kv, lineUserId, newsBlock);
-      const styled = await applyPersona(body, env.GEMINI_API_KEY);
+      const extras: string[] = [];
+      if (marketBlock) extras.push(marketBlock);
+
+      // The Calendar/shift/diary extras need a fresh Google access token —
+      // unlike weather/news above, which need none at all. A failure here
+      // (revoked/insufficient-scope refresh token, etc.) degrades to the
+      // base weather/news briefing only, same best-effort spirit as every
+      // other piece of this broadcast.
+      const link = await getAccountLink(kv, lineUserId);
+      if (link) {
+        try {
+          const accessToken = await refreshAccessToken({
+            refreshToken: link.refreshToken,
+            clientId: env.GOOGLE_CLIENT_ID,
+            clientSecret: env.GOOGLE_CLIENT_SECRET,
+          });
+          const [calendarLine, shiftLine, diaryLine] = await Promise.all([
+            buildTodayCalendarLine(accessToken, today),
+            buildTodayShiftLine(accessToken, link.spreadsheetId, kv, today),
+            buildYesterdayDiaryLine(env, accessToken, link.spreadsheetId, kv, yesterday),
+          ]);
+          for (const line of [calendarLine, shiftLine, diaryLine]) if (line) extras.push(line);
+        } catch (err) {
+          console.error("broadcastMorningBriefings: refreshing access token failed, sending base briefing only", lineUserId, err);
+        }
+      }
+
+      const fullBody = extras.length > 0 ? [body, ...extras].join("\n\n") : body;
+      const styled = await applyPersona(fullBody, env.GEMINI_API_KEY);
       await pushToLine(lineUserId, styled, env.LINE_CHANNEL_ACCESS_TOKEN);
       // Marks today as already-greeted for this user too, same as the
       // reactive path's classifyGreeting — a "สวัสดี" later the same day

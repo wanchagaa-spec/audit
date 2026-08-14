@@ -120,14 +120,11 @@ function formatPercent(n: number): string {
   return `${sign}${n.toFixed(2)}%`;
 }
 
-/** Builds the deterministic, plain-text header block for the finance-news
- * reply (PLAN.md 15.13's requested format) — date line, then gold/BTC/movers
- * as "* "-prefixed bullets, with movers listed unbulleted underneath their
- * own header line. Never touched by Gemini; whatever this function outputs
- * is exactly what gets sent to the user for these lines. */
-export function buildMarketHeaderBlock(snapshot: MarketSnapshot, todayLabel: string): string {
-  const lines = [`ข้อมูล ณ วันที่ ${todayLabel}`, ""];
-
+/** Just the gold/BTC "* "-prefixed bullets, no date header and no movers —
+ * shared by buildMarketHeaderBlock (finance-news reply) and the 7:00
+ * broadcast (PLAN.md 17.22), which only asked for these two, not movers. */
+export function buildGoldBtcLines(snapshot: MarketSnapshot): string[] {
+  const lines: string[] = [];
   if (snapshot.gold) {
     const pct = snapshot.gold.changePercent !== null ? ` (${formatPercent(snapshot.gold.changePercent)})` : "";
     const price = snapshot.gold.price.toLocaleString("en-US", { maximumFractionDigits: 2 });
@@ -138,6 +135,17 @@ export function buildMarketHeaderBlock(snapshot: MarketSnapshot, todayLabel: str
     const price = snapshot.btc.price.toLocaleString("en-US", { maximumFractionDigits: 0 });
     lines.push(`* บิตคอยน์ : $${price}${pct}`);
   }
+  return lines;
+}
+
+/** Builds the deterministic, plain-text header block for the finance-news
+ * reply (PLAN.md 15.13's requested format) — date line, then gold/BTC/movers
+ * as "* "-prefixed bullets, with movers listed unbulleted underneath their
+ * own header line. Never touched by Gemini; whatever this function outputs
+ * is exactly what gets sent to the user for these lines. */
+export function buildMarketHeaderBlock(snapshot: MarketSnapshot, todayLabel: string): string {
+  const lines = [`ข้อมูล ณ วันที่ ${todayLabel}`, "", ...buildGoldBtcLines(snapshot)];
+
   if (snapshot.topGainers.length > 0 || snapshot.topLosers.length > 0) {
     lines.push("* หุ้นสหรัฐฯ เคลื่อนไหวมากที่สุด");
     for (const q of snapshot.topGainers) lines.push(`${q.symbol} (${formatPercent(q.changePercent)})`);

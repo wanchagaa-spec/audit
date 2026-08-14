@@ -1004,6 +1004,23 @@ const pushesBeforeBroadcast = pushes.length;
 const bangkok0700TodayUtc = new Date(`${bangkokDateKey()}T00:00:00.000Z`); // 00:00 UTC = 07:00 Bangkok
 const notSevenOClockUtc = new Date(bangkok0700TodayUtc.getTime() + 3 * 60 * 60 * 1000); // 10:00 Bangkok
 
+// Extras (PLAN.md 17.22): a real event today (exercises the "has an
+// appointment" branch of the Calendar line) and a real diary entry dated
+// yesterday (exercises the AI-analysis branch of the diary line, echoed
+// back verbatim by the mocked Gemini call so the assertion below can check
+// the actual diary text made it into the prompt). Both arrays are cleaned
+// back up right after, since later sections (Calendar, Diary) assume they
+// start from empty.
+const broadcastTestEventId = "evt-broadcast-test-1";
+calendarEvents.push({
+  id: broadcastTestEventId,
+  summary: "ประชุมทีมเช้านี้",
+  start: { dateTime: `${bangkokDateKey()}T09:00:00+07:00` },
+  end: { dateTime: `${bangkokDateKey()}T10:00:00+07:00` },
+});
+const yesterdayKeyForBroadcast = addDaysToDateKey(bangkokDateKey(), -1);
+diaryRows.push(["diary-broadcast-test-1", yesterdayKeyForBroadcast, "ทั่วไป", "เมื่อวานไปวิ่งออกกำลังกายมา", new Date().toISOString()]);
+
 await broadcastMorningBriefings(env, env.ACCOUNTS, notSevenOClockUtc);
 check("the broadcast is a no-op outside the 07:00 Bangkok minute", pushes.length === pushesBeforeBroadcast);
 
@@ -1017,6 +1034,24 @@ check(
     broadcastPushes[0]?.text.includes("เชียงใหม่") &&
     broadcastPushes[0]?.text.includes("°C")
 );
+check(
+  "the broadcast includes today's real gold and bitcoin prices",
+  broadcastPushes[0]?.text.includes("ทองคำ") && broadcastPushes[0]?.text.includes("บิตคอยน์")
+);
+check(
+  "the broadcast includes today's real calendar appointment",
+  broadcastPushes[0]?.text.includes("ประชุมทีมเช้านี้")
+);
+check(
+  "the broadcast says there's no shift today, since none is ticked yet",
+  broadcastPushes[0]?.text.includes("ไม่มีเวรนะ")
+);
+check(
+  "the broadcast's diary line is an AI reflection built from yesterday's real diary text",
+  broadcastPushes[0]?.text.includes("เมื่อวานไปวิ่งออกกำลังกายมา")
+);
+calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
+diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
 
 await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
 check("a second 07:00 firing the same day doesn't send a duplicate broadcast", pushes.length === pushesBeforeBroadcast + 1);
@@ -1763,6 +1798,11 @@ simulateCalendarApiDisabled = false;
 
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
+// Snapshotted here rather than assuming diaryTabMetaCalls starts at 0 — the
+// 7:00 broadcast test above (PLAN.md 17.22) also reads the Diary tab once
+// (for yesterday's entries), so this section's own "checked once" check
+// below asserts against the delta since this point, not an absolute count.
+const diaryTabMetaCallsBeforeThisSection = diaryTabMetaCalls;
 const diaryPromptReply = await handleTextMessage(env, lineUserId, "ไดอารี่ วันนี้อากาศดีมาก", origin);
 check(
   "diary create defaults to the uncategorized bucket and asks to confirm",
@@ -1813,8 +1853,13 @@ check(
 );
 
 check(
-  "the Diary tab's existence is only checked once, then cached in KV",
-  diaryTabMetaCalls === 1
+  "the Diary tab's existence is checked at most once across this whole section, then cached in KV",
+  // <= 1, not === 1: the broadcast test above (PLAN.md 17.22) may have
+  // already warmed the same spreadsheetId's diary-tab cache key by reading
+  // yesterday's entries, in which case this section's own reads pay for
+  // zero further metadata checks rather than exactly one — either way, the
+  // cache means this section itself never pays for more than one.
+  diaryTabMetaCalls - diaryTabMetaCallsBeforeThisSection <= 1
 );
 
 // Proves the actual scaling concern is fixed: writing a lot in a month used
