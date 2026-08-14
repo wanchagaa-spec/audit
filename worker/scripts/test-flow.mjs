@@ -1701,9 +1701,56 @@ check("today's list doesn't include tomorrow's event", !listTodayReply.includes(
 
 const listTomorrowReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรพรุ่งนี้", origin);
 check("tomorrow's list includes the created event", listTomorrowReply.includes("ประชุมทีม") && listTomorrowReply.includes("13:00"));
+check(
+  "each line in a listing includes the date, not just the time",
+  listTomorrowReply.includes(formatThaiDateLabel(tomorrowKey))
+);
 
 const listWeekReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรสัปดาห์นี้", origin);
 check("week list doesn't error", listWeekReply.length > 0);
+
+// Regression test for a real report: a multi-day listing ("นัดช่วงนี้",
+// routed through the AI interpreter's calendar_query intent since it's not
+// one of the fixed today/tomorrow/week phrases) showed only the time per
+// line with no date at all — two real events on different days at 18:00 and
+// 14:00 read as "out of order" with nothing to show they weren't the same
+// day. Second event here is a few days out but at an *earlier* clock time
+// than the first, matching that shape. The order check below confirms
+// formatEventLines preserves whatever order listCalendarEvents returns
+// (real Google API sorts by actual start time via orderBy: startTime, not
+// re-verified by this mock) rather than re-sorting or reversing it; the
+// date-inclusion checks are this test's actual regression coverage. Uses an
+// explicit interpreter-provided range instead of the "week" phrase above,
+// so this doesn't depend on which day of the week the test happens to run
+// on.
+const laterKey = addDaysToDateKey(todayKey, 4);
+const laterSlash = toSlashDate(laterKey);
+await handleTextMessage(env, lineUserId, `นัด จัดห้องใหม่ ${laterSlash} 09:00`, origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+
+simulateInterpreterResult = {
+  intent: "calendar_query",
+  calendarRangeFromKey: todayKey,
+  calendarRangeToKeyExclusive: addDaysToDateKey(todayKey, 5),
+  calendarRangeLabel: "นี้",
+};
+const listRangeReply = await handleTextMessage(env, lineUserId, "นัดช่วงนี้", origin);
+check(
+  "a multi-day listing includes both events with their own dates",
+  listRangeReply.includes(formatThaiDateLabel(tomorrowKey)) &&
+    listRangeReply.includes("ประชุมทีม") &&
+    listRangeReply.includes(formatThaiDateLabel(laterKey)) &&
+    listRangeReply.includes("จัดห้องใหม่")
+);
+check(
+  "the earlier-day event (later clock time) is listed before the later-day event (earlier clock time)",
+  listRangeReply.indexOf("ประชุมทีม") < listRangeReply.indexOf("จัดห้องใหม่")
+);
+// Clean up — the edit/delete tests right below assume "ประชุมทีม" is the
+// only event in calendarEvents (calendarEvents.length/calendarEvents[0]
+// checks), same as before this multi-day listing test existed.
+const janghongIdx = calendarEvents.findIndex((e) => e.summary === "จัดห้องใหม่");
+if (janghongIdx >= 0) calendarEvents.splice(janghongIdx, 1);
 
 const editPromptReply = await handleTextMessage(env, lineUserId, "แก้นัด ประชุมทีม เป็น 15:00", origin);
 check("edit asks to confirm the new time", editPromptReply.includes("15:00"));
