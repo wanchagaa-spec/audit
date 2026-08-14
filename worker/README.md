@@ -539,6 +539,25 @@ set yet and no context for why they're suddenly getting a weather/news briefing.
   the news section is just omitted (same graceful-degradation behavior as anywhere else Gemini
   is used).
 
+#### Daily 7:00 broadcast (PLAN.md 17.21)
+
+The exact same briefing above also goes out **proactively** at 7:00 every morning (Asia/Bangkok),
+without waiting for anyone to say hi first — the first proactive-push feature in the bot; every
+other feature only ever replies to something the user typed. Personal chats only, not groups (a
+group already has plenty of unrelated chatter, and an unsolicited daily push there is more likely
+noise than a personal DM is).
+
+- Reuses the existing once-a-minute cron trigger (`wrangler.toml`'s `[triggers]`, already firing
+  for the trip-photo upload queue drain) instead of adding a second one — `broadcastMorningBriefings`
+  is a no-op on every firing outside the 07:00 minute, and a global KV key (`last-broadcast-date`)
+  guards against sending it twice on the same day if the cron ever fires more than once during
+  that minute.
+- News is fetched once per broadcast run and shared across everyone, instead of once per user —
+  it isn't personalized (unlike weather, which is per-province), so fetching it per user would
+  mean one Gemini call per linked account firing within the same minute for no benefit.
+- Marks the same "already greeted today" state the reactive flow uses, so a "สวัสดี" later that
+  day gets the short return-greeting instead of a duplicate full briefing.
+
 ### Web viewer (PLAN.md 16)
 
 `เปิดเว็บดูข้อมูล` in chat (or tapping the rich-menu tile) replies with a link to a web page with

@@ -643,7 +643,7 @@ const { verifyState, signState, signViewToken, verifyViewToken } = await import(
 const { bangkokDateKey, bangkokMonthKey, addDaysToDateKey, formatThaiDateLabel, formatThaiDateLabelFull, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
-const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
+const { buildReturnGreeting, broadcastMorningBriefings } = await import("../src/greetingCommands.ts");
 const { getConversationHistory } = await import("../src/conversationHistory.ts");
 
 async function signLineBody(rawBody, secret) {
@@ -987,6 +987,44 @@ const briefingBothFailReply = await handleTextMessage(env, lineUserId, "อร�
 check(
   "if both weather and news fail, the briefing still goes out with at least the date",
   briefingBothFailReply.includes(formatThaiDateLabel(bangkokDateKey()))
+);
+
+// Daily 7:00 broadcast (PLAN.md 17.21): the same morning briefing every
+// personal account otherwise only gets reactively (on their own first
+// "สวัสดี" of the day) now also goes out proactively at 07:00 Bangkok time,
+// to every *personal* linked account only — not groups. lineUserId already
+// has a province set (เชียงใหม่, from the briefing tests above), so its
+// broadcast should include real weather, same as its reactive briefing did.
+await setAccountLink(env.ACCOUNTS, "group:test-broadcast-group", {
+  spreadsheetId: "fake-sheet-id",
+  refreshToken: "fake-refresh-token-for-broadcast-group-test",
+  displayName: "กลุ่มทดสอบ",
+});
+const pushesBeforeBroadcast = pushes.length;
+const bangkok0700TodayUtc = new Date(`${bangkokDateKey()}T00:00:00.000Z`); // 00:00 UTC = 07:00 Bangkok
+const notSevenOClockUtc = new Date(bangkok0700TodayUtc.getTime() + 3 * 60 * 60 * 1000); // 10:00 Bangkok
+
+await broadcastMorningBriefings(env, env.ACCOUNTS, notSevenOClockUtc);
+check("the broadcast is a no-op outside the 07:00 Bangkok minute", pushes.length === pushesBeforeBroadcast);
+
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const broadcastPushes = pushes.slice(pushesBeforeBroadcast);
+check("at 07:00 Bangkok, exactly one broadcast push goes out (the personal account only)", broadcastPushes.length === 1);
+check("the broadcast push targets the personal lineUserId, not the group", broadcastPushes[0]?.to === lineUserId);
+check(
+  "the broadcast includes today's date and real weather, same content as the reactive briefing",
+  broadcastPushes[0]?.text.includes(formatThaiDateLabel(bangkokDateKey())) &&
+    broadcastPushes[0]?.text.includes("เชียงใหม่") &&
+    broadcastPushes[0]?.text.includes("°C")
+);
+
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check("a second 07:00 firing the same day doesn't send a duplicate broadcast", pushes.length === pushesBeforeBroadcast + 1);
+
+const returnGreetingAfterBroadcastReply = await handleTextMessage(env, lineUserId, "สวัสดี", origin);
+check(
+  "a greeting later the same day as the broadcast gets the short return-greeting, not another briefing",
+  returnGreetingAfterBroadcastReply === buildReturnGreeting()
 );
 
 // 7. Trip photo album (PLAN.md 15.2): image with no active trip is rejected,

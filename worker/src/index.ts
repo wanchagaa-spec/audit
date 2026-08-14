@@ -25,6 +25,7 @@ import { uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
 import {
+  broadcastMorningBriefings,
   buildMorningBriefing,
   buildReturnGreeting,
   classifyGreeting,
@@ -1448,5 +1449,9 @@ export default {
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(drainUploadQueue(env));
+    // Runs on the same once-a-minute cron — broadcastMorningBriefings itself
+    // is a no-op outside the 07:00 Bangkok minute (PLAN.md 17.21), so this
+    // doesn't need its own separate cron trigger entry in wrangler.toml.
+    ctx.waitUntil(broadcastMorningBriefings(env, env.ACCOUNTS));
   },
 };

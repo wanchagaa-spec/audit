@@ -5,10 +5,20 @@
 // prompt instead, so it doesn't repeat the whole briefing every time someone
 // says hi.
 
+import { groupIdFromSubject } from "./groupSubject.ts";
+import { pushToLine } from "./line.ts";
 import { fetchNewsSummary } from "./news.ts";
+import { applyPersona } from "./persona.ts";
 import { geocodeProvince, fetchWeatherSummary } from "./weather.ts";
-import { getLastGreetingDate, getUserProvince, setLastGreetingDate, setUserProvince } from "./state.ts";
-import { bangkokDateKey, bangkokWeekdayIndex, formatThaiDateLabel } from "./thaiDate.ts";
+import {
+  getLastBroadcastDate,
+  getLastGreetingDate,
+  getUserProvince,
+  setLastBroadcastDate,
+  setLastGreetingDate,
+  setUserProvince,
+} from "./state.ts";
+import { bangkokDateKey, bangkokHourMinute, bangkokWeekdayIndex, formatThaiDateLabel } from "./thaiDate.ts";
 import type { Env } from "./index.ts";
 
 const WEEKDAY_TH = ["วันจันทร์", "วันอังคาร", "วันพุธ", "วันพฤหัสบดี", "วันศุกร์", "วันเสาร์", "วันอาทิตย์"];
@@ -45,7 +55,19 @@ export function matchProvinceCommand(text: string): ((kv: KVNamespace, lineUserI
 // Best-effort: weather and news are independent nice-to-haves, so one
 // failing must never take the other down with it, and neither should ever
 // block the greeting itself from going out — see the try/catches below.
-async function buildBriefingBody(env: Env, kv: KVNamespace, lineUserId: string): Promise<string> {
+//
+// `sharedNewsBlock`: the reactive per-user path (buildMorningBriefing) leaves
+// this undefined and fetches its own news, since it only ever runs for one
+// user at a time. The 7:00 broadcast (broadcastMorningBriefings below) fetches
+// the news once for the whole run and passes the same block to every user
+// instead — the news itself isn't personalized, so N users would otherwise
+// mean N identical Gemini calls fired within the same minute.
+async function buildBriefingBody(
+  env: Env,
+  kv: KVNamespace,
+  lineUserId: string,
+  sharedNewsBlock?: string | null
+): Promise<string> {
   const today = bangkokDateKey();
   const dateLine = `${WEEKDAY_TH[bangkokWeekdayIndex()]} ที่ ${formatThaiDateLabel(today)}`;
 
@@ -59,18 +81,22 @@ async function buildBriefingBody(env: Env, kv: KVNamespace, lineUserId: string):
     }
   }
 
-  let newsBlock: string | null = null;
-  try {
-    newsBlock = await fetchNewsSummary(env.GEMINI_API_KEY);
-  } catch (err) {
-    console.error("buildBriefingBody: news summary failed", err);
-  }
+  const newsBlock = sharedNewsBlock !== undefined ? sharedNewsBlock : await fetchDailyNewsBlock(env);
 
   const parts = [`สวัสดีตอนเช้า ☀️ วันนี้${dateLine}`];
   if (weatherLine) parts.push(weatherLine);
   else if (!province) parts.push('ยังไม่รู้พื้นที่ของคุณเลย พิมพ์ "ตั้งจังหวัด <ชื่อ>" ถ้าอยากให้บอกสภาพอากาศด้วยนะ');
   if (newsBlock) parts.push(`📰 ข่าวเช้านี้:\n${newsBlock}`);
   return parts.join("\n\n");
+}
+
+async function fetchDailyNewsBlock(env: Env): Promise<string | null> {
+  try {
+    return await fetchNewsSummary(env.GEMINI_API_KEY);
+  } catch (err) {
+    console.error("fetchDailyNewsBlock: news summary failed", err);
+    return null;
+  }
 }
 
 /** Full morning briefing — call only when this is the first greeting of the
@@ -101,4 +127,72 @@ export async function classifyGreeting(kv: KVNamespace, lineUserId: string): Pro
   if (last === today) return "return";
   await setLastGreetingDate(kv, lineUserId, today);
   return last === null ? "welcome" : "briefing";
+}
+
+// Keeps steady load on LINE/weather/Gemini regardless of how many accounts
+// are linked — same shape as index.ts's processWithConcurrencyLimit, kept as
+// its own tiny copy here rather than imported, since index.ts itself imports
+// from this file (buildMorningBriefing, classifyGreeting, ...) and importing
+// a runtime value back the other way would create an actual import cycle.
+const BROADCAST_CONCURRENCY_LIMIT = 5;
+
+async function processInBatches<T>(items: T[], limit: number, handler: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += limit) {
+    await Promise.allSettled(items.slice(i, i + limit).map(handler));
+  }
+}
+
+// Personal `link:<lineUserId>` KV keys only — state.ts doesn't export this
+// prefix as a constant (getAccountLink/setAccountLink just inline it), so
+// this must stay in sync with those if that ever changes.
+const ACCOUNT_LINK_PREFIX = "link:";
+
+/** Daily 7:00 broadcast (PLAN.md 17.21): pushes the same morning briefing
+ * every personal account would otherwise only get reactively, on their own
+ * first "สวัสดี" of the day, to every linked personal account without
+ * waiting for anyone to say hi first. Called from index.ts's `scheduled`
+ * handler on every once-a-minute cron firing — a no-op outside the 07:00
+ * minute or once today's broadcast has already gone out.
+ *
+ * Personal accounts only, not groups (confirmed with the user, not
+ * assumed) — a group already gets plenty of unrelated chatter, and an
+ * unsolicited daily push there is more likely noise than a personal DM is.
+ *
+ * `now` defaults to the real current time in production — overridable so
+ * tests can exercise the 07:00 gate deterministically instead of only
+ * passing when the test suite happens to run during that exact minute. */
+export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: Date = new Date()): Promise<void> {
+  const { hour, minute } = bangkokHourMinute(now);
+  if (hour !== 7 || minute !== 0) return;
+
+  const today = bangkokDateKey(now);
+  if ((await getLastBroadcastDate(kv)) === today) return;
+  await setLastBroadcastDate(kv, today);
+
+  // Same list-once, no-cursor-pagination approach as uploadQueue.ts's
+  // listQueueBatch — caps at KV's own 1000-keys-per-call limit, which a
+  // personal bot's total linked-account count is nowhere near.
+  const { keys } = await kv.list({ prefix: ACCOUNT_LINK_PREFIX });
+  const personalUserIds = keys
+    .map((k) => k.name.slice(ACCOUNT_LINK_PREFIX.length))
+    .filter((subjectId) => groupIdFromSubject(subjectId) === null);
+
+  // Fetched once for the whole run and shared across every user (see
+  // buildBriefingBody's own comment) — the news itself isn't personalized,
+  // only the weather is.
+  const newsBlock = await fetchDailyNewsBlock(env);
+
+  await processInBatches(personalUserIds, BROADCAST_CONCURRENCY_LIMIT, async (lineUserId) => {
+    try {
+      const body = await buildBriefingBody(env, kv, lineUserId, newsBlock);
+      const styled = await applyPersona(body, env.GEMINI_API_KEY);
+      await pushToLine(lineUserId, styled, env.LINE_CHANNEL_ACCESS_TOKEN);
+      // Marks today as already-greeted for this user too, same as the
+      // reactive path's classifyGreeting — a "สวัสดี" later the same day
+      // should get the short return-greeting, not a duplicate full briefing.
+      await setLastGreetingDate(kv, lineUserId, today);
+    } catch (err) {
+      console.error("broadcastMorningBriefings: failed for one user, continuing with the rest", lineUserId, err);
+    }
+  });
 }

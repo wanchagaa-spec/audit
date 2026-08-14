@@ -168,6 +168,14 @@ export function bangkokWeekdayIndex(d: Date = new Date()): number {
   return day === 0 ? 6 : day - 1;
 }
 
+/** Current wall-clock hour/minute in Asia/Bangkok time — used by the daily
+ * broadcast (PLAN.md 17.21) to recognize "it's 7:00 now" from the
+ * once-a-minute cron firing, the same way bangkokDateKey recognizes "today". */
+export function bangkokHourMinute(d: Date = new Date()): { hour: number; minute: number } {
+  const bk = toBangkok(d);
+  return { hour: bk.getUTCHours(), minute: bk.getUTCMinutes() };
+}
+
 export function addDaysToDateKey(dateKey: string, days: number): string {
   const [y, m, d] = dateKey.split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
