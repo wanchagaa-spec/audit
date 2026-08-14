@@ -70,8 +70,15 @@ function fetchBitcoinQuote(): Promise<Quote | null> {
   return fetchYahooQuote("BTC-USD");
 }
 
+// XAUUSD=X (Yahoo's FX-pair-style spot gold ticker) came back empty in
+// production while BTC-USD, fetched through this exact same function, came
+// through fine — narrows the problem down to that one ticker not being
+// recognized by Yahoo's public chart endpoint, not the fetch mechanism
+// itself. GC=F (COMEX gold futures) is Yahoo's more standard, more widely
+// referenced gold ticker — switching to it instead of guessing a variant of
+// the same FX-style naming again.
 function fetchGoldQuote(): Promise<Quote | null> {
-  return fetchYahooQuote("XAUUSD=X"); // spot gold, USD per troy ounce
+  return fetchYahooQuote("GC=F");
 }
 
 async function fetchMovers(scrId: "day_gainers" | "day_losers", count: number): Promise<MoverQuote[]> {
