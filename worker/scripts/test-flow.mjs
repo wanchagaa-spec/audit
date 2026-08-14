@@ -487,7 +487,7 @@ globalThis.fetch = async (url, init = {}) => {
       const bodyText = raw.split("\r\n\r\n").slice(1).join("\r\n\r\n");
       gmailIdSeq += 1;
       const id = `msg-${gmailIdSeq}`;
-      gmailSent.push({ to, subject, body: bodyText });
+      gmailSent.push({ to, subject, body: bodyText, raw });
       return new Response(JSON.stringify({ id }), { status: 200 });
     }
     if (parsed.pathname === "/gmail/v1/users/me/messages" && (!init.method || init.method === "GET")) {
@@ -2149,6 +2149,28 @@ check(
     gmailSent[0].body === "พรุ่งนี้เจอกันตอนบ่ายสองนะ"
 );
 
+// Regression test for a header-injection bug caught in code review before
+// merge: gmailCommands.ts's send-command regex uses the /s (dotAll) flag so
+// a multi-line body can be typed, but that also lets the *subject* capture
+// span a real newline if one is embedded in the message. Without stripping
+// it (gmail.ts's stripHeaderBreaks), that embedded \n would become a real
+// line break in the raw MIME message, letting whatever follows be read as
+// an extra header (e.g. a live Bcc:) instead of literal subject text.
+const injectedSubjectText = "Hi\nBcc: attacker@evil.com";
+await handleTextMessage(
+  env,
+  lineUserId,
+  `ส่งอีเมล ถึง friend@example.com เรื่อง ${injectedSubjectText} ข้อความ Hello`,
+  origin
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+const injectedSend = gmailSent.at(-1);
+const rawHeaderLines = injectedSend.raw.split("\r\n\r\n")[0].split("\r\n");
+check(
+  "an embedded newline in the subject can't inject a real extra header (e.g. Bcc) into the sent MIME message",
+  !rawHeaderLines.some((line) => line.startsWith("Bcc:")) && injectedSend.subject.includes("Bcc: attacker@evil.com")
+);
+
 // AI interpreter routing (PLAN.md 17.11/17.28): natural-language email
 // requests still reach the same confirm-before-send flow.
 simulateInterpreterResult = { intent: "email_check" };
@@ -2161,10 +2183,17 @@ simulateInterpreterResult = {
   emailSubject: "แจ้งลาป่วย",
   emailBody: "วันนี้ขอลาป่วยนะครับ",
 };
+const gmailSentCountBeforeInterp = gmailSent.length;
 const interpEmailSendReply = await handleTextMessage(env, lineUserId, "ช่วยส่งเมลลาป่วยให้เพื่อนร่วมงานหน่อย", origin);
-check("an AI-interpreted email_send still asks to confirm first, never sends directly", interpEmailSendReply.includes("colleague@example.com") && gmailSent.length === 1);
+check(
+  "an AI-interpreted email_send still asks to confirm first, never sends directly",
+  interpEmailSendReply.includes("colleague@example.com") && gmailSent.length === gmailSentCountBeforeInterp
+);
 await handleTextMessage(env, lineUserId, "ใช่", origin);
-check("confirming the AI-interpreted send actually sends it", gmailSent.length === 2 && gmailSent[1].to === "colleague@example.com");
+check(
+  "confirming the AI-interpreted send actually sends it",
+  gmailSent.length === gmailSentCountBeforeInterp + 1 && gmailSent.at(-1).to === "colleague@example.com"
+);
 
 simulateInsufficientGmailScope = true;
 const gmailRelinkReply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);

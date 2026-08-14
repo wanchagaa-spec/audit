@@ -5,7 +5,7 @@
 // bot's own system the moment it's confirmed (a wrong calendar event or task
 // can just be deleted again; a sent email can't be unsent).
 
-import { listRecentEmails, sendEmail } from "./gmail.ts";
+import { EMAIL_RE, listRecentEmails, sendEmail } from "./gmail.ts";
 import { setPendingConfirmation, type ActionCtx } from "./state.ts";
 
 type Handler = (ctx: ActionCtx) => Promise<string>;
@@ -15,8 +15,6 @@ export interface EmailDraft {
   subject: string;
   body: string;
 }
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function answerEmailCheck(ctx: ActionCtx): Promise<string> {
   const emails = await listRecentEmails(ctx.accessToken, { unreadOnly: true, maxResults: 5 });

@@ -26,6 +26,7 @@ import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import type { EntryType } from "../../app/src/types.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
+import { EMAIL_RE } from "./gmail.ts";
 import { BOT_NAME } from "./persona.ts";
 import { bangkokDateKey } from "./thaiDate.ts";
 
@@ -71,7 +72,6 @@ const INTERPRETER_TIMEOUT_MS = 3000;
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function isValidDateKey(s: unknown): s is string {
   if (typeof s !== "string" || !DATE_KEY_RE.test(s)) return false;
