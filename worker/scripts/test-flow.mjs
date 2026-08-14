@@ -77,6 +77,12 @@ let taskIdSeq = 0;
 let simulateInsufficientTasksScope = false;
 let simulateTasksApiDisabled = false;
 
+const gmailInbox = []; // simulates the Gmail inbox: {id, from, subject, unread}
+const gmailSent = []; // simulates sent messages: {to, subject, body} (decoded from the base64url raw payload)
+let gmailIdSeq = 0;
+let simulateInsufficientGmailScope = false;
+let simulateGmailApiDisabled = false;
+
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
@@ -453,6 +459,53 @@ globalThis.fetch = async (url, init = {}) => {
         if (idx >= 0) googleTasks.splice(idx, 1);
         return new Response(null, { status: 204 });
       }
+    }
+  }
+  if (u.startsWith("https://gmail.googleapis.com/gmail/v1/users/me/messages")) {
+    if (simulateInsufficientGmailScope) return new Response("forbidden", { status: 403 });
+    if (simulateGmailApiDisabled) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 403,
+            message:
+              "Gmail API has not been used in project 123 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/gmail.googleapis.com/overview",
+            errors: [{ reason: "accessNotConfigured" }],
+          },
+        }),
+        { status: 403 }
+      );
+    }
+    const parsed = new URL(u);
+    if (parsed.pathname === "/gmail/v1/users/me/messages/send" && init.method === "POST") {
+      const body = JSON.parse(init.body);
+      const raw = Buffer.from(body.raw.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+      const to = raw.match(/^To: (.*)$/m)?.[1] ?? "";
+      const subjectHeader = raw.match(/^Subject: (.*)$/m)?.[1] ?? "";
+      const encodedMatch = subjectHeader.match(/^=\?UTF-8\?B\?(.*)\?=$/);
+      const subject = encodedMatch ? Buffer.from(encodedMatch[1], "base64").toString("utf8") : subjectHeader;
+      const bodyText = raw.split("\r\n\r\n").slice(1).join("\r\n\r\n");
+      gmailIdSeq += 1;
+      const id = `msg-${gmailIdSeq}`;
+      gmailSent.push({ to, subject, body: bodyText, raw });
+      return new Response(JSON.stringify({ id }), { status: 200 });
+    }
+    if (parsed.pathname === "/gmail/v1/users/me/messages" && (!init.method || init.method === "GET")) {
+      const unreadOnly = parsed.searchParams.get("q")?.includes("is:unread") ?? false;
+      const matched = gmailInbox.filter((m) => !unreadOnly || m.unread);
+      return new Response(JSON.stringify({ messages: matched.map((m) => ({ id: m.id })) }), { status: 200 });
+    }
+    const idMatch = parsed.pathname.match(/^\/gmail\/v1\/users\/me\/messages\/(.+)$/);
+    if (idMatch) {
+      const message = gmailInbox.find((m) => m.id === idMatch[1]);
+      return new Response(
+        JSON.stringify({
+          id: message.id,
+          snippet: message.snippet ?? "",
+          payload: { headers: [{ name: "From", value: message.from }, { name: "Subject", value: message.subject }] },
+        }),
+        { status: 200 }
+      );
     }
   }
   if (u.includes("?fields=sheets.properties.title")) {
@@ -948,7 +1001,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("9 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("10 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -2038,6 +2091,125 @@ check(
   "the AI-supplied due date/time reaches Google Tasks as a real due timestamp",
   googleTasks.find((t) => t.title === "ต่อประกันรถ")?.due === "2026-02-01T09:30:00+07:00"
 );
+
+// 8.6. Gmail (PLAN.md 17.28): "เช็คอีเมล" / "ส่งอีเมล ถึง ... เรื่อง ... ข้อความ
+// ...". Read (inbox summaries only) + send only — the narrowest v1 scope
+// that still does what was asked for. Sending confirms first, same as every
+// other write action.
+const emailCheckEmptyReply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);
+check("no unread email says so instead of an empty list", emailCheckEmptyReply.includes("ไม่มีอีเมลใหม่ที่ยังไม่ได้อ่านเลยนะ"));
+
+gmailInbox.push(
+  { id: "m-1", from: "boss@company.com", subject: "งานด่วน", snippet: "ช่วยส่งรายงานก่อนเที่ยงด้วยนะ", unread: true },
+  { id: "m-2", from: "newsletter@shop.com", subject: "โปรโมชั่นพิเศษ", snippet: "ลดสูงสุด 50%", unread: false }
+);
+const emailCheckWithMailReply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);
+check(
+  "checking email lists only the unread one, with sender/subject/snippet, not the already-read one",
+  emailCheckWithMailReply.includes("boss@company.com") &&
+    emailCheckWithMailReply.includes("งานด่วน") &&
+    emailCheckWithMailReply.includes("ช่วยส่งรายงานก่อนเที่ยงด้วยนะ") &&
+    !emailCheckWithMailReply.includes("newsletter@shop.com")
+);
+
+const emailSendBadFormatReply = await handleTextMessage(env, lineUserId, "ส่งอีเมล หาใครสักคน", origin);
+check(
+  "a malformed send command asks for the right format instead of erroring",
+  emailSendBadFormatReply.includes("รูปแบบไม่ถูกต้อง") && gmailSent.length === 0
+);
+
+const emailSendBadAddressReply = await handleTextMessage(
+  env,
+  lineUserId,
+  "ส่งอีเมล ถึง not-an-email เรื่อง ทดสอบ ข้อความ สวัสดี",
+  origin
+);
+check("an invalid email address is rejected before ever prompting to confirm", emailSendBadAddressReply.includes("ไม่ถูกต้อง"));
+
+const emailSendPromptReply = await handleTextMessage(
+  env,
+  lineUserId,
+  "ส่งอีเมล ถึง friend@example.com เรื่อง ประชุมพรุ่งนี้ ข้อความ พรุ่งนี้เจอกันตอนบ่ายสองนะ",
+  origin
+);
+check(
+  "sending an email asks to confirm first, and warns it can't be recalled",
+  emailSendPromptReply.includes("friend@example.com") &&
+    emailSendPromptReply.includes("ประชุมพรุ่งนี้") &&
+    emailSendPromptReply.includes("เรียกคืนไม่ได้") &&
+    gmailSent.length === 0
+);
+const emailSendConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming actually sends it, with the exact recipient/subject/body",
+  emailSendConfirmReply.includes("friend@example.com") &&
+    gmailSent.length === 1 &&
+    gmailSent[0].to === "friend@example.com" &&
+    gmailSent[0].subject === "ประชุมพรุ่งนี้" &&
+    gmailSent[0].body === "พรุ่งนี้เจอกันตอนบ่ายสองนะ"
+);
+
+// Regression test for a header-injection bug caught in code review before
+// merge: gmailCommands.ts's send-command regex uses the /s (dotAll) flag so
+// a multi-line body can be typed, but that also lets the *subject* capture
+// span a real newline if one is embedded in the message. Without stripping
+// it (gmail.ts's stripHeaderBreaks), that embedded \n would become a real
+// line break in the raw MIME message, letting whatever follows be read as
+// an extra header (e.g. a live Bcc:) instead of literal subject text.
+const injectedSubjectText = "Hi\nBcc: attacker@evil.com";
+await handleTextMessage(
+  env,
+  lineUserId,
+  `ส่งอีเมล ถึง friend@example.com เรื่อง ${injectedSubjectText} ข้อความ Hello`,
+  origin
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+const injectedSend = gmailSent.at(-1);
+const rawHeaderLines = injectedSend.raw.split("\r\n\r\n")[0].split("\r\n");
+check(
+  "an embedded newline in the subject can't inject a real extra header (e.g. Bcc) into the sent MIME message",
+  !rawHeaderLines.some((line) => line.startsWith("Bcc:")) && injectedSend.subject.includes("Bcc: attacker@evil.com")
+);
+
+// AI interpreter routing (PLAN.md 17.11/17.28): natural-language email
+// requests still reach the same confirm-before-send flow.
+simulateInterpreterResult = { intent: "email_check" };
+const interpEmailCheckReply = await handleTextMessage(env, lineUserId, "มีเมลใหม่บ้างไหม", origin);
+check("an AI-interpreted email_check reaches the same answerEmailCheck function", interpEmailCheckReply.includes("boss@company.com"));
+
+simulateInterpreterResult = {
+  intent: "email_send",
+  emailTo: "colleague@example.com",
+  emailSubject: "แจ้งลาป่วย",
+  emailBody: "วันนี้ขอลาป่วยนะครับ",
+};
+const gmailSentCountBeforeInterp = gmailSent.length;
+const interpEmailSendReply = await handleTextMessage(env, lineUserId, "ช่วยส่งเมลลาป่วยให้เพื่อนร่วมงานหน่อย", origin);
+check(
+  "an AI-interpreted email_send still asks to confirm first, never sends directly",
+  interpEmailSendReply.includes("colleague@example.com") && gmailSent.length === gmailSentCountBeforeInterp
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the AI-interpreted send actually sends it",
+  gmailSent.length === gmailSentCountBeforeInterp + 1 && gmailSent.at(-1).to === "colleague@example.com"
+);
+
+simulateInsufficientGmailScope = true;
+const gmailRelinkReply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);
+check(
+  "a scope-less refresh token gets a re-link prompt for Gmail, not a crash",
+  gmailRelinkReply.includes("สิทธิ์อีเมลเพิ่ม") && gmailRelinkReply.includes("accounts.google.com")
+);
+simulateInsufficientGmailScope = false;
+
+simulateGmailApiDisabled = true;
+const gmailApiDisabledReply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);
+check(
+  "a disabled Gmail API gets an 'enable it in Cloud Console' message, not a re-link loop",
+  gmailApiDisabledReply.includes("Google Cloud Console") && !gmailApiDisabledReply.includes("เชื่อมบัญชี Google ใหม่อีกครั้ง")
+);
+simulateGmailApiDisabled = false;
 
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
@@ -3273,6 +3445,22 @@ const groupTaskConfirmReply = await handleGroupTextMessage(env, groupId, groupSe
 check(
   "any group member can confirm the shared pending task create, same as calendar/diary above",
   groupTaskConfirmReply.includes("เพิ่มสิ่งที่ต้องทำแล้ว")
+);
+
+// Gmail (PLAN.md 17.28) works in group mode too, for the same reason.
+const groupEmailSendPromptReply = await handleGroupTextMessage(
+  env,
+  groupId,
+  groupSenderA,
+  "ส่งอีเมล ถึง vendor@example.com เรื่อง สั่งของ ข้อความ ขอสั่งของเพิ่มอีก 10 ชิ้นครับ",
+  origin
+);
+check("email send asks to confirm in group mode", groupEmailSendPromptReply.includes("vendor@example.com"));
+const groupEmailSentCountBefore = gmailSent.length;
+const groupEmailConfirmReply = await handleGroupTextMessage(env, groupId, groupSenderB, "ใช่", origin);
+check(
+  "any group member can confirm the shared pending email send, same as calendar/diary/task above",
+  groupEmailConfirmReply.includes("vendor@example.com") && gmailSent.length === groupEmailSentCountBefore + 1
 );
 
 // Trip start/status via the real webhook path (mentioned, since these are
