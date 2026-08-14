@@ -432,14 +432,16 @@ calendar command.
 ### Tasks (PLAN.md 17.26)
 
 A plain to-do list backed by Google Tasks — the fourth Google service this bot connects to
-(after Drive, Sheets, and Calendar). Deliberately scoped narrower than Calendar for v1: no
-due dates or reminders, just a title. Every item lives in your account's default Google
-Tasks list (`@default`, always present, no separate list picker):
+(after Drive, Sheets, and Calendar). Every item lives in your account's default Google Tasks
+list (`@default`, always present, no separate list picker):
 
 - `เพิ่มสิ่งที่ต้องทำ <ข้อความ>` — e.g. "เพิ่มสิ่งที่ต้องทำ ซื้อของเข้าบ้าน". Confirms before
-  actually adding it, same as calendar/diary.
+  actually adding it, same as calendar/diary. A trailing date and/or time is optional
+  (PLAN.md 17.27) — e.g. "เพิ่มสิ่งที่ต้องทำ จ่ายค่าไฟ 20/1/2569 14:00" or just "... 20/1/2569"
+  with no time; leave both out and it's still a perfectly valid task, unlike a calendar
+  appointment which always needs both.
 - `สิ่งที่ต้องทำ` (or `รายการที่ต้องทำ` / `มีอะไรต้องทำบ้าง`) — lists everything not yet marked
-  done.
+  done, showing each item's due date/time when it has one.
 - `ทำเสร็จแล้ว <คำค้น>` / `ลบสิ่งที่ต้องทำ <คำค้น>` — searches your incomplete tasks by title
   (Google Tasks has no server-side keyword search like Calendar's events do, so this fetches
   the list and matches client-side); if more than one matches, it lists them and asks you to
@@ -448,6 +450,13 @@ Tasks list (`@default`, always present, no separate list picker):
 Needs the extra `tasks` OAuth scope (see setup step 3.5/3.6 above) — accounts linked before
 this feature existed will get a one-time re-link prompt the first time they try a task
 command.
+
+**Known uncertainty about due times**: Google Tasks' `due` field has a long-standing quirk
+where the official Tasks apps historically only respected the *date* part of it, ignoring
+whatever time-of-day was sent. This bot sends the time anyway (best effort — newer Tasks
+clients with time-based reminders may honor it), but there's no way to verify from this
+sandboxed dev environment whether Google actually keeps it. Worth checking for yourself in
+the real Google Tasks app after a task with a time is created.
 
 ### Diary (PLAN.md 15.4)
 
