@@ -423,7 +423,9 @@ async function runInterpretedIntent(
       case "diary_search":
         return withToken((ctx) => answerDiarySearch(ctx, intent.diarySearchTerm));
       case "task_create":
-        return withToken((ctx) => promptTaskCreate(ctx, intent.taskTitle));
+        return withToken((ctx) =>
+          promptTaskCreate(ctx, { title: intent.taskTitle, dateKey: intent.taskDueDateKey, time: intent.taskDueTime })
+        );
       case "task_complete":
         return withToken((ctx) => promptTaskComplete(ctx, intent.taskKeyword));
       case "task_delete":

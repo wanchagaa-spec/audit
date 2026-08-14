@@ -7,6 +7,8 @@
 // no separate lookup needed) is used — this bot never manages multiple
 // task lists.
 
+import { toRfc3339 } from "./thaiDate.ts";
+
 const TASKS_BASE = "https://tasks.googleapis.com/tasks/v1";
 const DEFAULT_TASKLIST = "@default";
 
@@ -48,6 +50,23 @@ async function tasksFetch(accessToken: string, path: string, init: RequestInit =
 export interface TaskSummary {
   id: string;
   title: string;
+  dueDateKey?: string;
+  dueTime?: string;
+}
+
+// Google Tasks' `due` field has a long-standing, well-known quirk: the
+// Tasks apps/UI historically only ever respected the *date* part of it,
+// silently treating the time-of-day as 00:00 UTC no matter what was sent —
+// this may or may not have changed with Google Tasks' newer time-based
+// reminder UI, and there's no way to verify that from this sandbox (no
+// live Google API access). So on the way back in, an exact 00:00 UTC is
+// treated as "no real time was set" rather than surfaced as a literal
+// midnight due time; anything else is shown as-is, best effort.
+function parseDueField(due: string | undefined): { dateKey: string; time?: string } | undefined {
+  if (!due) return undefined;
+  const dateKey = due.slice(0, 10);
+  const hhmm = due.slice(11, 16);
+  return hhmm && hhmm !== "00:00" ? { dateKey, time: hhmm } : { dateKey };
 }
 
 /** Incomplete tasks only — a finished to-do list is meant to disappear from
@@ -59,13 +78,26 @@ export async function listIncompleteTasks(accessToken: string): Promise<TaskSumm
     accessToken,
     `/lists/${DEFAULT_TASKLIST}/tasks?showCompleted=false&showHidden=false&maxResults=100`
   );
-  return ((data.items ?? []) as any[]).map((t) => ({ id: t.id, title: t.title || "(ไม่มีชื่อ)" }));
+  return ((data.items ?? []) as any[]).map((t) => {
+    const due = parseDueField(t.due);
+    return { id: t.id, title: t.title || "(ไม่มีชื่อ)", dueDateKey: due?.dateKey, dueTime: due?.time };
+  });
 }
 
-export async function createTask(accessToken: string, title: string): Promise<string> {
+export async function createTask(
+  accessToken: string,
+  title: string,
+  due?: { dateKey: string; time?: string }
+): Promise<string> {
+  const body: Record<string, unknown> = { title };
+  if (due) {
+    // Sent best-effort even with a time-of-day — see parseDueField's
+    // comment on why we can't be sure Google keeps it.
+    body.due = toRfc3339(due.dateKey, due.time ?? "00:00");
+  }
   const created = await tasksFetch(accessToken, `/lists/${DEFAULT_TASKLIST}/tasks`, {
     method: "POST",
-    body: JSON.stringify({ title }),
+    body: JSON.stringify(body),
   });
   return created.id;
 }

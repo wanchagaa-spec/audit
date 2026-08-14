@@ -46,7 +46,7 @@ export type InterpretedIntent =
   | { intent: "diary_query_date"; diaryDateKey: string }
   | { intent: "diary_query_month" }
   | { intent: "diary_search"; diarySearchTerm: string }
-  | { intent: "task_create"; taskTitle: string }
+  | { intent: "task_create"; taskTitle: string; taskDueDateKey?: string; taskDueTime?: string }
   | { intent: "task_complete"; taskKeyword: string }
   | { intent: "task_delete"; taskKeyword: string }
   | { intent: "task_list" }
@@ -160,7 +160,9 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     }
     case "task_create": {
       if (!isNonEmptyString(r.taskTitle)) return null;
-      return { intent: "task_create", taskTitle: r.taskTitle };
+      const taskDueDateKey = isValidDateKey(r.taskDueDateKey) ? r.taskDueDateKey : undefined;
+      const taskDueTime = isValidTime(r.taskDueTime) ? r.taskDueTime : undefined;
+      return { intent: "task_create", taskTitle: r.taskTitle, taskDueDateKey, taskDueTime };
     }
     case "task_complete": {
       if (!isNonEmptyString(r.taskKeyword)) return null;
@@ -236,7 +238,7 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"diary_query_date","diaryDateKey":"YYYY-MM-DD"} — ขอดูไดอารี่วันที่ระบุ',
     '{"intent":"diary_query_month"} — ขอดูสรุปไดอารี่เดือนนี้',
     '{"intent":"diary_search","diarySearchTerm":string} — ค้นหาไดอารี่ที่มีคำนี้',
-    '{"intent":"task_create","taskTitle":string} — เพิ่มสิ่งที่ต้องทำใหม่ในลิสต์ (ไม่มีวันที่/เวลากำกับ ต่างจากนัดหมาย)',
+    '{"intent":"task_create","taskTitle":string,"taskDueDateKey"?:"YYYY-MM-DD","taskDueTime"?:"HH:MM"} — เพิ่มสิ่งที่ต้องทำใหม่ในลิสต์ จะมีวันที่/เวลากำกับหรือไม่ก็ได้ (ใส่เฉพาะตอนผู้ใช้ระบุมาจริงๆ ห้ามเดา)',
     '{"intent":"task_complete","taskKeyword":string} — ทำเครื่องหมายว่าสิ่งที่ต้องทำที่มีคำค้นหานี้เสร็จแล้ว',
     '{"intent":"task_delete","taskKeyword":string} — ลบสิ่งที่ต้องทำที่มีคำค้นหานี้ออกจากลิสต์',
     '{"intent":"task_list"} — ขอดูรายการสิ่งที่ต้องทำทั้งหมดที่ยังไม่เสร็จ',
@@ -265,11 +267,16 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '- "เวร"/"ตารางเวร" (ตารางเวรทำงานส่วนตัว) กับ "นัด" (Google Calendar) เป็นข้อมูลคนละชุดกัน ห้ามใช้ calendar_query/calendar_create/calendar_edit/calendar_delete ตอบคำถามเรื่องเวรเด็ดขาด คำถามเรื่องเวร (เช่น "มีเวรมั้ย", "ใครอยู่เวรเช้า", "พรุ่งนี้ได้ขึ้นเวรมั้ย") ให้ใช้ intent "question" เท่านั้น',
     // Preemptive version of the same 17.20 lesson, applied to a brand-new
     // feature from day one instead of waiting for a real report to catch
-    // it: "สิ่งที่ต้องทำ" (a plain to-do list, no date/time attached at all)
-    // could easily get collapsed into "นัด" (Calendar, always has a
-    // date+time) the same way "เวร" did, since both are "things scheduled"
-    // to an unclear model. Spelled out explicitly instead.
-    '- "สิ่งที่ต้องทำ" (to-do list ไม่มีวันที่/เวลากำกับ) กับ "นัด" (Google Calendar ต้องมีวันที่+เวลาเสมอ) เป็นข้อมูลคนละชุดกัน ห้ามใช้ calendar_create ตอบข้อความเพิ่มสิ่งที่ต้องทำเด็ดขาด แม้ผู้ใช้จะไม่ได้ระบุวันที่/เวลามาก็ตาม (อย่าเดาวันที่ให้เพื่อยัดใส่ calendar_create) ให้ใช้ task_create/task_complete/task_delete/task_list แทน',
+    // it. Originally written when a to-do could never carry a date at all,
+    // so "has no date" was a safe stand-in for "must be task_create, never
+    // calendar_create" — that stand-in broke once task_create gained
+    // optional taskDueDateKey/taskDueTime (PLAN.md 17.27), since a to-do
+    // with a due date now looks exactly like an appointment by that one
+    // signal alone. Rewritten around the real distinguishing question
+    // instead: is this a personal to-do/reminder (task_create, due date
+    // optional either way), or an actual scheduled meeting/appointment
+    // (calendar_create, always needs both a date and a time)?
+    '- "สิ่งที่ต้องทำ" (to-do/reminder ส่วนตัว เช่น "จ่ายบิลค่าน้ำ", "โทรหาหมอ" — จะมีกำหนดวันที่/เวลากำกับด้วยหรือไม่ก็ได้) กับ "นัด" (Google Calendar เป็นนัดหมาย/การประชุม/การไปพบใครสักคน ต้องมีวันที่+เวลาเสมอ) เป็นข้อมูลคนละชุดกัน ห้ามตัดสินจาก "มี/ไม่มีวันที่" อย่างเดียว ให้ดูจากลักษณะของเรื่องว่าเป็นสิ่งที่ต้องทำ/เตือนตัวเองหรือเป็นนัดหมายจริง แม้ผู้ใช้จะระบุวันที่/เวลามาด้วยตอนบอกให้ "เพิ่มสิ่งที่ต้องทำ" ก็ยังใช้ task_create เหมือนเดิม (ใส่ taskDueDateKey/taskDueTime ตามที่ระบุมา) ห้ามใช้ calendar_create แทนเด็ดขาด และห้ามเดาวันที่ให้เพื่อยัดใส่ calendar_create',
     // Found in a real report: the bot proposed creating a calendar event
     // ("จะสร้างนัด: ... ใช่ไหม?"), the user replied restating one detail
     // ("ฉันนัดตอน 17.00 นะ") instead of the exact "ใช่" word the confirm step

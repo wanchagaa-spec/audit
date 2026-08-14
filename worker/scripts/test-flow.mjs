@@ -437,7 +437,7 @@ globalThis.fetch = async (url, init = {}) => {
         const body = JSON.parse(init.body);
         taskIdSeq += 1;
         const id = `task-${taskIdSeq}`;
-        googleTasks.push({ id, title: body.title, status: "needsAction" });
+        googleTasks.push({ id, title: body.title, status: "needsAction", due: body.due });
         return new Response(JSON.stringify({ id }), { status: 200 });
       }
     } else {
@@ -1972,6 +1972,72 @@ check(
   taskApiDisabledReply.includes("Google Cloud Console") && !taskApiDisabledReply.includes("เชื่อมบัญชี Google ใหม่อีกครั้ง")
 );
 simulateTasksApiDisabled = false;
+
+// PLAN.md 17.27: "เพิ่มสิ่งที่ต้องทำ" now understands an optional trailing
+// date and/or time, the same "strip a matched date/time out of the free
+// text" trick calendarCommands.ts's parseEventDraft uses — except a task's
+// date/time stay optional (parseTaskDraft never rejects a message just for
+// missing one), unlike an appointment's, which are both mandatory.
+const taskWithDateTimePromptReply = await handleTextMessage(
+  env,
+  lineUserId,
+  "เพิ่มสิ่งที่ต้องทำ จ่ายค่าไฟ 20/1/2569 14:00",
+  origin
+);
+check(
+  "a task with a date and time shows both in the confirm prompt, with a clean title",
+  taskWithDateTimePromptReply.includes('"จ่ายค่าไฟ"') &&
+    taskWithDateTimePromptReply.includes("20 ม.ค. 2569") &&
+    taskWithDateTimePromptReply.includes("14:00")
+);
+const taskWithDateTimeConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+const savedDateTimeTask = googleTasks.find((t) => t.title === "จ่ายค่าไฟ");
+check(
+  "confirming sends a due timestamp built from the parsed date+time",
+  taskWithDateTimeConfirmReply.includes("20 ม.ค. 2569") &&
+    taskWithDateTimeConfirmReply.includes("14:00") &&
+    savedDateTimeTask?.due === "2026-01-20T14:00:00+07:00"
+);
+
+const taskDateOnlyPromptReply = await handleTextMessage(env, lineUserId, "เพิ่มสิ่งที่ต้องทำ ต่อทะเบียนรถ 25/1/2569", origin);
+check(
+  "a task with only a date shows the date but not a time in the confirm prompt",
+  taskDateOnlyPromptReply.includes("25 ม.ค. 2569") && !taskDateOnlyPromptReply.includes("เวลา")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+const savedDateOnlyTask = googleTasks.find((t) => t.title === "ต่อทะเบียนรถ");
+check("a date-only task is still sent with a due timestamp, at midnight", savedDateOnlyTask?.due === "2026-01-25T00:00:00+07:00");
+
+const listWithDueDatesReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
+check(
+  "the task list shows a due date/time when set, and shows a time only when it's a real one (not the date-only midnight default)",
+  listWithDueDatesReply.includes("จ่ายค่าไฟ วันที่ 20 ม.ค. 2569 เวลา 14:00") &&
+    listWithDueDatesReply.includes("ต่อทะเบียนรถ วันที่ 25 ม.ค. 2569") &&
+    !listWithDueDatesReply.includes("ต่อทะเบียนรถ วันที่ 25 ม.ค. 2569 เวลา")
+);
+
+// A task created with no date/time at all still works exactly as before
+// (backward compatibility) — "โทรหาหมอ" was created earlier in this section
+// via the AI-interpreter path with no due date supplied at all.
+check("a task created with no date/time has no due field at all", googleTasks.find((t) => t.title === "โทรหาหมอ")?.due === undefined);
+
+// The AI interpreter (aiInterpreter.ts) can supply an optional due date/time too.
+simulateInterpreterResult = {
+  intent: "task_create",
+  taskTitle: "ต่อประกันรถ",
+  taskDueDateKey: "2026-02-01",
+  taskDueTime: "09:30",
+};
+const interpTaskWithDueReply = await handleTextMessage(env, lineUserId, "อย่าลืมต่อประกันรถ 1 ก.พ. 9:30 ด้วยนะ", origin);
+check(
+  "an AI-interpreted task_create with a due date/time shows it in the confirm prompt",
+  interpTaskWithDueReply.includes("1 ก.พ. 2569") && interpTaskWithDueReply.includes("09:30")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "the AI-supplied due date/time reaches Google Tasks as a real due timestamp",
+  googleTasks.find((t) => t.title === "ต่อประกันรถ")?.due === "2026-02-01T09:30:00+07:00"
+);
 
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.

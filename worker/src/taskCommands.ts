@@ -6,8 +6,34 @@
 
 import { completeTask, createTask, deleteTask, listIncompleteTasks, type TaskSummary } from "./tasks.ts";
 import { setPendingConfirmation, type ActionCtx } from "./state.ts";
+import { bangkokYear, extractDate, extractTime, formatThaiDateLabel } from "./thaiDate.ts";
 
 type Handler = (ctx: ActionCtx) => Promise<string>;
+
+export interface TaskDraft {
+  title: string;
+  dateKey?: string;
+  time?: string;
+}
+
+// Unlike calendarCommands.ts's parseEventDraft (which requires both a date
+// AND a time to even count as a match — an appointment without one doesn't
+// make sense), a to-do's date/time are both optional: "เพิ่มสิ่งที่ต้องทำ
+// จ่ายบิลค่าน้ำ" with no date at all is still a perfectly valid task.
+function parseTaskDraft(payload: string): TaskDraft {
+  const date = extractDate(payload, bangkokYear());
+  const time = extractTime(payload);
+  let title = payload;
+  if (date) title = title.replace(date.matchedText, "");
+  if (time) title = title.replace(time.matchedText, "");
+  title = title.replace(/\s+/g, " ").trim();
+  return { title: title || "สิ่งที่ต้องทำ", dateKey: date?.dateKey, time: time?.time };
+}
+
+function formatDueSuffix(dateKey?: string, time?: string): string {
+  if (!dateKey) return "";
+  return ` วันที่ ${formatThaiDateLabel(dateKey)}${time ? ` เวลา ${time}` : ""}`;
+}
 
 // Google Tasks has no server-side keyword search (unlike Calendar's events
 // `q` param) — fetches the (short, incomplete-only) list and filters
@@ -32,9 +58,14 @@ async function findExactlyOneTask(
 // (aiInterpreter.ts's runInterpretedIntent in index.ts) — same split as
 // every other command module in this codebase.
 
-export async function promptTaskCreate(ctx: ActionCtx, title: string): Promise<string> {
-  await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "taskCreate", title });
-  return `จะเพิ่มสิ่งที่ต้องทำ: "${title}" ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+export async function promptTaskCreate(ctx: ActionCtx, draft: TaskDraft): Promise<string> {
+  await setPendingConfirmation(ctx.kv, ctx.lineUserId, {
+    kind: "taskCreate",
+    title: draft.title,
+    dateKey: draft.dateKey,
+    time: draft.time,
+  });
+  return `จะเพิ่มสิ่งที่ต้องทำ: "${draft.title}"${formatDueSuffix(draft.dateKey, draft.time)} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
 }
 
 export async function promptTaskComplete(ctx: ActionCtx, keyword: string): Promise<string> {
@@ -56,7 +87,10 @@ export async function promptTaskDelete(ctx: ActionCtx, keyword: string): Promise
 export async function answerTaskList(ctx: ActionCtx): Promise<string> {
   const tasks = await listIncompleteTasks(ctx.accessToken);
   if (tasks.length === 0) return "ไม่มีสิ่งที่ต้องทำค้างอยู่เลยนะ";
-  return ["สิ่งที่ต้องทำ:", ...tasks.map((t, i) => `${i + 1}. ${t.title}`)].join("\n");
+  return [
+    "สิ่งที่ต้องทำ:",
+    ...tasks.map((t, i) => `${i + 1}. ${t.title}${formatDueSuffix(t.dueDateKey, t.dueTime)}`),
+  ].join("\n");
 }
 
 const LIST_PHRASES = ["สิ่งที่ต้องทำ", "รายการที่ต้องทำ", "มีอะไรต้องทำบ้าง", "สิ่งที่ต้องทำมีอะไรบ้าง"];
@@ -74,8 +108,8 @@ export async function matchTaskCommand(text: string): Promise<Handler | null> {
 
   const addMatch = trimmed.match(/^เพิ่มสิ่งที่ต้องทำ\s+(.+)$/s);
   if (addMatch) {
-    const title = addMatch[1].trim();
-    return (ctx) => promptTaskCreate(ctx, title);
+    const draft = parseTaskDraft(addMatch[1].trim());
+    return (ctx) => promptTaskCreate(ctx, draft);
   }
 
   const completeMatch = trimmed.match(/^(?:ทำเสร็จแล้ว|เสร็จแล้ว)\s+(.+)$/s);
@@ -93,9 +127,13 @@ export async function matchTaskCommand(text: string): Promise<Handler | null> {
   return null;
 }
 
-export async function applyTaskCreate(ctx: ActionCtx, pending: { title: string }): Promise<string> {
-  await createTask(ctx.accessToken, pending.title);
-  return `เพิ่มสิ่งที่ต้องทำแล้ว: "${pending.title}"`;
+export async function applyTaskCreate(
+  ctx: ActionCtx,
+  pending: { title: string; dateKey?: string; time?: string }
+): Promise<string> {
+  const due = pending.dateKey ? { dateKey: pending.dateKey, time: pending.time } : undefined;
+  await createTask(ctx.accessToken, pending.title, due);
+  return `เพิ่มสิ่งที่ต้องทำแล้ว: "${pending.title}"${formatDueSuffix(pending.dateKey, pending.time)}`;
 }
 
 export async function applyTaskComplete(ctx: ActionCtx, pending: { taskId: string; title: string }): Promise<string> {
