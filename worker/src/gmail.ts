@@ -37,18 +37,27 @@ async function gmailFetch(accessToken: string, path: string, init: RequestInit =
       "Content-Type": "application/json",
     },
   });
-  if (res.status === 401 || res.status === 403) {
+  if (!res.ok) {
     const bodyText = await res.text();
-    // Same two-different-403-problems distinction as calendar.ts's
+    // Same two-different-problems distinction as calendar.ts's
     // calendarFetch/tasks.ts's tasksFetch — see their own comments for why
     // telling them apart matters for which fix actually applies.
     if (/accessNotConfigured|has (not|n't) been used in project|it is disabled/i.test(bodyText)) {
       throw new GmailApiDisabledError(bodyText);
     }
-    throw new InsufficientGmailScopeError(bodyText);
-  }
-  if (!res.ok) {
-    throw new Error(`Gmail API error (${res.status}): ${await res.text()}`);
+    // Real report: a fresh account (Gmail API just enabled, never re-linked
+    // for the new scope) got a hard crash here instead of the expected
+    // re-link prompt — Calendar/Tasks only ever answer a scope problem with
+    // a clean 401/403, but Gmail evidently doesn't always, so gating this
+    // on an exact status code silently let anything else (a 400, say) fall
+    // through as a raw, unclassified Error that nothing downstream knows
+    // how to turn into a helpful reply. Any 4xx that isn't the
+    // API-disabled case above gets treated as "needs to re-link" instead —
+    // that's always a safe, actionable next step, unlike a dead-end crash.
+    if (res.status >= 400 && res.status < 500) {
+      throw new InsufficientGmailScopeError(bodyText);
+    }
+    throw new Error(`Gmail API error (${res.status}): ${bodyText}`);
   }
   if (res.status === 204) return null;
   return res.json();
