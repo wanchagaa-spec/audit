@@ -918,6 +918,23 @@ check(
   afterGreetingReply.includes("30")
 );
 
+// Regression test for a real report: a non-greeting, non-amount reply sent
+// mid-clarification (e.g. an unrelated natural-language question) used to
+// get stuck answering "จำนวนเงินเท่าไหร่คะ" forever instead of ever reaching
+// the AI interpreter, since a pending clarification skipped it entirely and
+// chatEngine's own "treat as a brand new message" fallback still re-asked
+// the same question (parseMessage treats any text with no digits as another
+// incomplete expense). Fixed by dropping a stale "amount" clarification
+// before deciding whether to run the AI interpreter.
+await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // triggers "จำนวนเงินเท่าไหร่คะ" again
+simulateInterpreterResult = { intent: "chitchat", reply: "ใครอยู่เวรพรุ่งนี้เหรอคะ เดี๋ยวดูให้นะ" };
+const unrelatedQuestionWhilePendingReply = await handleTextMessage(env, lineUserId, "ใครอยู่เวรพรุ่งนี้", origin);
+check(
+  "an unrelated question sent mid-clarification reaches the AI interpreter instead of re-asking for an amount forever",
+  unrelatedQuestionWhilePendingReply.includes("เดี๋ยวดูให้นะ") &&
+    !unrelatedQuestionWhilePendingReply.includes("จำนวนเงินเท่าไหร่คะ")
+);
+
 // Morning briefing (PLAN.md 15.11): the first greeting of a Bangkok calendar
 // day (that isn't the account's very first-ever greeting, already covered
 // above) gets a full briefing instead of the welcome message or the short
