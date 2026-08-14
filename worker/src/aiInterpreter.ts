@@ -198,7 +198,7 @@ function buildCategoryList(): string {
 // same way persona.ts's system instruction has its own marker string.
 function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
   return [
-    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ถามคำถาม)`,
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/ถามคำถาม)`,
     `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
     "",
     "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",
@@ -213,7 +213,7 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"calendar_create","calendarTitle":string,"calendarDateKey":"YYYY-MM-DD","calendarTime":"HH:MM"} — สร้างนัดใหม่ ต้องรู้ทั้งวันที่และเวลาแน่ชัด',
     '{"intent":"calendar_delete","calendarKeyword":string} — ลบนัดที่มีคำค้นหานี้',
     '{"intent":"calendar_edit","calendarKeyword":string,"calendarDateKey"?:"YYYY-MM-DD","calendarTime"?:"HH:MM"} — แก้วันที่/เวลาของนัดที่มีคำค้นหานี้',
-    '{"intent":"calendar_query","calendarRangeFromKey":"YYYY-MM-DD","calendarRangeToKeyExclusive":"YYYY-MM-DD","calendarRangeLabel":string} — ถามว่ามีนัดอะไรบ้างในช่วงเวลาหนึ่ง (toKeyExclusive คือวันถัดจากวันสุดท้ายของช่วง)',
+    '{"intent":"calendar_query","calendarRangeFromKey":"YYYY-MM-DD","calendarRangeToKeyExclusive":"YYYY-MM-DD","calendarRangeLabel":string} — ถามว่ามีนัดอะไรบ้างในช่วงเวลาหนึ่ง (toKeyExclusive คือวันถัดจากวันสุดท้ายของช่วง) เฉพาะนัดหมายใน Google Calendar เท่านั้น — คำถามเรื่อง "เวร"/"ตารางเวร" ไม่ใช่ intent นี้ (ดูกติกาด้านล่าง)',
     '{"intent":"diary_create","diaryText":string,"diaryCategory":string} — บันทึกไดอารี่ใหม่ (diaryCategory ถ้าไม่ได้ระบุหมวดให้ใช้ "อื่นๆ")',
     '{"intent":"diary_query_date","diaryDateKey":"YYYY-MM-DD"} — ขอดูไดอารี่วันที่ระบุ',
     '{"intent":"diary_query_month"} — ขอดูสรุปไดอารี่เดือนนี้',
@@ -222,7 +222,7 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
     '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',
     '{"intent":"set_province","provinceName":string} — ตั้งจังหวัด/เมืองสำหรับพยากรณ์อากาศ',
-    '{"intent":"question","question":string} — คำถามเกี่ยวกับเงิน/นัดหมาย/ไดอารี่/สภาพอากาศ/ข่าวของผู้ใช้ (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
+    '{"intent":"question","question":string} — คำถามเกี่ยวกับเงิน/นัดหมาย/ไดอารี่/เวร/สภาพอากาศ/ข่าวของผู้ใช้ (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
     '{"intent":"help"} — ขอดูวิธีใช้/คำสั่งทั้งหมด',
     '{"intent":"view_link"} — ขอลิงก์เปิดดูข้อมูล/บัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บเบราว์เซอร์ (เช่น "เปิดเว็บ", "ขอลิงก์เว็บ", "ดูเว็บไซต์หน่อย", "เปิดดูเว็บข้อมูล") — มีฟีเจอร์นี้จริง อย่าตอบว่าทำไม่ได้',
     '{"intent":"chitchat","reply":string} — พูดคุยทั่วไปที่ไม่ใช่คำสั่งอะไร (ทักทาย ชม คุยเล่น) ให้ตอบกลับตามธรรมชาติสั้นๆใน reply',
@@ -231,6 +231,16 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     "กติกาสำคัญที่ห้ามฝ่าฝืน:",
     "- ห้ามสร้างตัวเลข วันที่ เวลา หรือข้อมูลใดๆ ที่ไม่ได้อยู่ในข้อความหรือบริบทการคุยจริงๆ ถ้าขาดข้อมูลสำคัญให้ใช้ intent unclear แทนการเดา",
     "- categoryId ต้องเป็นค่าที่มีอยู่จริงในลิสต์หมวดหมู่ข้างบนเท่านั้น และต้อง type ตรงกับ income/expense ที่เลือก",
+    // Found in a real report: "พรุ่งนี้เค้ามีเวรมั้ย"/"พรุ่งนี้ได้ขึ้นเวรมั้ย" got
+    // classified as calendar_query and answered from Google Calendar
+    // ("ไม่มีนัดพรุ่งนี้เลยนะคะ") — "เวร" (a personal shift-duty roster the
+    // user fills in on its own web page, PLAN.md 17.18) is a completely
+    // different data source from "นัด" (a real Calendar event), but nothing
+    // told the model that, so it collapsed the unfamiliar concept into the
+    // closest one it already knew about. Same shape of bug as 17.13's
+    // missing view_link intent: an unlisted feature silently answers as if
+    // it doesn't exist / is something else instead.
+    '- "เวร"/"ตารางเวร" (ตารางเวรทำงานส่วนตัว) กับ "นัด" (Google Calendar) เป็นข้อมูลคนละชุดกัน ห้ามใช้ calendar_query/calendar_create/calendar_edit/calendar_delete ตอบคำถามเรื่องเวรเด็ดขาด คำถามเรื่องเวร (เช่น "มีเวรมั้ย", "ใครอยู่เวรเช้า", "พรุ่งนี้ได้ขึ้นเวรมั้ย") ให้ใช้ intent "question" เท่านั้น',
     // Found in a real report: the bot proposed creating a calendar event
     // ("จะสร้างนัด: ... ใช่ไหม?"), the user replied restating one detail
     // ("ฉันนัดตอน 17.00 นะ") instead of the exact "ใช่" word the confirm step
