@@ -1,4 +1,5 @@
-import { handleUserMessage, isGreeting } from "../../app/src/lib/chatEngine.ts";
+import { handleUserMessage, isGreeting, type PendingClarification } from "../../app/src/lib/chatEngine.ts";
+import { extractAmount } from "../../app/src/lib/parser.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { answerQuestion, matchAiCommand } from "./aiCommands.ts";
 import { interpretMessage, type InterpretedIntent } from "./aiInterpreter.ts";
@@ -567,6 +568,32 @@ async function dispatchLegacyCommands(
   return null;
 }
 
+// Regression fix for a real report: once chatEngine asks "จำนวนเงินเท่าไหร่คะ"
+// (pending.kind === "amount"), a reply that isn't a number and isn't an
+// exact-match greeting used to stay stuck answering that same question
+// forever — handleUserMessage's own "treat as a brand new message" fallback
+// still runs it through chatEngine's parseMessage, which (correctly, for a
+// money-only parser) treats *any* text with no digits as yet another
+// incomplete expense needing an amount, so it just re-asks. That trap
+// blocked every other feature (AI Q&A, calendar, shifts, ...) until the
+// 10-minute TTL expired, since a pending clarification also skips the AI
+// interpreter entirely (see the caller's own comment). A clarification only
+// makes sense as "still in progress" if the reply could plausibly be
+// answering it — for "amount", that means it contains a number; anything
+// else means the user has moved on to something unrelated, so the stale
+// clarification is dropped and the message re-enters the normal pipeline
+// (AI interpreter first, same as any fresh message) instead of trapping it.
+async function dropStaleAmountClarification(
+  kv: KVNamespace,
+  subjectId: string,
+  pending: PendingClarification | null,
+  text: string
+): Promise<PendingClarification | null> {
+  if (pending?.kind !== "amount" || isGreeting(text) || extractAmount(text) !== null) return pending;
+  await setPending(kv, subjectId, null);
+  return null;
+}
+
 export async function handleTextMessage(
   env: Env,
   lineUserId: string,
@@ -584,20 +611,21 @@ export async function handleTextMessage(
   }
 
   const pending = await getPending(env.ACCOUNTS, lineUserId);
+  const effectivePending = await dropStaleAmountClarification(env.ACCOUNTS, lineUserId, pending, text);
 
   // PLAN.md 17.11: every fresh message is interpreted by AI first — full
   // free-form understanding plus recent conversation history, instead of
   // only recognizing known command phrases. Skipped only when a chatEngine
-  // clarification is already in flight (`pending`, e.g. "จำนวนเงินเท่าไหร่คะ")
-  // — that specific continuation stays on the deterministic path that
-  // originally asked it, below, rather than being handed to the AI
-  // mid-clarification. Tried *before* the legacy matcher chain (including
-  // "วิธีใช้"/greeting handling right below it) so the AI genuinely gets
-  // first say over everything, exactly as requested — a well-known phrase
-  // like "วิธีใช้" still resolves correctly either way, since the AI
-  // interpreter's own "help" intent routes to the exact same buildHelpText()
-  // the legacy path would have used (see runInterpretedIntent).
-  if (!pending) {
+  // clarification is genuinely still in flight (`effectivePending`, e.g.
+  // "จำนวนเงินเท่าไหร่คะ") — that specific continuation stays on the
+  // deterministic path that originally asked it, below, rather than being
+  // handed to the AI mid-clarification. Tried *before* the legacy matcher
+  // chain (including "วิธีใช้"/greeting handling right below it) so the AI
+  // genuinely gets first say over everything, exactly as requested — a
+  // well-known phrase like "วิธีใช้" still resolves correctly either way,
+  // since the AI interpreter's own "help" intent routes to the exact same
+  // buildHelpText() the legacy path would have used (see runInterpretedIntent).
+  if (!effectivePending) {
     const history = await getConversationHistory(env.ACCOUNTS, lineUserId).catch((err) => {
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
@@ -640,7 +668,7 @@ export async function handleTextMessage(
   // 17.11) — it's only reached here because the interpreter itself failed
   // (see the fallback comment above); when it succeeds, a greeting is one of
   // "chitchat"/"help" and is handled by the interpreter branch instead.
-  if (!pending && isGreeting(text)) {
+  if (!effectivePending && isGreeting(text)) {
     const greetingKind = await classifyGreeting(env.ACCOUNTS, lineUserId);
     const reply =
       greetingKind === "welcome"
@@ -652,7 +680,7 @@ export async function handleTextMessage(
     return reply;
   }
 
-  const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
+  const result = handleUserMessage(text, effectivePending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, lineUserId, result.pending);
 
   // transactionDrafts (plural) is set instead of transactionDraft when one
@@ -723,6 +751,7 @@ export async function handleGroupTextMessage(
   // replying "60" to "จำนวนเงินเท่าไหร่คะ" resolves it, matching how a
   // question posed to a group chat naturally works.
   const pending = await getPending(env.ACCOUNTS, subjectId);
+  const effectivePending = await dropStaleAmountClarification(env.ACCOUNTS, subjectId, pending, text);
 
   // PLAN.md 17.11: same AI-interpreter-first flow as personal mode. No
   // group-specific greeting check to skip here first — group mode never had
@@ -731,7 +760,7 @@ export async function handleGroupTextMessage(
   // resolved lazily (only inside runInterpretedIntent's "transaction" case)
   // so an ordinary non-money message in a group doesn't pay for a member
   // profile lookup it doesn't need.
-  if (!pending) {
+  if (!effectivePending) {
     const history = await getConversationHistory(env.ACCOUNTS, subjectId).catch((err) => {
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
@@ -752,7 +781,7 @@ export async function handleGroupTextMessage(
     return legacyReply;
   }
 
-  const result = handleUserMessage(text, pending, DEFAULT_CATEGORIES);
+  const result = handleUserMessage(text, effectivePending, DEFAULT_CATEGORIES);
   await setPending(env.ACCOUNTS, subjectId, result.pending);
 
   // PLAN.md 17.9: same as personal mode — asks to confirm before saving,

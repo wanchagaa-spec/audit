@@ -734,6 +734,22 @@ Three issues found from an actual group chat screenshot:
   garbled rewrite" rule to both `persona.ts` and the interpreter's own instruction for composing those
   replies, so the first pass already lands in the right voice.
 
+### Fix: a stale "จำนวนเงินเท่าไหร่คะ" clarification could trap every later message (PLAN.md 17.19)
+
+A real report: after one ambiguous money message left a "จำนวนเงินเท่าไหร่คะ" clarification pending,
+every unrelated message sent afterward (a shift-schedule question, a plain greeting-adjacent phrase,
+anything without a number in it) just got the same clarification re-asked forever instead of ever being
+answered — since a pending clarification skips the AI interpreter entirely (by design, so an in-progress
+money answer doesn't get reinterpreted mid-flow), and chatEngine's own "doesn't look like an amount,
+treat as a brand new message" fallback still runs through `parseMessage`, which — written back when this
+was a money-only parser — treats *any* text with no digits as yet another incomplete expense needing an
+amount. That combination meant there was no way out of a stale clarification except typing a number or
+an exact-match greeting, or waiting out the 10-minute TTL. Fixed with `dropStaleAmountClarification` in
+`index.ts` (used by both personal and group mode): before deciding whether to skip the AI interpreter, a
+pending `"amount"` clarification whose reply contains no number and isn't a greeting is treated as stale
+and cleared, so the message re-enters the normal pipeline (AI interpreter first) like any fresh message.
+A reply that actually contains a number still resolves the clarification exactly as before.
+
 ## Local development
 
 ```bash
