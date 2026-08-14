@@ -1944,6 +1944,32 @@ simulateInterpreterResult = { intent: "help" };
 const interpHelpReply = await handleTextMessage(env, lineUserId, "ทำอะไรได้บ้างอะ", origin);
 check("a help intent returns the same detailed help text buildHelpText() produces", interpHelpReply.includes("เปิดเว็บดูข้อมูล"));
 
+// Regression test for a real report: "พรุ่งนี้เค้ามีเวรมั้ย"/"พรุ่งนี้ได้ขึ้นเวรมั้ย"
+// got misclassified as calendar_query and answered from Google Calendar
+// ("ไม่มีนัดพรุ่งนี้เลยนะคะ") instead of the shift-schedule data (PLAN.md
+// 17.18) — "เวร" and "นัด" are different data sources, but nothing told the
+// interpreter that. Can't make the mocked Gemini call actually classify a
+// message correctly, but this confirms the disambiguation instruction that
+// fixes it is actually present in every interpreter prompt, and that a
+// shift question routed as "question" (the correct outcome) reaches the
+// same guarded AI Q&A pipeline as any other question, not the calendar one.
+simulateInterpreterResult = { intent: "question", question: "พรุ่งนี้มีเวรมั้ย" };
+const interpShiftQuestionReply = await handleTextMessage(env, lineUserId, "พรุ่งนี้เค้ามีเวรมั้ย", origin);
+check(
+  "a shift question classified as 'question' (not calendar_query) reaches the AI Q&A pipeline",
+  interpShiftQuestionReply.includes("[mock AI answer]")
+);
+// Two Gemini calls happen for this message: the interpreter's own
+// classification call, then answerQuestion's separate Q&A call (captured as
+// the last one, above) — the disambiguation instruction lives in the
+// interpreter's prompt specifically, i.e. the second-to-last capture.
+const lastShiftInterpreterRequest = geminiRequests.at(-2);
+check(
+  "the interpreter prompt explicitly tells the model เวร (shifts) and นัด (Calendar) are different data sources",
+  lastShiftInterpreterRequest.systemInstruction.includes("เวร") &&
+    lastShiftInterpreterRequest.systemInstruction.includes("ห้ามใช้ calendar_query")
+);
+
 // Regression test for a real report: "เปิดเว็บไซต์ให้หน่อย" (natural phrasing,
 // not the exact "เปิดเว็บดูข้อมูล" trigger) had no interpreter intent to route
 // to at all, so it fell through to chitchat/unclear and the bot wrongly

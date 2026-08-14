@@ -750,6 +750,19 @@ pending `"amount"` clarification whose reply contains no number and isn't a gree
 and cleared, so the message re-enters the normal pipeline (AI interpreter first) like any fresh message.
 A reply that actually contains a number still resolves the clarification exactly as before.
 
+### Fix: shift questions ("มีเวรมั้ย") were misread as Calendar questions ("นัด") (PLAN.md 17.20)
+
+A real report: "พรุ่งนี้เค้ามีเวรมั้ย"/"พรุ่งนี้ได้ขึ้นเวรมั้ย" got classified by the AI interpreter as
+`calendar_query` and answered from Google Calendar ("ไม่มีนัดพรุ่งนี้เลยนะคะ") instead of the actual shift
+schedule (PLAN.md 17.18). The interpreter's schema had a `calendar_query` intent and a `question` intent
+(which already includes shift data) but never told the model "เวร" (personal shift duty) and "นัด" (a real
+Calendar event) are different data sources at all — neither the bot's own capability list nor either
+intent's description mentioned shifts, since the feature was added after this prompt was last written, so
+the model collapsed the unfamiliar concept into the closest one it already knew. Same shape of bug as
+17.13's missing `view_link` intent. Fixed by adding shifts to the interpreter's capability list, clarifying
+`calendar_query`'s description as Google-Calendar-only, and adding an explicit rule: shift questions always
+use `"question"`, never any `calendar_*` intent.
+
 ## Local development
 
 ```bash
