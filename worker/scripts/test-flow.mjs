@@ -76,6 +76,13 @@ let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
 
+// simulates the extra per-month Shifts-YYYY-MM tabs (PLAN.md 17.18): which
+// tab names exist yet, and the current A2:.. data range for each (the
+// header/type-label rows written by ensureShiftsTab's creation PUT, then
+// fully overwritten on every saveShiftGrid call).
+const shiftTabsCreated = new Set();
+const shiftGridStore = {}; // tabName -> string[][] (rows 2..end, as the real sheet would return them)
+
 let simulateDriveUploadFailureCount = 0; // decremented each time; while > 0, fails the next Drive media upload request(s)
 let simulatePushFailureToo = false; // one-shot: fails the next push too (pair with an "expired" replyToken to simulate total messaging failure)
 const groupMemberDisplayNames = {}; // simulates LINE group member profiles: { [userId]: displayName }
@@ -402,7 +409,11 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.includes("?fields=sheets.properties.title")) {
     diaryTabMetaCalls += 1;
-    return new Response(JSON.stringify({ sheets: diaryTabExists ? [{ properties: { title: "Diary" } }] : [] }), {
+    const titles = [
+      ...(diaryTabExists ? ["Diary"] : []),
+      ...Array.from(shiftTabsCreated),
+    ];
+    return new Response(JSON.stringify({ sheets: titles.map((title) => ({ properties: { title } })) }), {
       status: 200,
     });
   }
@@ -417,6 +428,25 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.includes("Diary!A2:E100000")) {
     return new Response(JSON.stringify({ values: diaryRows }), { status: 200 });
+  }
+  if (u.includes("Shifts-") && u.includes("!A1?valueInputOption=RAW")) {
+    const tabName = u.match(/'(Shifts-\d{4}-\d{2})'/)?.[1];
+    const body = JSON.parse(init.body);
+    shiftTabsCreated.add(tabName);
+    // The creation PUT writes [header, ...typeRows] starting at A1 — the
+    // data range (A2:..) callers actually read/write is everything after
+    // the header row, so seed the store with just the type-label rows.
+    shiftGridStore[tabName] = body.values.slice(1).map((row) => [...row]);
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  if (u.includes("Shifts-") && u.includes("!A2:")) {
+    const tabName = u.match(/'(Shifts-\d{4}-\d{2})'/)?.[1];
+    if (init.method === "PUT") {
+      const body = JSON.parse(init.body);
+      shiftGridStore[tabName] = body.values;
+      return new Response(JSON.stringify({}), { status: 200 });
+    }
+    return new Response(JSON.stringify({ values: shiftGridStore[tabName] ?? [] }), { status: 200 });
   }
   if (u.includes("generativelanguage.googleapis.com")) {
     const body = JSON.parse(init.body);
@@ -610,7 +640,7 @@ const {
 } = await import("../src/index.ts");
 const { setAccountLink, getAccountLink, getPending } = await import("../src/state.ts");
 const { verifyState, signState, signViewToken, verifyViewToken } = await import("../src/signedState.ts");
-const { bangkokDateKey, addDaysToDateKey, formatThaiDateLabel, formatThaiDateLabelFull, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
+const { bangkokDateKey, bangkokMonthKey, addDaysToDateKey, formatThaiDateLabel, formatThaiDateLabelFull, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
@@ -2403,6 +2433,54 @@ const folderNameFailureResponse = await worker.fetch(new Request(`${origin}/view
 check(
   "a transient failure looking up a real trip folder's name degrades to 'try again', not 'not found'",
   folderNameFailureResponse.status === 502
+);
+
+// Shift schedule (PLAN.md 17.18) — the one /view/* page that writes, plus
+// its wiring into the "ถาม" AI Q&A pipeline. Personal-mode only, using the
+// same viewToken as every other page above.
+const shiftsMonthKey = bangkokMonthKey();
+const shiftsPageResponse = await worker.fetch(new Request(`${origin}/view/shifts?token=${viewToken}`), env, new FakeExecutionContext());
+const shiftsPageHtml = await shiftsPageResponse.text();
+check(
+  "/view/shifts renders an empty grid for a month with no shifts ticked yet",
+  shiftsPageResponse.status === 200 && shiftsPageHtml.includes("ตารางเวรของฉัน") && shiftsPageHtml.includes("เวรเช้า")
+);
+
+const shiftsSaveResponse = await worker.fetch(
+  new Request(`${origin}/view/shifts?token=${viewToken}&month=${shiftsMonthKey}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: `cell=${encodeURIComponent("3|เวรเช้า")}`,
+  }),
+  env,
+  new FakeExecutionContext()
+);
+const shiftsSaveHtml = await shiftsSaveResponse.text();
+check(
+  "POSTing a checked cell saves it and shows a save confirmation",
+  shiftsSaveResponse.status === 200 && shiftsSaveHtml.includes("บันทึกตารางเวรแล้ว")
+);
+
+const shiftsAfterSaveResponse = await worker.fetch(new Request(`${origin}/view/shifts?token=${viewToken}&month=${shiftsMonthKey}`), env, new FakeExecutionContext());
+const shiftsAfterSaveHtml = await shiftsAfterSaveResponse.text();
+check(
+  "the checked cell from the POST persists on the next GET",
+  shiftsAfterSaveResponse.status === 200 && /name="cell" value="3\|[^"]*"\s+checked/.test(shiftsAfterSaveHtml)
+);
+
+const shiftsMalformedMonthResponse = await worker.fetch(new Request(`${origin}/view/shifts?token=${viewToken}&month=not-a-month`), env, new FakeExecutionContext());
+check(
+  "a malformed ?month= on /view/shifts falls back to the current month instead of producing NaN-NaN navigation links",
+  shiftsMalformedMonthResponse.status === 200 && !(await shiftsMalformedMonthResponse.text()).includes("NaN")
+);
+
+const shiftsAiReply = await handleTextMessage(env, lineUserId, "ถาม ใครอยู่เวรเช้าวันไหนบ้างเดือนนี้", origin);
+check("\"ถาม\" about shifts reaches Gemini, not a canned reply", shiftsAiReply.includes("[mock AI answer]"));
+const lastShiftsGeminiRequest = geminiRequests.at(-1);
+check(
+  "the AI prompt includes the ticked shift-schedule data the web page just saved",
+  lastShiftsGeminiRequest.systemInstruction.includes("ตารางเวร") &&
+    lastShiftsGeminiRequest.systemInstruction.includes("3: เวรเช้า")
 );
 
 // Group mode (PLAN.md 17) — a shared account bound to a LINE groupId

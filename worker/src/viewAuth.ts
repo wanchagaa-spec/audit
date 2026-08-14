@@ -43,13 +43,14 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-export type ViewNavKey = "accounts" | "calendar" | "diary" | "trips";
+export type ViewNavKey = "accounts" | "calendar" | "diary" | "trips" | "shifts";
 
 const NAV_ITEMS: Array<{ key: ViewNavKey; path: string; label: string }> = [
   { key: "accounts", path: "/view", label: "บัญชี" },
   { key: "calendar", path: "/view/calendar", label: "ปฏิทิน" },
   { key: "diary", path: "/view/diary", label: "ไดอารี่" },
   { key: "trips", path: "/view/trips", label: "รูปทริป" },
+  { key: "shifts", path: "/view/shifts", label: "ตารางเวร" },
 ];
 
 function renderNav(token: string, active: ViewNavKey): string {
@@ -127,6 +128,14 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
     flex: none; padding: .55rem 1rem; border-radius: 10px; border: none; background: #16a34a;
     color: #fff; font-size: .85rem; font-family: inherit; cursor: pointer;
   }
+  .shift-table th, .shift-table td { text-align: center; }
+  .shift-table th:first-child, .shift-table td:first-child { text-align: left; white-space: nowrap; }
+  .shift-table input[type="checkbox"] { width: 1.15rem; height: 1.15rem; }
+  .save-button {
+    display: block; width: 100%; margin-top: 1rem; padding: .65rem 1.2rem; border-radius: 10px; border: none;
+    background: #16a34a; color: #fff; font-size: .92rem; font-family: inherit; font-weight: 600; cursor: pointer;
+  }
+  .save-notice { text-align: center; color: #16a34a; font-size: .85rem; margin: 0 0 1rem; }
 </style>
 </head>
 <body>
