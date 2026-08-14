@@ -444,7 +444,14 @@ globalThis.fetch = async (url, init = {}) => {
         const body = JSON.parse(init.body);
         taskIdSeq += 1;
         const id = `task-${taskIdSeq}`;
-        googleTasks.push({ id, title: body.title, status: "needsAction", due: body.due });
+        // Real Google Tasks normalizes `due` to UTC ("...Z") on the way
+        // back out, regardless of what offset was sent — echoing the
+        // Bangkok-offset string back unchanged (as this mock used to) would
+        // silently mask any bug in converting it back to Bangkok time on
+        // read, which is exactly what happened in production (PLAN.md
+        // 17.28 follow-up).
+        const dueUtc = body.due ? new Date(body.due).toISOString() : undefined;
+        googleTasks.push({ id, title: body.title, status: "needsAction", due: dueUtc });
         return new Response(JSON.stringify({ id }), { status: 200 });
       }
     } else {
@@ -1979,6 +1986,31 @@ simulateCalendarApiDisabled = false;
 const listEmptyReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
 check("an empty task list says so instead of an empty list", listEmptyReply.includes("ไม่มีสิ่งที่ต้องทำค้างอยู่เลยนะ"));
 
+// Regression test for a real, confirmed collision: matchCalendarCommand's
+// "นัด" trigger (extractNadPayload) matches that word anywhere in a message,
+// not just at the start — a task whose free text happens to contain it (a
+// common Thai word) used to get swallowed into a failed calendar-create
+// attempt ("ไม่พบวันที่/เวลาในข้อความนะ...") before ever reaching
+// matchTaskCommand, since calendarHandler used to be checked first in
+// dispatchLegacyCommands (index.ts). Fixed by checking Task/Gmail's own
+// fixed, unambiguous prefixes before Calendar's looser trigger. Fully
+// created and deleted again here (rather than left lingering) so it doesn't
+// disturb the length-based assertions the rest of this section relies on.
+const calendarEventsBeforeNadWordTask = calendarEvents.length;
+const taskWithNadWordPromptReply = await handleTextMessage(env, lineUserId, "เพิ่มสิ่งที่ต้องทำ นัดหมอฟันสัปดาห์หน้า", origin);
+check(
+  "a task whose text contains the word 'นัด' still reaches the task handler, not calendar's create-parser",
+  taskWithNadWordPromptReply.includes("นัดหมอฟันสัปดาห์หน้า") && !taskWithNadWordPromptReply.includes("ไม่พบวันที่/เวลา")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming actually created the task, not a calendar event",
+  googleTasks.some((t) => t.title === "นัดหมอฟันสัปดาห์หน้า") && calendarEvents.length === calendarEventsBeforeNadWordTask
+);
+await handleTextMessage(env, lineUserId, "ลบสิ่งที่ต้องทำ นัดหมอฟันสัปดาห์หน้า", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("cleaned back up so it doesn't affect the counts below", !googleTasks.some((t) => t.title === "นัดหมอฟันสัปดาห์หน้า"));
+
 const taskCreatePromptReply = await handleTextMessage(env, lineUserId, "เพิ่มสิ่งที่ต้องทำ ซื้อของเข้าบ้าน", origin);
 check(
   "task create asks to confirm before touching Google Tasks",
@@ -2078,7 +2110,9 @@ check(
   "confirming sends a due timestamp built from the parsed date+time",
   taskWithDateTimeConfirmReply.includes("20 ม.ค. 2569") &&
     taskWithDateTimeConfirmReply.includes("14:00") &&
-    savedDateTimeTask?.due === "2026-01-20T14:00:00+07:00"
+    // The mock normalizes to UTC on write, same as the real Google Tasks
+    // API (see the mock's own comment) — 14:00 Bangkok (+07:00) is 07:00Z.
+    savedDateTimeTask?.due === "2026-01-20T07:00:00.000Z"
 );
 
 const taskDateOnlyPromptReply = await handleTextMessage(env, lineUserId, "เพิ่มสิ่งที่ต้องทำ ต่อทะเบียนรถ 25/1/2569", origin);
@@ -2088,14 +2122,30 @@ check(
 );
 await handleTextMessage(env, lineUserId, "ใช่", origin);
 const savedDateOnlyTask = googleTasks.find((t) => t.title === "ต่อทะเบียนรถ");
-check("a date-only task is still sent with a due timestamp, at midnight", savedDateOnlyTask?.due === "2026-01-25T00:00:00+07:00");
+check(
+  // 00:00 Bangkok (+07:00) on the 25th is 17:00Z the day *before* — this is
+  // exactly the date-rollback trap parseDueField's fix comment describes.
+  "a date-only task is still sent with a due timestamp, at midnight Bangkok time",
+  savedDateOnlyTask?.due === "2026-01-24T17:00:00.000Z"
+);
 
+// Regression test for a real production report ("วันที่/เวลาที่โชว์ผิด" — the
+// shown date/time is wrong): listIncompleteTasks/parseDueField (tasks.ts)
+// used to slice the raw `due` string directly assuming it was already
+// Bangkok-local text, but Google's API actually returns it as a genuine UTC
+// timestamp — reading it back without converting through bangkokDateKey/
+// bangkokHourMinute showed the *UTC* date/time (off by the file's whole
+// +07:00 offset, and for early-morning times, off by a whole day too). This
+// specifically only fails if the mock simulates Google's real UTC
+// normalization (see the mock's own comment) rather than just echoing back
+// whatever was sent, which is what let this bug ship undetected originally.
 const listWithDueDatesReply = await handleTextMessage(env, lineUserId, "สิ่งที่ต้องทำ", origin);
 check(
-  "the task list shows a due date/time when set, and shows a time only when it's a real one (not the date-only midnight default)",
+  "the task list shows the correct Bangkok-local due date/time, not the raw UTC one Google actually stores",
   listWithDueDatesReply.includes("จ่ายค่าไฟ วันที่ 20 ม.ค. 2569 เวลา 14:00") &&
     listWithDueDatesReply.includes("ต่อทะเบียนรถ วันที่ 25 ม.ค. 2569") &&
-    !listWithDueDatesReply.includes("ต่อทะเบียนรถ วันที่ 25 ม.ค. 2569 เวลา")
+    !listWithDueDatesReply.includes("ต่อทะเบียนรถ วันที่ 25 ม.ค. 2569 เวลา") &&
+    !listWithDueDatesReply.includes("24 ม.ค. 2569") // the UTC-rolled-back date, if the bug were still present
 );
 
 // A task created with no date/time at all still works exactly as before
@@ -2118,7 +2168,8 @@ check(
 await handleTextMessage(env, lineUserId, "ใช่", origin);
 check(
   "the AI-supplied due date/time reaches Google Tasks as a real due timestamp",
-  googleTasks.find((t) => t.title === "ต่อประกันรถ")?.due === "2026-02-01T09:30:00+07:00"
+  // 09:30 Bangkok (+07:00) is 02:30Z.
+  googleTasks.find((t) => t.title === "ต่อประกันรถ")?.due === "2026-02-01T02:30:00.000Z"
 );
 
 // 8.6. Gmail (PLAN.md 17.28): "เช็คอีเมล" / "ส่งอีเมล ถึง ... เรื่อง ... ข้อความ
