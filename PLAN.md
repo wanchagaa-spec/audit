@@ -1665,3 +1665,33 @@ trigger (จับคำว่า "นัด" ที่ไหนก็ได้�
 เพิ่มเทสต์ regression จำลอง status 400 สำหรับปัญหา scope เพื่อยืนยันว่าได้ลิงก์เชื่อมบัญชีใหม่แทนที่จะเจอ crash
 
 ทดสอบซ้ำ: typecheck ผ่าน, test-flow.mjs รวม 352 ผ่าน 0 ล้มเหลว
+
+**บั๊กจริงยังไม่หาย แม้แก้ข้อบนแล้ว — เจอสาเหตุจริงที่ใหญ่กว่ามาก (ไม่ใช่แค่ Gmail)**: หลัง deploy การแก้ด้านบน
+ผู้ใช้ยังเจอ error ทั่วไปเหมือนเดิมทุกครั้ง เพิ่มโค้ดชั่วคราวให้โชว์ error จริงต่อท้ายข้อความ (เพราะไม่มีสิทธิ์เข้า
+Cloudflare log จากในนี้) แล้วพบว่า error ที่แท้จริงคือ `InsufficientGmailScopeError` ซึ่ง**ถูกจัดประเภทถูกต้อง
+อยู่แล้ว** แต่ catch block ใน `runInterpretedIntent` (index.ts) ไม่เคยจับมันได้เลย
+
+**ต้นเหตุจริง**: ทุก case ใน `runInterpretedIntent`'s switch เขียนแบบ `return withToken(...)` (คืนค่าเป็น
+Promise) อยู่ **ข้างใน** `try` block **โดยไม่มี `await`** — พิสูจน์ด้วย node โดยตรงว่า `try { return
+somePromise(); } catch {...}` **ไม่จับ** การ reject ที่เกิดขึ้นทีหลังของ Promise ที่ return ออกไป (catch จะจับ
+ได้เฉพาะ throw แบบ synchronous หรือ Promise ที่ await แล้วเท่านั้น) เทียบกับ `dispatchLegacyCommands` และ
+`resolvePendingConfirmation` ที่ใช้ `return await ...` ถูกต้องมาตลอด — เป็นความต่างเล็กๆแค่คำเดียว (`await`)
+แต่ทำให้ **การจับ error สำหรับทุก intent ที่ตีความผ่าน AI (Calendar/Tasks/Gmail ทั้งหมด ไม่ใช่แค่ Gmail) ใช้
+งานไม่ได้จริงมาตลอด** ทุกครั้งที่ Gemini ตีความข้อความสำเร็จ (ซึ่งเป็นกรณีปกติส่วนใหญ่ ตามสถาปัตยกรรม
+"AI-interpreter-first" ของทั้งบอท)
+
+**ทำไมเทสต์ 352 ข้อก่อนหน้าไม่เจอบั๊กนี้เลย**: mock ของ Gemini interpreter ใน test-flow.mjs ถ้าไม่ได้ตั้ง
+`simulateInterpreterResult` ไว้ล่วงหน้า จะตอบกลับเป็น JSON ที่ผิดรูปแบบโดยตั้งใจ (`[no interpreter mock
+configured] ...`) ทำให้ `interpretMessage` throw แล้ว return null แทน — พาให้ทุกเทสต์ relink/API-disabled ที่
+เขียนไว้ก่อนหน้านี้ (ทั้ง Calendar และ Tasks และ Gmail รอบแรก) หลุดไปวิ่งผ่าน `dispatchLegacyCommands` (เส้นทาง
+ที่ถูกต้อง) โดยไม่ได้ตั้งใจ ไม่เคยแตะเส้นทาง `runInterpretedIntent` ที่มีบั๊กเลยสักครั้ง
+
+แก้โดยเติม `await` หน้าทุก `return withToken(...)`/`return setProvinceByName(...)`/`return
+buildViewLinkReply(...)`/`return promptTransactionCreate(...)` ใน `runInterpretedIntent` ทั้งหมด และลบโค้ด
+debug ชั่วคราวออก เพิ่มเทสต์ regression 2 จุด: (1) ตั้ง `simulateInterpreterResult` ก่อนเทสต์ relink ของ
+Gmail ที่มีอยู่แล้ว เพื่อบังคับให้วิ่งผ่านเส้นทาง AI-interpreted จริง (2) เพิ่มเทสต์ใหม่แยกสำหรับ Calendar
+เพื่อพิสูจน์ว่าแก้ทั้งฟังก์ชัน ไม่ใช่แค่ Gmail — ยืนยันแล้วว่าเทสต์ทั้งสองจะ**พังจริง** (จริงๆคือทำให้ทั้ง
+process ล่มเลยด้วยซ้ำ เพราะ error หลุดออกจาก handleTextMessage ทั้งฟังก์ชัน) ถ้าย้อนกลับไปเอา `await` ออก
+ยืนยันว่าไม่ใช่เทสต์ปลอมที่ผ่านโดยบังเอิญ
+
+ทดสอบซ้ำ: typecheck ผ่าน, test-flow.mjs รวม 353 ผ่าน 0 ล้มเหลว
