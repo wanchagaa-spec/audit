@@ -82,6 +82,7 @@ const gmailSent = []; // simulates sent messages: {to, subject, body} (decoded f
 let gmailIdSeq = 0;
 let simulateInsufficientGmailScope = false;
 let simulateGmailApiDisabled = false;
+let simulateGmailScopeErrorAs400 = false; // regression: Gmail can answer a scope problem with a non-401/403 status, unlike Calendar/Tasks
 
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
@@ -463,6 +464,7 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://gmail.googleapis.com/gmail/v1/users/me/messages")) {
     if (simulateInsufficientGmailScope) return new Response("forbidden", { status: 403 });
+    if (simulateGmailScopeErrorAs400) return new Response("insufficient scope, weird status", { status: 400 });
     if (simulateGmailApiDisabled) {
       return new Response(
         JSON.stringify({
@@ -2202,6 +2204,20 @@ check(
   gmailRelinkReply.includes("สิทธิ์อีเมลเพิ่ม") && gmailRelinkReply.includes("accounts.google.com")
 );
 simulateInsufficientGmailScope = false;
+
+// Regression test for a real report: a user with the Gmail API already
+// enabled but not yet re-linked got a generic crash reply instead of the
+// re-link prompt — gmailFetch used to only classify a scope problem when
+// the status was exactly 401/403, so a real Gmail response using some other
+// 4xx status fell through as a raw, unclassified Error. Any 4xx that isn't
+// the API-disabled case is now treated as "needs to re-link" instead.
+simulateGmailScopeErrorAs400 = true;
+const gmailRelink400Reply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);
+check(
+  "a non-401/403 4xx from Gmail still gets a re-link prompt, not a generic crash",
+  gmailRelink400Reply.includes("สิทธิ์อีเมลเพิ่ม") && gmailRelink400Reply.includes("accounts.google.com")
+);
+simulateGmailScopeErrorAs400 = false;
 
 simulateGmailApiDisabled = true;
 const gmailApiDisabledReply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);
