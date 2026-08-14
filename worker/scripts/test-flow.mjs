@@ -538,19 +538,19 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response(rss, { status: 200 });
   }
 
-  if (u.includes("api.coingecko.com/api/v3/simple/price")) {
+  if (u.includes("query1.finance.yahoo.com/v8/finance/chart/")) {
     if (simulateMarketDataFetchFailure) {
       simulateMarketDataFetchFailure = false;
       return new Response("simulated market data fetch failure", { status: 500 });
     }
-    return new Response(JSON.stringify({ bitcoin: { usd: 60000, usd_24h_change: -5.23 } }), { status: 200 });
-  }
-  if (u.includes("data-asg.goldprice.org/dbXRates/USD")) {
-    if (simulateMarketDataFetchFailure) {
-      simulateMarketDataFetchFailure = false;
-      return new Response("simulated market data fetch failure", { status: 500 });
-    }
-    return new Response(JSON.stringify({ items: [{ xauPrice: 4413.6, pcXau: 1.25 }] }), { status: 200 });
+    // Gold and BTC both go through this same chart endpoint now (PLAN.md
+    // 17.16) — regularMarketPrice/previousClose, same shape movers'
+    // sibling endpoint already used successfully before this.
+    const isGold = u.includes("XAUUSD");
+    const meta = isGold
+      ? { regularMarketPrice: 4413.6, previousClose: 4360.0 }
+      : { regularMarketPrice: 60000, previousClose: 63000 };
+    return new Response(JSON.stringify({ chart: { result: [{ meta }] } }), { status: 200 });
   }
   if (u.includes("nfs.faireconomy.media/ff_calendar_thisweek.json")) {
     if (simulateEconomicCalendarFetchFailure) {
@@ -2022,13 +2022,17 @@ check(
 // PLAN.md 15.13: the requested format — gold/BTC/top-mover numbers are no
 // longer handed to Gemini to restate at all. They're deterministic text
 // (marketData.ts's buildMarketHeaderBlock) prepended to the reply, so the
-// exact "* ทองคำ : $4,413.6 (+1.25%)"-style lines can never drift under
+// exact "* ทองคำ : $4,413.6 (+1.23%)"-style lines can never drift under
 // paraphrasing — checked directly on the final reply, not the Gemini prompt.
+// The % figures are computed from the mocked Yahoo chart meta
+// (regularMarketPrice vs. previousClose — PLAN.md 17.16), not asserted as
+// magic numbers: gold (4413.6 vs 4360.0) -> +1.23%, BTC (60000 vs 63000)
+// -> -4.76%.
 check(
   "the finance-news reply leads with a deterministic date + gold/BTC/movers header, never touched by Gemini",
   financeNewsReply.startsWith(`ข้อมูล ณ วันที่ ${formatThaiDateLabelFull(bangkokDateKey())}`) &&
-    financeNewsReply.includes("* ทองคำ : $4,413.6 (+1.25%)") &&
-    financeNewsReply.includes("* บิตคอยน์ : $60,000 (-5.23%)") &&
+    financeNewsReply.includes("* ทองคำ : $4,413.6 (+1.23%)") &&
+    financeNewsReply.includes("* บิตคอยน์ : $60,000 (-4.76%)") &&
     financeNewsReply.includes("* หุ้นสหรัฐฯ เคลื่อนไหวมากที่สุด") &&
     financeNewsReply.includes("AAAA (+18.20%)") &&
     financeNewsReply.includes("CCCC (-16.50%)")

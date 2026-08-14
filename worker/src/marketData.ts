@@ -35,46 +35,43 @@ export interface MarketSnapshot {
   topLosers: MoverQuote[];
 }
 
-// Sent on every market-data fetch below, not just Yahoo's — found in a real
-// report: gold and BTC both came back empty in production while movers
-// (already sent with this header) worked fine. A bare Cloudflare Workers
-// fetch() sends no User-Agent at all, and several of these free/unofficial
-// endpoints appear to reject or bot-filter requests that look nothing like a
-// browser — the same reasoning Yahoo's endpoints already needed this for.
 const BROWSER_LIKE_HEADERS = { "User-Agent": "Mozilla/5.0" };
 
-async function fetchBitcoinQuote(): Promise<Quote | null> {
+// Gold and BTC were previously fetched from goldprice.org and CoinGecko —
+// found in production (twice) to come back empty even with a browser-like
+// User-Agent, while the movers below (query1.finance.yahoo.com) kept working
+// the whole time. Rather than keep guessing at unofficial endpoints this
+// deployment can't actually reach, both now reuse the exact same host,
+// path shape, and headers already *proven* to work here — Yahoo's chart API
+// (this is also what S&P 500 used before it was dropped in PLAN.md 15.13's
+// reformat, so this is the third data point confirming this endpoint works
+// from this Worker, not a fresh guess).
+async function fetchYahooQuote(symbol: string): Promise<Quote | null> {
   try {
-    const res = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true",
-      { headers: BROWSER_LIKE_HEADERS }
-    );
+    const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`, {
+      headers: BROWSER_LIKE_HEADERS,
+    });
     if (!res.ok) return null;
     const data: any = await res.json();
-    const price = data?.bitcoin?.usd;
+    const meta = data?.chart?.result?.[0]?.meta;
+    const price = meta?.regularMarketPrice;
     if (typeof price !== "number") return null;
-    const changePercent = data?.bitcoin?.usd_24h_change;
-    return { price, changePercent: typeof changePercent === "number" ? changePercent : null };
+    const previousClose = meta?.previousClose ?? meta?.chartPreviousClose;
+    const changePercent =
+      typeof previousClose === "number" && previousClose !== 0 ? ((price - previousClose) / previousClose) * 100 : null;
+    return { price, changePercent };
   } catch (err) {
-    console.error("fetchBitcoinQuote failed", err);
+    console.error(`fetchYahooQuote(${symbol}) failed`, err);
     return null;
   }
 }
 
-async function fetchGoldQuote(): Promise<Quote | null> {
-  try {
-    const res = await fetch("https://data-asg.goldprice.org/dbXRates/USD", { headers: BROWSER_LIKE_HEADERS });
-    if (!res.ok) return null;
-    const data: any = await res.json();
-    const item = data?.items?.[0];
-    const price = item?.xauPrice;
-    if (typeof price !== "number") return null;
-    const changePercent = item?.pcXau;
-    return { price, changePercent: typeof changePercent === "number" ? changePercent : null };
-  } catch (err) {
-    console.error("fetchGoldQuote failed", err);
-    return null;
-  }
+function fetchBitcoinQuote(): Promise<Quote | null> {
+  return fetchYahooQuote("BTC-USD");
+}
+
+function fetchGoldQuote(): Promise<Quote | null> {
+  return fetchYahooQuote("XAUUSD=X"); // spot gold, USD per troy ounce
 }
 
 async function fetchMovers(scrId: "day_gainers" | "day_losers", count: number): Promise<MoverQuote[]> {
