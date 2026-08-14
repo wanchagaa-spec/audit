@@ -1934,6 +1934,33 @@ check(
 );
 simulateInsufficientCalendarScope = false;
 
+// Regression test for a real, systemic bug found via a live Gmail report but
+// affecting every AI-interpreted intent, not just Gmail: runInterpretedIntent
+// (index.ts) used to `return withToken(...)` — a promise — from inside its
+// own try block *without* awaiting it. A `try { return somePromise(); }
+// catch {...}` does NOT let that catch see a *later* rejection of the
+// returned promise (verified directly: only a synchronous throw, or an
+// awaited rejection, triggers the catch) — so every scope-error/API-disabled
+// classification in that function was silently unreachable in production
+// whenever the AI interpreter (the primary path for most real messages)
+// successfully classified the intent, which is the common case. Every prior
+// relink/API-disabled test above this one only ever exercised the *other*,
+// correctly-awaited path (dispatchLegacyCommands) — this test-flow.mjs mock
+// happens to reject the interpreter call by default (deliberately invalid
+// JSON, see simulateInterpreterResult's own comment) unless
+// simulateInterpreterResult is explicitly set first, which none of those
+// tests did, so this exact bug passed 352 prior tests undetected.
+simulateInterpreterResult = { intent: "calendar_query", calendarRangeFromKey: "2026-01-01", calendarRangeToKeyExclusive: "2026-01-02", calendarRangeLabel: "วันนี้" };
+simulateInsufficientCalendarScope = true;
+const aiInterpretedRelinkReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรบ้างวันนี้นะ", origin);
+check(
+  "an AI-interpreted intent that hits a scope error still gets the re-link prompt, not the generic crash message",
+  aiInterpretedRelinkReply.includes("สิทธิ์ปฏิทินเพิ่ม") &&
+    aiInterpretedRelinkReply.includes("accounts.google.com") &&
+    !aiInterpretedRelinkReply.includes("เกิดข้อผิดพลาดตอนบันทึก")
+);
+simulateInsufficientCalendarScope = false;
+
 // Regression test for a real bug hit in production: a disabled Calendar API
 // also returns 403, but re-linking (the message above) can't fix that — the
 // bot must tell the difference and point at the actual fix instead of
@@ -2197,11 +2224,21 @@ check(
   gmailSent.length === gmailSentCountBeforeInterp + 1 && gmailSent.at(-1).to === "colleague@example.com"
 );
 
+// Explicitly routes through the AI-interpreted path (simulateInterpreterResult
+// set), not just the deterministic dispatchLegacyCommands fallback this mock
+// would otherwise silently take — this is what actually reproduces the real
+// production report (index.ts's runInterpretedIntent missing an `await` on
+// its `return withToken(...)` calls, see the regression test/comment further
+// up for the full explanation), since Gemini classifies a message like
+// "เช็คอีเมล" successfully in real production traffic far more often than not.
+simulateInterpreterResult = { intent: "email_check" };
 simulateInsufficientGmailScope = true;
 const gmailRelinkReply = await handleTextMessage(env, lineUserId, "เช็คอีเมล", origin);
 check(
-  "a scope-less refresh token gets a re-link prompt for Gmail, not a crash",
-  gmailRelinkReply.includes("สิทธิ์อีเมลเพิ่ม") && gmailRelinkReply.includes("accounts.google.com")
+  "a scope-less refresh token gets a re-link prompt for Gmail, not a crash, even via the AI-interpreted path",
+  gmailRelinkReply.includes("สิทธิ์อีเมลเพิ่ม") &&
+    gmailRelinkReply.includes("accounts.google.com") &&
+    !gmailRelinkReply.includes("เกิดข้อผิดพลาดตอนบันทึก")
 );
 simulateInsufficientGmailScope = false;
 

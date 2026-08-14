@@ -408,10 +408,10 @@ async function runInterpretedIntent(
     switch (intent.intent) {
       case "transaction": {
         const attribution = await getAttribution();
-        return promptTransactionCreate({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.transactions, rawText, attribution);
+        return await promptTransactionCreate({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.transactions, rawText, attribution);
       }
       case "calendar_create":
-        return withToken((ctx) =>
+        return await withToken((ctx) =>
           promptCalendarCreateFromDraft(ctx, {
             title: intent.calendarTitle,
             dateKey: intent.calendarDateKey,
@@ -419,55 +419,55 @@ async function runInterpretedIntent(
           })
         );
       case "calendar_delete":
-        return withToken((ctx) => promptCalendarDeleteByKeyword(ctx, intent.calendarKeyword));
+        return await withToken((ctx) => promptCalendarDeleteByKeyword(ctx, intent.calendarKeyword));
       case "calendar_edit":
-        return withToken((ctx) =>
+        return await withToken((ctx) =>
           promptCalendarEditByKeyword(ctx, intent.calendarKeyword, intent.calendarDateKey, intent.calendarTime)
         );
       case "calendar_query":
-        return withToken((ctx) =>
+        return await withToken((ctx) =>
           answerCalendarQuery(ctx, intent.calendarRangeFromKey, intent.calendarRangeToKeyExclusive, intent.calendarRangeLabel)
         );
       case "diary_create":
-        return withToken((ctx) =>
+        return await withToken((ctx) =>
           promptDiaryCreateFromDraft(ctx, { category: intent.diaryCategory, text: intent.diaryText })
         );
       case "diary_query_date":
-        return withToken((ctx) => answerDiaryByDate(ctx, intent.diaryDateKey));
+        return await withToken((ctx) => answerDiaryByDate(ctx, intent.diaryDateKey));
       case "diary_query_month":
-        return withToken((ctx) => answerDiaryMonthSummary(ctx));
+        return await withToken((ctx) => answerDiaryMonthSummary(ctx));
       case "diary_search":
-        return withToken((ctx) => answerDiarySearch(ctx, intent.diarySearchTerm));
+        return await withToken((ctx) => answerDiarySearch(ctx, intent.diarySearchTerm));
       case "task_create":
-        return withToken((ctx) =>
+        return await withToken((ctx) =>
           promptTaskCreate(ctx, { title: intent.taskTitle, dateKey: intent.taskDueDateKey, time: intent.taskDueTime })
         );
       case "task_complete":
-        return withToken((ctx) => promptTaskComplete(ctx, intent.taskKeyword));
+        return await withToken((ctx) => promptTaskComplete(ctx, intent.taskKeyword));
       case "task_delete":
-        return withToken((ctx) => promptTaskDelete(ctx, intent.taskKeyword));
+        return await withToken((ctx) => promptTaskDelete(ctx, intent.taskKeyword));
       case "task_list":
-        return withToken((ctx) => answerTaskList(ctx));
+        return await withToken((ctx) => answerTaskList(ctx));
       case "email_check":
-        return withToken((ctx) => answerEmailCheck(ctx));
+        return await withToken((ctx) => answerEmailCheck(ctx));
       case "email_send":
-        return withToken((ctx) =>
+        return await withToken((ctx) =>
           promptEmailSend(ctx, { to: intent.emailTo, subject: intent.emailSubject, body: intent.emailBody })
         );
       case "trip_start":
-        return withToken((ctx) => promptOrStartTrip(ctx, intent.tripName));
+        return await withToken((ctx) => promptOrStartTrip(ctx, intent.tripName));
       case "trip_end":
-        return withToken((ctx) => endTrip(ctx));
+        return await withToken((ctx) => endTrip(ctx));
       case "trip_status":
-        return withToken((ctx) => tripStatus(ctx));
+        return await withToken((ctx) => tripStatus(ctx));
       case "set_province":
-        return setProvinceByName(env.ACCOUNTS, subjectId, intent.provinceName);
+        return await setProvinceByName(env.ACCOUNTS, subjectId, intent.provinceName);
       case "question":
-        return withToken((ctx) => answerQuestion(ctx, intent.question));
+        return await withToken((ctx) => answerQuestion(ctx, intent.question));
       case "help":
         return buildHelpText();
       case "view_link":
-        return buildViewLinkReply(env, subjectId, origin);
+        return await buildViewLinkReply(env, subjectId, origin);
       case "chitchat":
       case "unclear":
         return intent.reply;
@@ -1297,15 +1297,7 @@ async function handleOneOtherEvent(
     }
   } catch (err) {
     if (isTextMessageEvent(event) || isUnsupportedMessageEvent(event)) {
-      // TEMPORARY diagnostic (PLAN.md 17.28 follow-up): a real report of an
-      // uncaught error on the Gmail path that isn't any of the classified
-      // error types couldn't be pinned down without seeing the actual
-      // message, and there's no access to live Worker logs from this
-      // environment — surfacing it straight into the reply is the fastest
-      // way to see it. Revert this back to the generic message once
-      // diagnosed; this is not meant to stay in the shipped bot long-term.
-      const debugDetail = err instanceof Error ? ` [debug: ${err.constructor.name}: ${err.message}]` : "";
-      await replyOrPush(event, `ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ${debugDetail}`, env).catch(() => undefined);
+      await replyOrPush(event, "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ", env).catch(() => undefined);
     }
     console.error("webhook handling failed", err);
   }
