@@ -8,6 +8,7 @@
 import { applyCalendarCreate, applyCalendarDelete, applyCalendarEdit } from "./calendarCommands.ts";
 import { applyDiaryCreate } from "./diaryCommands.ts";
 import { setPendingConfirmation, type ActionCtx, type PendingConfirmation } from "./state.ts";
+import { applyTaskComplete, applyTaskCreate, applyTaskDelete } from "./taskCommands.ts";
 import { applyTransactionCreate, applyTransactionDeleteLast } from "./transactionCommands.ts";
 import { applyTripSwitch } from "./tripCommands.ts";
 
@@ -80,6 +81,12 @@ function applyPendingConfirmation(ctx: ActionCtx, pending: PendingConfirmation):
       return applyCalendarEdit(ctx, pending);
     case "diaryCreate":
       return applyDiaryCreate(ctx, pending);
+    case "taskCreate":
+      return applyTaskCreate(ctx, pending);
+    case "taskComplete":
+      return applyTaskComplete(ctx, pending);
+    case "taskDelete":
+      return applyTaskDelete(ctx, pending);
     case "transactionDeleteLast":
       return applyTransactionDeleteLast(ctx);
     case "transactionCreate":
