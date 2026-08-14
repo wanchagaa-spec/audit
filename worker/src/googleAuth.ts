@@ -4,10 +4,15 @@ const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 // calendar.events: creating/editing/deleting calendar entries (PLAN.md 15.3)
 // tasks: the to-do list feature (PLAN.md 17.26) — full read/write, same as
 // calendar.events, since creating/completing/deleting all need write access
+// gmail.readonly + gmail.send: inbox check + send only (PLAN.md 17.28) — the
+// narrowest pair of Gmail scopes that can still do what was actually asked
+// for; deliberately not gmail.modify (no mark-as-read/archive/label/delete)
 const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/tasks",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.send",
 ].join(" ");
 
 export function buildGoogleAuthorizeUrl(params: {

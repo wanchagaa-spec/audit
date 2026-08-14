@@ -50,6 +50,8 @@ export type InterpretedIntent =
   | { intent: "task_complete"; taskKeyword: string }
   | { intent: "task_delete"; taskKeyword: string }
   | { intent: "task_list" }
+  | { intent: "email_check" }
+  | { intent: "email_send"; emailTo: string; emailSubject: string; emailBody: string }
   | { intent: "trip_start"; tripName: string }
   | { intent: "trip_end" }
   | { intent: "trip_status" }
@@ -69,6 +71,7 @@ const INTERPRETER_TIMEOUT_MS = 3000;
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function isValidDateKey(s: unknown): s is string {
   if (typeof s !== "string" || !DATE_KEY_RE.test(s)) return false;
@@ -174,6 +177,13 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     }
     case "task_list":
       return { intent: "task_list" };
+    case "email_check":
+      return { intent: "email_check" };
+    case "email_send": {
+      if (typeof r.emailTo !== "string" || !EMAIL_RE.test(r.emailTo)) return null;
+      if (!isNonEmptyString(r.emailSubject) || !isNonEmptyString(r.emailBody)) return null;
+      return { intent: "email_send", emailTo: r.emailTo, emailSubject: r.emailSubject, emailBody: r.emailBody };
+    }
     case "trip_start": {
       if (!isNonEmptyString(r.tripName)) return null;
       return { intent: "trip_start", tripName: r.tripName };
@@ -218,7 +228,7 @@ function buildCategoryList(): string {
 // same way persona.ts's system instruction has its own marker string.
 function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
   return [
-    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/ถามคำถาม)`,
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/ถามคำถาม)`,
     `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
     "",
     "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",
@@ -242,6 +252,8 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"task_complete","taskKeyword":string} — ทำเครื่องหมายว่าสิ่งที่ต้องทำที่มีคำค้นหานี้เสร็จแล้ว',
     '{"intent":"task_delete","taskKeyword":string} — ลบสิ่งที่ต้องทำที่มีคำค้นหานี้ออกจากลิสต์',
     '{"intent":"task_list"} — ขอดูรายการสิ่งที่ต้องทำทั้งหมดที่ยังไม่เสร็จ',
+    '{"intent":"email_check"} — ขอเช็คอีเมลใหม่ที่ยังไม่ได้อ่าน',
+    '{"intent":"email_send","emailTo":string,"emailSubject":string,"emailBody":string} — ส่งอีเมลใหม่ ต้องรู้ที่อยู่อีเมลผู้รับ หัวข้อ และเนื้อหาแน่ชัดทั้งหมด (ดูกติกาด้านล่างเรื่องห้ามเดาที่อยู่อีเมล)',
     '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
     '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',
@@ -254,6 +266,14 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     "",
     "กติกาสำคัญที่ห้ามฝ่าฝืน:",
     "- ห้ามสร้างตัวเลข วันที่ เวลา หรือข้อมูลใดๆ ที่ไม่ได้อยู่ในข้อความหรือบริบทการคุยจริงๆ ถ้าขาดข้อมูลสำคัญให้ใช้ intent unclear แทนการเดา",
+    // Email is the one action this bot can take that leaves its own system
+    // the instant it's confirmed — a mistaken calendar event or task can
+    // just be deleted again, a sent email can't be unsent, and an invented
+    // or misheard address means a stranger's inbox, not the bot's data.
+    // General guessing is already banned above; spelled out again here
+    // specifically for email_send because the cost of getting it wrong is
+    // categorically different from every other intent in this list.
+    '- ที่อยู่อีเมลใน email_send ต้องเป็นข้อความที่ผู้ใช้พิมพ์มาเป๊ะๆ เท่านั้น ห้ามเดา ห้ามแต่งขึ้นเอง ห้ามอนุมานจากชื่อคน/ความสัมพันธ์ (เช่น "แฟน", "หัวหน้า") เด็ดขาด ถ้าข้อความไม่มีที่อยู่อีเมลชัดเจนที่พิมพ์มาเอง ให้ใช้ intent unclear ถามที่อยู่อีเมลก่อนเสมอ แม้จะเคยคุยถึงอีเมลของคนนั้นในประวัติมาก่อนก็ตาม (ต่างจากกติกาการรวมข้อมูลจากประวัติของ calendar_create/transaction ด้านล่าง — เรื่องอีเมลไม่ใช้กติกานั้น)',
     "- categoryId ต้องเป็นค่าที่มีอยู่จริงในลิสต์หมวดหมู่ข้างบนเท่านั้น และต้อง type ตรงกับ income/expense ที่เลือก",
     // Found in a real report: "พรุ่งนี้เค้ามีเวรมั้ย"/"พรุ่งนี้ได้ขึ้นเวรมั้ย" got
     // classified as calendar_query and answered from Google Calendar

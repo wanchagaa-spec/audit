@@ -7,6 +7,7 @@
 
 import { applyCalendarCreate, applyCalendarDelete, applyCalendarEdit } from "./calendarCommands.ts";
 import { applyDiaryCreate } from "./diaryCommands.ts";
+import { applyEmailSend } from "./gmailCommands.ts";
 import { setPendingConfirmation, type ActionCtx, type PendingConfirmation } from "./state.ts";
 import { applyTaskComplete, applyTaskCreate, applyTaskDelete } from "./taskCommands.ts";
 import { applyTransactionCreate, applyTransactionDeleteLast } from "./transactionCommands.ts";
@@ -87,6 +88,8 @@ function applyPendingConfirmation(ctx: ActionCtx, pending: PendingConfirmation):
       return applyTaskComplete(ctx, pending);
     case "taskDelete":
       return applyTaskDelete(ctx, pending);
+    case "emailSend":
+      return applyEmailSend(ctx, pending);
     case "transactionDeleteLast":
       return applyTransactionDeleteLast(ctx);
     case "transactionCreate":

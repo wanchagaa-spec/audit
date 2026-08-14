@@ -46,17 +46,17 @@ must never reach a browser.
    complete sign-in. See PLAN.md for the tradeoff against submitting the app for Google
    verification instead.
 5. Under **APIs & Services → Library**, make sure **Google Sheets API**, **Google Drive
-   API**, **Google Calendar API**, and **Google Tasks API** are all "Enabled" for this
-   project (search each by name, click it, click Enable if it isn't already) — a disabled
-   API fails with a clear `has not been used in this project` error from Google, so this is
-   worth checking first if something that used to work suddenly errors after adding a new
-   feature.
-6. **If you already linked accounts before the calendar or tasks feature existed**: those
-   refresh tokens only cover whatever scopes existed at the time (e.g. `drive.file` alone,
-   or `drive.file` + `calendar.events` but not `tasks`). The bot detects this itself and
-   replies with a fresh link when someone tries a command that needs a scope they don't
-   have yet — no action needed here, just know it'll ask once per already-linked person,
-   per new scope.
+   API**, **Google Calendar API**, **Google Tasks API**, and **Gmail API** are all "Enabled"
+   for this project (search each by name, click it, click Enable if it isn't already) — a
+   disabled API fails with a clear `has not been used in this project` error from Google, so
+   this is worth checking first if something that used to work suddenly errors after adding a
+   new feature.
+6. **If you already linked accounts before the calendar/tasks/Gmail feature existed**: those
+   refresh tokens only cover whatever scopes existed at the time (e.g. `drive.file` alone, or
+   `drive.file` + `calendar.events` + `tasks` but not `gmail.readonly`/`gmail.send`). The bot
+   detects this itself and replies with a fresh link when someone tries a command that needs a
+   scope they don't have yet — no action needed here, just know it'll ask once per
+   already-linked person, per new scope.
 
 ### 4. Get a free Gemini API key (powers "ถาม <คำถาม>" / "วิเคราะห์")
 
@@ -457,6 +457,41 @@ whatever time-of-day was sent. This bot sends the time anyway (best effort — n
 clients with time-based reminders may honor it), but there's no way to verify from this
 sandboxed dev environment whether Google actually keeps it. Worth checking for yourself in
 the real Google Tasks app after a task with a time is created.
+
+### Gmail (PLAN.md 17.28)
+
+Check unread mail and send new messages — the fifth Google service this bot connects to
+(after Drive, Sheets, Calendar, Tasks). Deliberately the narrowest of the five: read (inbox
+summaries only, no full message body ever fetched) + send only, chosen explicitly over a
+broader "full inbox management" option (no reply/forward/archive/delete/mark-as-read/label
+changes) because email is far more sensitive than a to-do list or calendar event — a wrong
+appointment is easy to undo, a sent email is not.
+
+- `เช็คอีเมล` (or `เช็คเมล` / `อีเมลใหม่` / `มีอีเมลใหม่ไหม` / `มีเมลใหม่ไหม`) — lists up to 5
+  unread inbox messages: sender, subject, and Gmail's own snippet.
+- `ส่งอีเมล ถึง <อีเมลผู้รับ> เรื่อง <หัวข้อ> ข้อความ <เนื้อหา>` — e.g. "ส่งอีเมล ถึง
+  friend@example.com เรื่อง นัดพรุ่งนี้ ข้อความ เจอกันบ่ายสองนะ". Confirms before actually
+  sending, same as every other write action — but with an explicit "ส่งแล้วเรียกคืนไม่ได้"
+  ("can't be recalled once sent") warning in the confirmation prompt, since this is the one
+  action in the bot where confirming means the data leaves the bot's own system for good.
+- The AI interpreter (`ถาม`-free natural language) can also trigger a send, but it's under a
+  strict extra rule: it will **never** guess, invent, or infer an email address from a name or
+  relationship (e.g. "แฟน", "หัวหน้า") — if the message doesn't contain a literal address the
+  user typed themselves, it always asks for one instead of proceeding, even if that address
+  was mentioned earlier in the conversation history (unlike calendar/transaction intents,
+  which are allowed to reconstruct missing details from recent turns).
+
+Needs the extra `gmail.readonly` + `gmail.send` OAuth scopes (see setup step 3.5/3.6 above) —
+accounts linked before this feature existed will get a one-time re-link prompt the first time
+they try an email command.
+
+**Known limitation, not yet fixed**: `matchCalendarCommand`'s "นัด" trigger matches that word
+anywhere in a message (not just at the start), and calendar's handler is checked before Tasks'
+and Gmail's in the dispatch chain — so a task or email whose free text happens to contain the
+word "นัด" (a common Thai word for "appointment") can get misrouted into an attempted calendar
+create instead of reaching the task/email handler. Found while writing this feature's tests;
+out of scope for this change (same shape of bug as PLAN.md 17.13/17.20's calendar/shift-schedule
+mixups, just a different pair of features colliding this time) — worth a dedicated fix later.
 
 ### Diary (PLAN.md 15.4)
 
