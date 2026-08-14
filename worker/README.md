@@ -459,14 +459,17 @@ from the "free forever, no AI" approach everything else follows.
 - `ถาม ข่าวหุ้น` (or anything matching a finance keyword — Bitcoin, gold, "การเงินสหรัฐ", etc.,
   see `FINANCE_KEYWORDS` in `aiCommands.ts`) — routes to a dedicated finance-news summary instead
   of the personal-data pipeline above, since a finance-news question has nothing to do with your
-  own money/calendar/diary. Format (PLAN.md 15.13/15.14), top to bottom:
+  own money/calendar/diary. Format (PLAN.md 15.13/15.14/17.16), top to bottom:
   1. A deterministic header (`marketData.ts`'s `buildMarketHeaderBlock`, never touched by
-     Gemini): "ข้อมูล ณ วันที่ &lt;full Thai date&gt;", then gold/USD and BTC/USD each with a % change
-     (`* ทองคำ : $4,413.6 (+1.25%)`) from goldprice.org and CoinGecko (both free, no API key,
-     `include_24hr_change`/`pcXau` fields), then up to 2 top US gainers + 2 top losers
-     (unofficial Yahoo Finance screener endpoint) under a "* หุ้นสหรัฐฯ เคลื่อนไหวมากที่สุด" line.
-     Building this as plain text instead of asking Gemini to restate the numbers (the older
-     design) removes any chance of the model paraphrasing, rounding, or mistyping a price.
+     Gemini): "ข้อมูล ณ วันที่ &lt;full Thai date&gt;", then gold/USD and BTC/USD each with a % change,
+     computed from `regularMarketPrice` vs. `previousClose` on Yahoo Finance's unofficial chart
+     endpoint (symbols `XAUUSD=X` and `BTC-USD`) — the same host/endpoint shape already used for
+     the top movers below, switched to after goldprice.org and CoinGecko both silently came back
+     empty in production even with a browser-like `User-Agent` (PLAN.md 17.15/17.16) — then up to
+     2 top US gainers + 2 top losers (Yahoo Finance's screener endpoint) under a
+     "* หุ้นสหรัฐฯ เคลื่อนไหวมากที่สุด" line. Building this as plain text instead of asking Gemini to
+     restate the numbers removes any chance of the model paraphrasing, rounding, or mistyping a
+     price.
   2. A Gemini-composed summary of CNBC's finance RSS headlines (3-5 short bullets).
   3. A curated list of today's US economic-calendar events that could move gold — real
      events/times fetched from `forexCalendar.ts` (Forex Factory's community calendar feed,
