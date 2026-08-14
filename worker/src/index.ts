@@ -1297,7 +1297,15 @@ async function handleOneOtherEvent(
     }
   } catch (err) {
     if (isTextMessageEvent(event) || isUnsupportedMessageEvent(event)) {
-      await replyOrPush(event, "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ", env).catch(() => undefined);
+      // TEMPORARY diagnostic (PLAN.md 17.28 follow-up): a real report of an
+      // uncaught error on the Gmail path that isn't any of the classified
+      // error types couldn't be pinned down without seeing the actual
+      // message, and there's no access to live Worker logs from this
+      // environment — surfacing it straight into the reply is the fastest
+      // way to see it. Revert this back to the generic message once
+      // diagnosed; this is not meant to stay in the shipped bot long-term.
+      const debugDetail = err instanceof Error ? ` [debug: ${err.constructor.name}: ${err.message}]` : "";
+      await replyOrPush(event, `ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ${debugDetail}`, env).catch(() => undefined);
     }
     console.error("webhook handling failed", err);
   }
