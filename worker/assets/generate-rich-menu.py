@@ -25,16 +25,18 @@ from PIL import Image, ImageDraw, ImageFont
 HERE = Path(__file__).parent
 FONT_DIR = HERE / "fonts"
 
-# LINE rich menu images must be one of a few fixed sizes; 2500x1686 is the
-# standard "full" size. 4x2 divides evenly (625x843 per tile) and fits 8
-# real command tiles (see BUTTONS below) — grew from the original 3x2 grid
-# when the AI Q&A feature (PLAN.md 15.10) needed a spot; checked with
-# Pillow's textbbox first that every existing title still fits comfortably
-# at the narrower width before committing to this over shrinking fonts or
-# an uneven per-row column count. The 8th slot was a non-tappable brand
-# tile until the web viewer (PLAN.md 16) gave it an actual command to hold.
-WIDTH, HEIGHT = 2500, 1686
-COLS, ROWS = 4, 2
+# LINE rich menu images must be one of a few fixed sizes. Used to be the
+# "full" 2500x1686 size with a 4x2 grid (8 tappable tiles, grew from an
+# original 3x2 grid, then to a 4x1 read-only-command set once the AI Q&A
+# and web-viewer features gave every slot an actual command to hold) —
+# pared back down to just the 4 tiles asked for (help, web viewer, recent
+# transactions, month summary), so this switched to the "compact" 2500x843
+# size instead of leaving 4 tappable tiles plus 4 empty ones in a half-used
+# full-size grid. Tile dimensions (625x843) are unchanged from before —
+# only ROWS dropped from 2 to 1, so every per-tile layout/icon-drawing
+# calculation below still applies as-is.
+WIDTH, HEIGHT = 2500, 843
+COLS, ROWS = 4, 1
 
 PAGE_BG = (240, 247, 242)  # soft off-white, faint green tint
 FRAME_BORDER = (22, 163, 74)  # same green as the tiles
@@ -143,18 +145,15 @@ def icon_globe(draw, cx, cy, r, stroke, color):
     draw.line([cx - rad, cy, cx + rad, cy], fill=color, width=max(2, stroke - 4))
 
 
+# Pared down from 8 tiles to just these 4 (user request) — trip status,
+# today's calendar, this month's diary, and AI analysis all still work fine
+# as typed commands or via the "วิธีใช้" reference, they just don't get a
+# dedicated tap-target anymore.
 BUTTONS = [
     {"title": "วิธีใช้", "sub": "HELP", "icon": "help"},
-    {"title": "สรุปเดือนนี้", "sub": "MONEY SUMMARY", "icon": "money"},
-    {"title": "รายการล่าสุด", "sub": "RECENT", "icon": "clock"},
-    {"title": "ทริปตอนนี้", "sub": "TRIP STATUS", "icon": "camera"},
-    {"title": "นัดวันนี้", "sub": "TODAY'S EVENTS", "icon": "calendar"},
-    {"title": "ไดอารี่เดือนนี้", "sub": "DIARY", "icon": "diary"},
-    {"title": "วิเคราะห์", "sub": "AI ANALYSIS", "icon": "sparkle"},
-    # Used to be a non-tappable brand tile filling the dead 8th slot (a user
-    # asked why it couldn't be tapped) — now the web viewer's own tile
-    # (PLAN.md 16) instead, once there was an actual command worth the spot.
     {"title": "เปิดเว็บดูข้อมูล", "sub": "WEB VIEW", "icon": "globe"},
+    {"title": "รายการล่าสุด", "sub": "RECENT", "icon": "clock"},
+    {"title": "สรุปเดือนนี้", "sub": "MONEY SUMMARY", "icon": "money"},
 ]
 
 

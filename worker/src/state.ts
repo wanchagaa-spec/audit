@@ -134,6 +134,19 @@ export async function setLastGreetingDate(kv: KVNamespace, lineUserId: string, d
   await kv.put(`last-greeting:${lineUserId}`, dateKey);
 }
 
+// Daily 7:00 broadcast (PLAN.md 17.21): a single global key (not per-user,
+// unlike last-greeting above) guards against sending the broadcast twice on
+// the same Bangkok day — the once-a-minute cron only *usually* fires exactly
+// once during the 07:00 minute, so this is a cheap idempotency check rather
+// than the primary way the schedule is enforced.
+export async function getLastBroadcastDate(kv: KVNamespace): Promise<string | null> {
+  return kv.get("last-broadcast-date");
+}
+
+export async function setLastBroadcastDate(kv: KVNamespace, dateKey: string): Promise<void> {
+  await kv.put("last-broadcast-date", dateKey);
+}
+
 export interface UserProvince {
   name: string; // display name from the geocoder, not necessarily what the user typed
   lat: number;

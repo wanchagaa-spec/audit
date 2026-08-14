@@ -149,14 +149,14 @@ understands, nothing new to build on the LINE side.
 3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
    the previous menu of the same name first, so it's safe to run repeatedly.
 
-A 4x2 grid, all 8 tiles tappable: วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด
-(recent transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar),
-ไดอารี่เดือนนี้มีอะไรบ้าง (this month's diary), วิเคราะห์ (AI analysis, PLAN.md 15.10), เปิดเว็บดูข้อมูล
-(web viewer link, PLAN.md 16 — used to be a non-tappable "ผู้ช่วยการเงิน" brand tile filling the
-8th slot, until there was an actual command worth putting there). All 8 buttons are read/status
-commands on purpose — commands that need more input from you (`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`,
-`ไดอารี่ <ข้อความ>`, `ถาม <คำถาม>`) can't be a single tap, so those stay as typed commands (see
-`วิธีใช้` for the full list).
+A compact 4x1 grid (single row, LINE's "compact" rich menu size): วิธีใช้ (help), เปิดเว็บดูข้อมูล
+(web viewer link, PLAN.md 16), รายการล่าสุด (recent transactions), สรุปเดือนนี้ (money summary) —
+pared down from an earlier full-size 4x2/8-tile grid that also had ทริปตอนนี้, มีนัดอะไรวันนี้,
+ไดอารี่เดือนนี้มีอะไรบ้าง, and วิเคราะห์ on it; those four still work fine as typed commands (see
+`วิธีใช้` for the full list), they just don't get their own tap-target anymore. All 4 remaining
+buttons are read/status commands on purpose — commands that need more input from you
+(`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`, `ถาม <คำถาม>`) can't be a single tap, so
+those stay as typed commands regardless.
 
 ### 8. (optional) Allow the bot to join group chats
 
@@ -538,6 +538,35 @@ set yet and no context for why they're suddenly getting a weather/news briefing.
   summarization reuses the `GEMINI_API_KEY` from the AI Q&A feature above. If that's not set,
   the news section is just omitted (same graceful-degradation behavior as anywhere else Gemini
   is used).
+
+#### Daily 7:00 broadcast (PLAN.md 17.21)
+
+The exact same briefing above also goes out **proactively** at 7:00 every morning (Asia/Bangkok),
+without waiting for anyone to say hi first — the first proactive-push feature in the bot; every
+other feature only ever replies to something the user typed. Personal chats only, not groups (a
+group already has plenty of unrelated chatter, and an unsolicited daily push there is more likely
+noise than a personal DM is).
+
+- Reuses the existing once-a-minute cron trigger (`wrangler.toml`'s `[triggers]`, already firing
+  for the trip-photo upload queue drain) instead of adding a second one — `broadcastMorningBriefings`
+  is a no-op on every firing outside the 07:00 minute, and a global KV key (`last-broadcast-date`)
+  guards against sending it twice on the same day if the cron ever fires more than once during
+  that minute.
+- News is fetched once per broadcast run and shared across everyone, instead of once per user —
+  it isn't personalized (unlike weather, which is per-province), so fetching it per user would
+  mean one Gemini call per linked account firing within the same minute for no benefit.
+- Marks the same "already greeted today" state the reactive flow uses, so a "สวัสดี" later that
+  day gets the short return-greeting instead of a duplicate full briefing.
+- **Broadcast-only extras (PLAN.md 17.22)**: on top of the date/weather/news the reactive greeting
+  also gets, the broadcast additionally includes today's gold/BTC price (`buildGoldBtcLines`,
+  reused from the finance-news feature, minus the stock movers — not personalized, fetched once
+  per run same as news), today's Calendar appointments, today's shift (from the shift-schedule
+  feature above), and a short AI reflection on yesterday's diary entries (or a plain "nothing
+  written" line if there's nothing to reflect on, no Gemini call needed for that case). These
+  three are per-user and need a fresh Google access token, unlike everything else in the
+  broadcast — a token refresh failure for one account degrades to just the base weather/news
+  briefing for that person rather than failing their whole broadcast, and each of the three is
+  independently best-effort on top of that (one failing never blocks the other two).
 
 ### Web viewer (PLAN.md 16)
 

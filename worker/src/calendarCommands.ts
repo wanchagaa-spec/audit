@@ -63,8 +63,17 @@ function extractNadPayload(text: string): string | null {
   return null;
 }
 
+// Regression fix for a real report: a multi-day listing (e.g. "นัดช่วงนี้")
+// showed only the time per line, with no date at all — two events on
+// different days at 18:00 and 14:00 read as "out of order" even though
+// they were correctly sorted chronologically (listCalendarEvents already
+// sorts by real start time via Google's own `orderBy: startTime`), simply
+// because there was no date shown to tell the reader they weren't the same
+// day. Always including the date removes the ambiguity, even for
+// single-day listings ("นัดวันนี้") where it's slightly redundant but never
+// wrong.
 function formatEventLines(events: Array<{ dateKey: string; time: string; title: string }>): string[] {
-  return events.map((e) => `${e.time || "-"} ${e.title}`);
+  return events.map((e) => `${formatThaiDateLabel(e.dateKey)} ${e.time || "-"} ${e.title}`);
 }
 
 async function listRange(ctx: ActionCtx, fromKey: string, toKeyExclusive: string, label: string): Promise<string> {

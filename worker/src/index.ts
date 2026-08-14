@@ -25,6 +25,7 @@ import { uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
 import {
+  broadcastMorningBriefings,
   buildMorningBriefing,
   buildReturnGreeting,
   classifyGreeting,
@@ -92,15 +93,16 @@ export interface Env {
 }
 
 const WELCOME_MESSAGE = [
-  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 7 เรื่องหลักๆ:`,
+  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 8 เรื่องหลักๆ:`,
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
   "📅 จดนัดลง Google Calendar แล้วมันเตือนให้เองอัตโนมัติ",
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
+  "🗓️ ตารางเวร ติ๊กผ่านเว็บได้ แล้วถามผ่านแชทได้เลย เช่น \"มีเวรมั้ย\"",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
-  "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
-  "🌐 พิมพ์ \"เปิดเว็บดูข้อมูล\" เพื่อขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บ",
+  "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — หรือรอรับอัตโนมัติตอน 7 โมงเช้าทุกวันได้เลย ไม่ต้องทักก่อนก็ได้ พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
+  "🌐 พิมพ์ \"เปิดเว็บดูข้อมูล\" เพื่อขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวรผ่านเว็บ",
   "",
   "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
 ].join("\n");
@@ -1448,5 +1450,9 @@ export default {
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(drainUploadQueue(env));
+    // Runs on the same once-a-minute cron — broadcastMorningBriefings itself
+    // is a no-op outside the 07:00 Bangkok minute (PLAN.md 17.21), so this
+    // doesn't need its own separate cron trigger entry in wrangler.toml.
+    ctx.waitUntil(broadcastMorningBriefings(env, env.ACCOUNTS));
   },
 };

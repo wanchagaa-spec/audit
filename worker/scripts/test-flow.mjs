@@ -643,7 +643,7 @@ const { verifyState, signState, signViewToken, verifyViewToken } = await import(
 const { bangkokDateKey, bangkokMonthKey, addDaysToDateKey, formatThaiDateLabel, formatThaiDateLabelFull, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
-const { buildReturnGreeting } = await import("../src/greetingCommands.ts");
+const { buildReturnGreeting, broadcastMorningBriefings } = await import("../src/greetingCommands.ts");
 const { getConversationHistory } = await import("../src/conversationHistory.ts");
 
 async function signLineBody(rawBody, secret) {
@@ -900,7 +900,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("7 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("8 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -910,7 +910,7 @@ await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // tr
 const greetingWhilePendingReply = await handleTextMessage(env, lineUserId, "หวัดดีครับ", origin);
 check(
   "a greeting mid-clarification cancels it via chatEngine, not the rich welcome",
-  !greetingWhilePendingReply.includes("7 เรื่องหลักๆ")
+  !greetingWhilePendingReply.includes("8 เรื่องหลักๆ")
 );
 const afterGreetingReply = await handleTextMessage(env, lineUserId, "ข้าว 30", origin);
 check(
@@ -945,7 +945,7 @@ await env.ACCOUNTS.put(`last-greeting:${lineUserId}`, "2000-01-01");
 const briefingNoProvinceReply = await handleTextMessage(env, lineUserId, "มอนิ่ง", origin);
 check(
   "a first-greeting-of-the-day (not first-ever) gets the morning briefing, not the welcome message",
-  !briefingNoProvinceReply.includes("7 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
+  !briefingNoProvinceReply.includes("8 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
 );
 check(
   "with no province set, the briefing suggests setting one instead of showing weather",
@@ -987,6 +987,79 @@ const briefingBothFailReply = await handleTextMessage(env, lineUserId, "อร�
 check(
   "if both weather and news fail, the briefing still goes out with at least the date",
   briefingBothFailReply.includes(formatThaiDateLabel(bangkokDateKey()))
+);
+
+// Daily 7:00 broadcast (PLAN.md 17.21): the same morning briefing every
+// personal account otherwise only gets reactively (on their own first
+// "สวัสดี" of the day) now also goes out proactively at 07:00 Bangkok time,
+// to every *personal* linked account only — not groups. lineUserId already
+// has a province set (เชียงใหม่, from the briefing tests above), so its
+// broadcast should include real weather, same as its reactive briefing did.
+await setAccountLink(env.ACCOUNTS, "group:test-broadcast-group", {
+  spreadsheetId: "fake-sheet-id",
+  refreshToken: "fake-refresh-token-for-broadcast-group-test",
+  displayName: "กลุ่มทดสอบ",
+});
+const pushesBeforeBroadcast = pushes.length;
+const bangkok0700TodayUtc = new Date(`${bangkokDateKey()}T00:00:00.000Z`); // 00:00 UTC = 07:00 Bangkok
+const notSevenOClockUtc = new Date(bangkok0700TodayUtc.getTime() + 3 * 60 * 60 * 1000); // 10:00 Bangkok
+
+// Extras (PLAN.md 17.22): a real event today (exercises the "has an
+// appointment" branch of the Calendar line) and a real diary entry dated
+// yesterday (exercises the AI-analysis branch of the diary line, echoed
+// back verbatim by the mocked Gemini call so the assertion below can check
+// the actual diary text made it into the prompt). Both arrays are cleaned
+// back up right after, since later sections (Calendar, Diary) assume they
+// start from empty.
+const broadcastTestEventId = "evt-broadcast-test-1";
+calendarEvents.push({
+  id: broadcastTestEventId,
+  summary: "ประชุมทีมเช้านี้",
+  start: { dateTime: `${bangkokDateKey()}T09:00:00+07:00` },
+  end: { dateTime: `${bangkokDateKey()}T10:00:00+07:00` },
+});
+const yesterdayKeyForBroadcast = addDaysToDateKey(bangkokDateKey(), -1);
+diaryRows.push(["diary-broadcast-test-1", yesterdayKeyForBroadcast, "ทั่วไป", "เมื่อวานไปวิ่งออกกำลังกายมา", new Date().toISOString()]);
+
+await broadcastMorningBriefings(env, env.ACCOUNTS, notSevenOClockUtc);
+check("the broadcast is a no-op outside the 07:00 Bangkok minute", pushes.length === pushesBeforeBroadcast);
+
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const broadcastPushes = pushes.slice(pushesBeforeBroadcast);
+check("at 07:00 Bangkok, exactly one broadcast push goes out (the personal account only)", broadcastPushes.length === 1);
+check("the broadcast push targets the personal lineUserId, not the group", broadcastPushes[0]?.to === lineUserId);
+check(
+  "the broadcast includes today's date and real weather, same content as the reactive briefing",
+  broadcastPushes[0]?.text.includes(formatThaiDateLabel(bangkokDateKey())) &&
+    broadcastPushes[0]?.text.includes("เชียงใหม่") &&
+    broadcastPushes[0]?.text.includes("°C")
+);
+check(
+  "the broadcast includes today's real gold and bitcoin prices",
+  broadcastPushes[0]?.text.includes("ทองคำ") && broadcastPushes[0]?.text.includes("บิตคอยน์")
+);
+check(
+  "the broadcast includes today's real calendar appointment",
+  broadcastPushes[0]?.text.includes("ประชุมทีมเช้านี้")
+);
+check(
+  "the broadcast says there's no shift today, since none is ticked yet",
+  broadcastPushes[0]?.text.includes("ไม่มีเวรนะ")
+);
+check(
+  "the broadcast's diary line is an AI reflection built from yesterday's real diary text",
+  broadcastPushes[0]?.text.includes("เมื่อวานไปวิ่งออกกำลังกายมา")
+);
+calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
+diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
+
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check("a second 07:00 firing the same day doesn't send a duplicate broadcast", pushes.length === pushesBeforeBroadcast + 1);
+
+const returnGreetingAfterBroadcastReply = await handleTextMessage(env, lineUserId, "สวัสดี", origin);
+check(
+  "a greeting later the same day as the broadcast gets the short return-greeting, not another briefing",
+  returnGreetingAfterBroadcastReply === buildReturnGreeting()
 );
 
 // 7. Trip photo album (PLAN.md 15.2): image with no active trip is rejected,
@@ -1628,9 +1701,56 @@ check("today's list doesn't include tomorrow's event", !listTodayReply.includes(
 
 const listTomorrowReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรพรุ่งนี้", origin);
 check("tomorrow's list includes the created event", listTomorrowReply.includes("ประชุมทีม") && listTomorrowReply.includes("13:00"));
+check(
+  "each line in a listing includes the date, not just the time",
+  listTomorrowReply.includes(formatThaiDateLabel(tomorrowKey))
+);
 
 const listWeekReply = await handleTextMessage(env, lineUserId, "มีนัดอะไรสัปดาห์นี้", origin);
 check("week list doesn't error", listWeekReply.length > 0);
+
+// Regression test for a real report: a multi-day listing ("นัดช่วงนี้",
+// routed through the AI interpreter's calendar_query intent since it's not
+// one of the fixed today/tomorrow/week phrases) showed only the time per
+// line with no date at all — two real events on different days at 18:00 and
+// 14:00 read as "out of order" with nothing to show they weren't the same
+// day. Second event here is a few days out but at an *earlier* clock time
+// than the first, matching that shape. The order check below confirms
+// formatEventLines preserves whatever order listCalendarEvents returns
+// (real Google API sorts by actual start time via orderBy: startTime, not
+// re-verified by this mock) rather than re-sorting or reversing it; the
+// date-inclusion checks are this test's actual regression coverage. Uses an
+// explicit interpreter-provided range instead of the "week" phrase above,
+// so this doesn't depend on which day of the week the test happens to run
+// on.
+const laterKey = addDaysToDateKey(todayKey, 4);
+const laterSlash = toSlashDate(laterKey);
+await handleTextMessage(env, lineUserId, `นัด จัดห้องใหม่ ${laterSlash} 09:00`, origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+
+simulateInterpreterResult = {
+  intent: "calendar_query",
+  calendarRangeFromKey: todayKey,
+  calendarRangeToKeyExclusive: addDaysToDateKey(todayKey, 5),
+  calendarRangeLabel: "นี้",
+};
+const listRangeReply = await handleTextMessage(env, lineUserId, "นัดช่วงนี้", origin);
+check(
+  "a multi-day listing includes both events with their own dates",
+  listRangeReply.includes(formatThaiDateLabel(tomorrowKey)) &&
+    listRangeReply.includes("ประชุมทีม") &&
+    listRangeReply.includes(formatThaiDateLabel(laterKey)) &&
+    listRangeReply.includes("จัดห้องใหม่")
+);
+check(
+  "the earlier-day event (later clock time) is listed before the later-day event (earlier clock time)",
+  listRangeReply.indexOf("ประชุมทีม") < listRangeReply.indexOf("จัดห้องใหม่")
+);
+// Clean up — the edit/delete tests right below assume "ประชุมทีม" is the
+// only event in calendarEvents (calendarEvents.length/calendarEvents[0]
+// checks), same as before this multi-day listing test existed.
+const janghongIdx = calendarEvents.findIndex((e) => e.summary === "จัดห้องใหม่");
+if (janghongIdx >= 0) calendarEvents.splice(janghongIdx, 1);
 
 const editPromptReply = await handleTextMessage(env, lineUserId, "แก้นัด ประชุมทีม เป็น 15:00", origin);
 check("edit asks to confirm the new time", editPromptReply.includes("15:00"));
@@ -1725,6 +1845,11 @@ simulateCalendarApiDisabled = false;
 
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
+// Snapshotted here rather than assuming diaryTabMetaCalls starts at 0 — the
+// 7:00 broadcast test above (PLAN.md 17.22) also reads the Diary tab once
+// (for yesterday's entries), so this section's own "checked once" check
+// below asserts against the delta since this point, not an absolute count.
+const diaryTabMetaCallsBeforeThisSection = diaryTabMetaCalls;
 const diaryPromptReply = await handleTextMessage(env, lineUserId, "ไดอารี่ วันนี้อากาศดีมาก", origin);
 check(
   "diary create defaults to the uncategorized bucket and asks to confirm",
@@ -1775,8 +1900,13 @@ check(
 );
 
 check(
-  "the Diary tab's existence is only checked once, then cached in KV",
-  diaryTabMetaCalls === 1
+  "the Diary tab's existence is checked at most once across this whole section, then cached in KV",
+  // <= 1, not === 1: the broadcast test above (PLAN.md 17.22) may have
+  // already warmed the same spreadsheetId's diary-tab cache key by reading
+  // yesterday's entries, in which case this section's own reads pay for
+  // zero further metadata checks rather than exactly one — either way, the
+  // cache means this section itself never pays for more than one.
+  diaryTabMetaCalls - diaryTabMetaCallsBeforeThisSection <= 1
 );
 
 // Proves the actual scaling concern is fixed: writing a lot in a month used

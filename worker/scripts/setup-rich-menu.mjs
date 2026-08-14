@@ -18,27 +18,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const imagePath = join(__dirname, "..", "assets", "rich-menu.png");
 
 // Tap area texts must exactly match phrases the bot already understands
-// (see src/commands.ts, tripCommands.ts, calendarCommands.ts, diaryCommands.ts,
-// aiCommands.ts, viewCommands.ts) — a rich menu tap sends the text as an
-// ordinary message, nothing special. Bounds must stay in sync with the 4x2
-// grid drawn in assets/generate-rich-menu.py (625x843 per tile).
+// (see src/commands.ts, viewCommands.ts) — a rich menu tap sends the text as
+// an ordinary message, nothing special. Bounds must stay in sync with the
+// compact 4x1 grid drawn in assets/generate-rich-menu.py (625x843 per tile,
+// 2500x843 total — pared down from a full-size 4x2/8-tile grid to just
+// these 4 tiles on request, so this switched to LINE's "compact" size
+// instead of a half-empty full-size one).
 const richMenuDefinition = {
-  size: { width: 2500, height: 1686 },
+  size: { width: 2500, height: 843 },
   selected: true,
   name: "expense-tracker-main-menu",
   chatBarText: "เมนู",
   areas: [
     { bounds: { x: 0, y: 0, width: 625, height: 843 }, action: { type: "message", text: "วิธีใช้" } },
-    { bounds: { x: 625, y: 0, width: 625, height: 843 }, action: { type: "message", text: "สรุปเดือนนี้" } },
+    { bounds: { x: 625, y: 0, width: 625, height: 843 }, action: { type: "message", text: "เปิดเว็บดูข้อมูล" } },
     { bounds: { x: 1250, y: 0, width: 625, height: 843 }, action: { type: "message", text: "รายการล่าสุด" } },
-    { bounds: { x: 1875, y: 0, width: 625, height: 843 }, action: { type: "message", text: "ทริปตอนนี้" } },
-    { bounds: { x: 0, y: 843, width: 625, height: 843 }, action: { type: "message", text: "มีนัดอะไรวันนี้" } },
-    {
-      bounds: { x: 625, y: 843, width: 625, height: 843 },
-      action: { type: "message", text: "ไดอารี่เดือนนี้มีอะไรบ้าง" },
-    },
-    { bounds: { x: 1250, y: 843, width: 625, height: 843 }, action: { type: "message", text: "วิเคราะห์" } },
-    { bounds: { x: 1875, y: 843, width: 625, height: 843 }, action: { type: "message", text: "เปิดเว็บดูข้อมูล" } },
+    { bounds: { x: 1875, y: 0, width: 625, height: 843 }, action: { type: "message", text: "สรุปเดือนนี้" } },
   ],
 };
 
