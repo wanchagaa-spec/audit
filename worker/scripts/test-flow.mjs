@@ -544,12 +544,15 @@ globalThis.fetch = async (url, init = {}) => {
       return new Response("simulated market data fetch failure", { status: 500 });
     }
     // Gold and BTC both go through this same chart endpoint now (PLAN.md
-    // 17.16) — regularMarketPrice/previousClose, same shape movers'
-    // sibling endpoint already used successfully before this.
-    const isGold = u.includes("XAUUSD");
-    const meta = isGold
-      ? { regularMarketPrice: 4413.6, previousClose: 4360.0 }
-      : { regularMarketPrice: 60000, previousClose: 63000 };
+    // 17.16/17.17) — regularMarketPrice/previousClose, same shape movers'
+    // sibling endpoint already used successfully before this. Checking for
+    // BTC-USD specifically (not "GC=F", which encodeURIComponent turns into
+    // "GC%3DF" in the real request URL) since it's the one symbol that
+    // stays literal.
+    const isBtc = u.includes("BTC-USD");
+    const meta = isBtc
+      ? { regularMarketPrice: 60000, previousClose: 63000 }
+      : { regularMarketPrice: 4413.6, previousClose: 4360.0 };
     return new Response(JSON.stringify({ chart: { result: [{ meta }] } }), { status: 200 });
   }
   if (u.includes("nfs.faireconomy.media/ff_calendar_thisweek.json")) {

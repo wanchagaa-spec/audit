@@ -463,7 +463,7 @@ from the "free forever, no AI" approach everything else follows.
   1. A deterministic header (`marketData.ts`'s `buildMarketHeaderBlock`, never touched by
      Gemini): "ข้อมูล ณ วันที่ &lt;full Thai date&gt;", then gold/USD and BTC/USD each with a % change,
      computed from `regularMarketPrice` vs. `previousClose` on Yahoo Finance's unofficial chart
-     endpoint (symbols `XAUUSD=X` and `BTC-USD`) — the same host/endpoint shape already used for
+     endpoint (symbols `GC=F` and `BTC-USD`) — the same host/endpoint shape already used for
      the top movers below, switched to after goldprice.org and CoinGecko both silently came back
      empty in production even with a browser-like `User-Agent` (PLAN.md 17.15/17.16) — then up to
      2 top US gainers + 2 top losers (Yahoo Finance's screener endpoint) under a
