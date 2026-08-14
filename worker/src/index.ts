@@ -69,6 +69,7 @@ import { endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./trip
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
+import { handleViewShiftsRequest } from "./viewShiftsPage.ts";
 import { handleViewAccountsRequest } from "./viewPages.ts";
 import { handleViewPhotoRequest, handleViewTripsRequest } from "./viewTripsPage.ts";
 import {
@@ -1388,6 +1389,7 @@ export default {
     if (url.pathname === "/view") return handleViewAccountsRequest(request, env);
     if (url.pathname === "/view/calendar") return handleViewCalendarRequest(request, env);
     if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
+    if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);
     if (url.pathname === "/view/trips" || url.pathname.startsWith("/view/trips/")) {
       return handleViewTripsRequest(request, env);
     }

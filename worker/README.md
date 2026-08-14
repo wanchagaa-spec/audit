@@ -541,9 +541,10 @@ set yet and no context for why they're suddenly getting a weather/news briefing.
 
 ### Web viewer (PLAN.md 16)
 
-`เปิดเว็บดูข้อมูล` in chat (or tapping the rich-menu tile) replies with a link to a read-only web
-page with four sections: accounts (`/view`), calendar (`/view/calendar`), diary (`/view/diary`),
-and trip photos (`/view/trips`) — all sharing one token via a small nav bar.
+`เปิดเว็บดูข้อมูล` in chat (or tapping the rich-menu tile) replies with a link to a web page with
+five sections: accounts (`/view`), calendar (`/view/calendar`), diary (`/view/diary`), trip photos
+(`/view/trips`), and a personal shift schedule (`/view/shifts`) — all sharing one token via a small
+nav bar.
 
 - **No new Google sign-in, no LIFF** (LIFF was already ruled out for account linking in PLAN.md
   14.2 — same userId mismatch problem would apply here too). The link's token is signed with the
@@ -567,6 +568,18 @@ and trip photos (`/view/trips`) — all sharing one token via a small nav bar.
   Photos are proxied through the Worker rather than linked directly, since uploaded files use the
   `drive.file` scope and aren't publicly reachable — grid thumbnails are the same full-resolution
   proxied image, just CSS-scaled down (no separate lightweight-thumbnail endpoint yet).
+- **Shift schedule (`/view/shifts`, PLAN.md 17.18) — the only page in this family that writes.**
+  A grid of checkboxes (columns = day of the month, rows = a fixed set of 4 shift types) lets a
+  user tick their own shifts and submit via a plain HTML form POST (no client JS, same as every
+  other `/view/*` page) back to the same URL, token and all, so `resolveViewSession` needs no
+  changes to work for POST too. Personal use only (confirmed with the user rather than assumed —
+  there's no per-member attribution here the way group mode's shared spreadsheets need). Data
+  lives in a `Shifts-YYYY-MM` tab per month in the user's own spreadsheet (`sheets.ts`), and every
+  save overwrites the whole month's grid at once rather than diffing individual cells — simpler
+  and safer for a "toggle grid" UI where the form always submits the complete checked state.
+  `aiCommands.ts`'s "ถาม" pipeline reads the current month's grid alongside transactions/diary/
+  calendar and feeds it into the AI prompt as labeled, guarded data, so "ถาม ใครอยู่เวรเช้าวันนี้"
+  answers from what was actually ticked, never a guess.
 
 ### Group mode (PLAN.md 17)
 

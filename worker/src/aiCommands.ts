@@ -14,7 +14,7 @@ import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
-import { readAllDiaryEntries, readAllTransactions, type DiaryRow, type TransactionRow } from "./sheets.ts";
+import { readAllDiaryEntries, readAllTransactions, readShiftGrid, SHIFT_TYPES, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokStartOfDayIso, formatThaiDateLabel } from "./thaiDate.ts";
 import { fetchWeatherSummary } from "./weather.ts";
@@ -91,6 +91,24 @@ function totals(rows: TransactionRow[]): { income: number; expense: number } {
   };
 }
 
+// Turns the checked-cell grid into per-day lines Gemini can read directly
+// (e.g. "5: เวรเช้า, เวรบ่าย") — grouped by day rather than by shift type
+// since questions are almost always day-first ("ใครอยู่เวรเช้าวันนี้",
+// "วันนี้มีเวรอะไรบ้าง").
+function formatShiftLines(grid: ShiftGrid): string[] {
+  const byDay = new Map<number, ShiftType[]>();
+  for (const type of SHIFT_TYPES) {
+    for (const day of grid.checked[type]) {
+      const list = byDay.get(day);
+      if (list) list.push(type);
+      else byDay.set(day, [type]);
+    }
+  }
+  return Array.from(byDay.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([day, types]) => `${day}: ${types.join(", ")}`);
+}
+
 function topCategories(rows: TransactionRow[], limit = 5): string[] {
   const byCategory = new Map<string, number>();
   for (const r of rows) {
@@ -118,7 +136,8 @@ function buildSystemInstruction(
   txRows: TransactionRow[],
   diaryRows: DiaryRow[],
   calendarEvents: CalendarEventSummary[] | null,
-  calendarRangeLabel: string
+  calendarRangeLabel: string,
+  shiftGrid: ShiftGrid
 ): string {
   const { income, expense } = totals(txRows);
   const top = topCategories(txRows);
@@ -131,6 +150,7 @@ function buildSystemInstruction(
   const calendarLines = (calendarEvents ?? [])
     .slice(-MAX_ROWS_IN_PROMPT)
     .map((e) => `${e.dateKey} ${e.time || "(ไม่ระบุเวลา)"} ${e.title}`);
+  const shiftLines = formatShiftLines(shiftGrid);
 
   return [
     "คุณเป็นผู้ช่วยส่วนตัวในแชท LINE ที่ช่วยตอบคำถามเกี่ยวกับการเงิน นัดหมาย และไดอารี่ของผู้ใช้คนเดียว",
@@ -167,6 +187,9 @@ function buildSystemInstruction(
     "",
     `บันทึกไดอารี่เดือนนี้ (ล่าสุด ${diaryLines.length} รายการ):`,
     diaryLines.length > 0 ? diaryLines.join("\n") : "(ไม่มีบันทึก)",
+    "",
+    `ตารางเวรของผู้ใช้เดือน ${month} (จากตารางเวรที่ผู้ใช้ติ๊กไว้เอง แต่ละบรรทัดคือวันที่แล้วตามด้วยประเภทเวรที่ติ๊กในวันนั้น ใช้ข้อมูลชุดนี้เท่านั้นเวลาตอบคำถามเรื่องเวร ห้ามเดา):`,
+    shiftLines.length > 0 ? shiftLines.join("\n") : "(ยังไม่ได้ติ๊กเวรไว้เลยเดือนนี้)",
     "",
     "ถ้าคำถามต้องการข้อมูลที่ไม่มีในนี้ (เช่น นัดหมายนอกช่วงที่ให้มา) ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ แทนที่จะเดา",
   ].join("\n");
@@ -212,9 +235,10 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
     addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS - 1)
   )}`;
 
-  const [allTx, allDiary] = await Promise.all([
+  const [allTx, allDiary, shiftGrid] = await Promise.all([
     readAllTransactions(ctx.accessToken, ctx.spreadsheetId),
     readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv),
+    readShiftGrid(ctx.accessToken, ctx.spreadsheetId, ctx.kv, month),
   ]);
   // Calendar access needs its own OAuth scope some already-linked accounts
   // never granted, and can fail for other transient reasons too — fetched
@@ -255,7 +279,8 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
     monthTx,
     monthDiary,
     calendarEvents,
-    calendarRangeLabel
+    calendarRangeLabel,
+    shiftGrid
   );
 
   try {

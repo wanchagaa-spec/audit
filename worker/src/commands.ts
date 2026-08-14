@@ -126,7 +126,7 @@ export function buildHelpText(): string {
     // help text is shared between personal and group mode (PLAN.md 17.7),
     // and a group's reply posts straight into the shared chat, so the link
     // is visible to whoever's in the group, not just whoever asked for it.
-    "• เปิดเว็บดูข้อมูล — ขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บ (ลิงก์ใช้ได้ 1 ชั่วโมง หมดอายุแล้วพิมพ์คำสั่งนี้ใหม่ได้เลย)",
+    "• เปิดเว็บดูข้อมูล — ขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวรผ่านเว็บ (ลิงก์ใช้ได้ 1 ชั่วโมง หมดอายุแล้วพิมพ์คำสั่งนี้ใหม่ได้เลย)",
   ];
   return ["ฉันช่วยได้ 7 เรื่อง — พิมพ์คำสั่งด้านล่าง หรือแตะเมนูใต้ช่องพิมพ์ก็ได้:", "", ...sections].join("\n");
 }

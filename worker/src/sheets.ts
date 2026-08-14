@@ -244,3 +244,130 @@ export async function readAllDiaryEntries(
       createdAt: r[4] ?? "",
     }));
 }
+
+// ---- Shifts (PLAN.md 17.18) ----------------------------------------------
+// Personal-only grid ("ตารางเวรของฉัน"): a tab per month, shaped exactly like
+// the web page shows it — a header row of day-of-month numbers, then one
+// fixed row per shift type with a checkmark in whichever day columns that
+// shift is worked. Unlike Transactions/Diary's append-only row-per-entry
+// log, the web form submits the *entire* month's grid state on every save,
+// so overwriting the whole data range with one PUT is simpler and safer
+// than diffing individual cell changes against whatever rows already exist.
+
+export const SHIFT_TYPES = ["เวร 7.00", "เวรเช้า", "เวรบ่าย", "เวรดึก"] as const;
+export type ShiftType = (typeof SHIFT_TYPES)[number];
+
+export interface ShiftGrid {
+  monthKey: string; // YYYY-MM
+  days: number; // days in that month
+  // checked[shiftType] holds the day-of-month numbers (1-based) checked for that shift.
+  checked: Record<ShiftType, number[]>;
+}
+
+function isShiftType(value: string): value is ShiftType {
+  return (SHIFT_TYPES as readonly string[]).includes(value);
+}
+
+function daysInMonth(monthKey: string): number {
+  const [y, m] = monthKey.split("-").map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate(); // day 0 of next month = last day of this one
+}
+
+/** 1 -> "A", 26 -> "Z", 27 -> "AA", ... — A1-notation column letters for a
+ * 1-based column index. Needed because a month's grid is up to 32 columns
+ * wide (31 days + the shift-type label column), past "Z". */
+function columnLetter(n: number): string {
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function shiftsTabName(monthKey: string): string {
+  return `Shifts-${monthKey}`;
+}
+
+function shiftsDataRange(monthKey: string): string {
+  const lastCol = columnLetter(daysInMonth(monthKey) + 1);
+  const lastRow = 1 + SHIFT_TYPES.length;
+  return `'${shiftsTabName(monthKey)}'!A2:${lastCol}${lastRow}`;
+}
+
+// Cached per (spreadsheetId, monthKey) once confirmed, same reasoning as
+// ensureDiaryTab — a tab, once created, doesn't go away, so normal reads/
+// writes should skip the metadata check entirely.
+async function ensureShiftsTab(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  monthKey: string
+): Promise<void> {
+  const cacheKey = `shifts-tab:${spreadsheetId}:${monthKey}`;
+  if (await kv.get(cacheKey)) return;
+
+  const tabName = shiftsTabName(monthKey);
+  const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties.title`);
+  const titles: string[] = (meta.sheets ?? []).map((s: any) => s.properties.title);
+  if (!titles.includes(tabName)) {
+    await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: tabName } } }] }),
+    });
+    const header = ["ประเภทเวร", ...Array.from({ length: daysInMonth(monthKey) }, (_, i) => String(i + 1))];
+    const typeRows = SHIFT_TYPES.map((t) => [t]);
+    await sheetsFetch(accessToken, `/${spreadsheetId}/values/'${tabName}'!A1?valueInputOption=RAW`, {
+      method: "PUT",
+      body: JSON.stringify({ values: [header, ...typeRows] }),
+    });
+  }
+  await kv.put(cacheKey, "1");
+}
+
+export async function readShiftGrid(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  monthKey: string
+): Promise<ShiftGrid> {
+  await ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey);
+  const days = daysInMonth(monthKey);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${shiftsDataRange(monthKey)}`);
+  const rows: string[][] = data.values ?? [];
+
+  const checked = Object.fromEntries(SHIFT_TYPES.map((t) => [t, [] as number[]])) as Record<ShiftType, number[]>;
+  for (const row of rows) {
+    const type = row[0];
+    if (!isShiftType(type)) continue;
+    for (let day = 1; day <= days; day++) {
+      const cell = row[day]; // row[0] is the type label, row[1] is day 1, etc.
+      if (cell && cell.trim() !== "") checked[type].push(day);
+    }
+  }
+  return { monthKey, days, checked };
+}
+
+/** Overwrites a whole month's grid with exactly the given checked cells —
+ * anything not in `checkedCells` is cleared, matching a plain HTML
+ * checkbox form's semantics (only checked boxes are submitted at all). */
+export async function saveShiftGrid(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  monthKey: string,
+  checkedCells: Array<{ shiftType: ShiftType; day: number }>
+): Promise<void> {
+  await ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey);
+  const days = daysInMonth(monthKey);
+  const checkedSet = new Set(checkedCells.filter((c) => c.day >= 1 && c.day <= days).map((c) => `${c.shiftType}|${c.day}`));
+  const rows = SHIFT_TYPES.map((t) => [
+    t,
+    ...Array.from({ length: days }, (_, i) => (checkedSet.has(`${t}|${i + 1}`) ? "✓" : "")),
+  ]);
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/${shiftsDataRange(monthKey)}?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values: rows }),
+  });
+}
