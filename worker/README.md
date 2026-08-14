@@ -149,14 +149,14 @@ understands, nothing new to build on the LINE side.
 3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
    the previous menu of the same name first, so it's safe to run repeatedly.
 
-A 4x2 grid, all 8 tiles tappable: วิธีใช้ (help), สรุปเดือนนี้ (money summary), รายการล่าสุด
-(recent transactions), ทริปตอนนี้ (trip status), มีนัดอะไรวันนี้ (today's calendar),
-ไดอารี่เดือนนี้มีอะไรบ้าง (this month's diary), วิเคราะห์ (AI analysis, PLAN.md 15.10), เปิดเว็บดูข้อมูล
-(web viewer link, PLAN.md 16 — used to be a non-tappable "ผู้ช่วยการเงิน" brand tile filling the
-8th slot, until there was an actual command worth putting there). All 8 buttons are read/status
-commands on purpose — commands that need more input from you (`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`,
-`ไดอารี่ <ข้อความ>`, `ถาม <คำถาม>`) can't be a single tap, so those stay as typed commands (see
-`วิธีใช้` for the full list).
+A compact 4x1 grid (single row, LINE's "compact" rich menu size): วิธีใช้ (help), เปิดเว็บดูข้อมูล
+(web viewer link, PLAN.md 16), รายการล่าสุด (recent transactions), สรุปเดือนนี้ (money summary) —
+pared down from an earlier full-size 4x2/8-tile grid that also had ทริปตอนนี้, มีนัดอะไรวันนี้,
+ไดอารี่เดือนนี้มีอะไรบ้าง, and วิเคราะห์ on it; those four still work fine as typed commands (see
+`วิธีใช้` for the full list), they just don't get their own tap-target anymore. All 4 remaining
+buttons are read/status commands on purpose — commands that need more input from you
+(`เริ่มทริป <ชื่อ>`, `นัด <เรื่อง> ...`, `ไดอารี่ <ข้อความ>`, `ถาม <คำถาม>`) can't be a single tap, so
+those stay as typed commands regardless.
 
 ### 8. (optional) Allow the bot to join group chats
 

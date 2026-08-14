@@ -900,7 +900,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("7 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("8 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -910,7 +910,7 @@ await handleTextMessage(env, lineUserId, "ซื้อของ", origin); // tr
 const greetingWhilePendingReply = await handleTextMessage(env, lineUserId, "หวัดดีครับ", origin);
 check(
   "a greeting mid-clarification cancels it via chatEngine, not the rich welcome",
-  !greetingWhilePendingReply.includes("7 เรื่องหลักๆ")
+  !greetingWhilePendingReply.includes("8 เรื่องหลักๆ")
 );
 const afterGreetingReply = await handleTextMessage(env, lineUserId, "ข้าว 30", origin);
 check(
@@ -945,7 +945,7 @@ await env.ACCOUNTS.put(`last-greeting:${lineUserId}`, "2000-01-01");
 const briefingNoProvinceReply = await handleTextMessage(env, lineUserId, "มอนิ่ง", origin);
 check(
   "a first-greeting-of-the-day (not first-ever) gets the morning briefing, not the welcome message",
-  !briefingNoProvinceReply.includes("7 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
+  !briefingNoProvinceReply.includes("8 เรื่องหลักๆ") && briefingNoProvinceReply.includes(formatThaiDateLabel(bangkokDateKey()))
 );
 check(
   "with no province set, the briefing suggests setting one instead of showing weather",
