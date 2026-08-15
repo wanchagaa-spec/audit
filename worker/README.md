@@ -721,9 +721,9 @@ noise than a personal DM is).
 ### Web viewer (PLAN.md 16)
 
 `เปิดเว็บดูข้อมูล` in chat (or tapping the rich-menu tile) replies with a link to a web page with
-five sections: accounts (`/view`), calendar (`/view/calendar`), diary (`/view/diary`), trip photos
-(`/view/trips`), and a personal shift schedule (`/view/shifts`) — all sharing one token via a small
-nav bar.
+six sections: accounts (`/view`), calendar (`/view/calendar`), diary (`/view/diary`), trip photos
+(`/view/trips`), a personal shift schedule (`/view/shifts`), and incomplete Google Tasks
+(`/view/tasks`, PLAN.md 17.36) — all sharing one token via a small nav bar.
 
 - **No new Google sign-in, no LIFF** (LIFF was already ruled out for account linking in PLAN.md
   14.2 — same userId mismatch problem would apply here too). The link's token is signed with the
@@ -747,7 +747,7 @@ nav bar.
   Photos are proxied through the Worker rather than linked directly, since uploaded files use the
   `drive.file` scope and aren't publicly reachable — grid thumbnails are the same full-resolution
   proxied image, just CSS-scaled down (no separate lightweight-thumbnail endpoint yet).
-- **Shift schedule (`/view/shifts`, PLAN.md 17.18) — the only page in this family that writes.**
+- **Shift schedule (`/view/shifts`, PLAN.md 17.18) — the first page in this family that writes.**
   A grid of checkboxes (columns = day of the month, rows = a fixed set of 4 shift types) lets a
   user tick their own shifts and submit via a plain HTML form POST (no client JS, same as every
   other `/view/*` page) back to the same URL, token and all, so `resolveViewSession` needs no
@@ -759,6 +759,21 @@ nav bar.
   `aiCommands.ts`'s "ถาม" pipeline reads the current month's grid alongside transactions/diary/
   calendar and feeds it into the AI prompt as labeled, guarded data, so "ถาม ใครอยู่เวรเช้าวันนี้"
   answers from what was actually ticked, never a guess.
+- **Diary edit/delete (`/view/diary`, PLAN.md 17.36) — the second write-capable page.** Every
+  entry in the month view is its own inline edit form (date/category/text, saved immediately on
+  submit — same direct-save reasoning as the shift grid), and deleting goes through a
+  confirm-page step first (GET a confirm page showing the entry's own text, then POST) since a
+  delete is the one irreversible action here — the same confirm-before-destructive-action rule
+  every chat delete command follows, expressed as a second page instead of a "ใช่" reply because
+  these pages are plain server-rendered HTML with no client JS. Chat deliberately has no
+  edit/delete diary commands at all — the web page is the one place for it (confirmed with the
+  user). Backed by new `updateDiaryEntry`/`deleteDiaryEntry` helpers in `sheets.ts` that mirror
+  `deleteMostRecentTransaction`'s find-row-then-batchUpdate shape; an edit preserves the entry's
+  original `createdAt`. Search results stay read-only.
+- **Tasks (`/view/tasks`, PLAN.md 17.36) — read-only**, same pattern as `/view/calendar`, reusing
+  `listIncompleteTasks`. Groups tasks by due date (soonest first, plus a "ไม่มีกำหนด" section for
+  undated ones). Deliberately read-only: chat already covers complete/delete, this page is just
+  the at-a-glance overview that was asked for.
 
 ### Group mode (PLAN.md 17)
 
@@ -972,7 +987,9 @@ above) to publish it.
   the web app to attach to. Fine for a fresh LINE-first user; if you already use the web
   app and want the same sheet, note the spreadsheet ID from the web app's Settings and
   wire it in manually for now (or ask to extend the linking flow to support this).
-- Group books (inviting others via LINE) aren't wired up yet — only personal books.
+- Group books work through LINE group mode (PLAN.md 17) — add the bot to a LINE group and it
+  keeps one shared book for the whole group. (This bullet used to claim group books weren't
+  wired up at all; that was stale documentation from before phase 17 shipped.)
 - The monthly summary is a plain text message, not a chart image (see PLAN.md 14.3 for
   the image-generation option if wanted later).
 - Trip photos only upload while a trip is open (`เริ่มทริป` first) — there's no "attach a
@@ -985,8 +1002,9 @@ above) to publish it.
   like "พรุ่งนี้บ่ายสอง" (via the AI-interpreter-first pipeline, PLAN.md 17.11/17.35 — this
   bullet used to claim the natural-phrase case didn't work at all, written before that
   pipeline shipped and never revisited until PLAN.md 17.35 caught it).
-- Diary entries have no edit/delete command yet, only create + monthly list + search
-  (PLAN.md 15.4).
+- Diary entries can't be edited/deleted from chat — create + monthly list + search only
+  (PLAN.md 15.4). Editing and deleting live on the web viewer's diary page instead
+  (PLAN.md 17.36).
 - Only one confirmation can be pending at a time (trip switch, calendar create/edit/delete,
   diary create all share one slot per user) — asking a second thing before answering the
   first silently drops whichever was asked first rather than queueing it.

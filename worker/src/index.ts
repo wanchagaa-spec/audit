@@ -87,6 +87,7 @@ import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewShiftsRequest } from "./viewShiftsPage.ts";
 import { handleViewAccountsRequest } from "./viewPages.ts";
+import { handleViewTasksRequest } from "./viewTasksPage.ts";
 import { handleViewPhotoRequest, handleViewTripsRequest } from "./viewTripsPage.ts";
 import {
   countQueuedForUser,
@@ -125,7 +126,7 @@ const WELCOME_MESSAGE = [
   "📍 หาร้าน/สถานที่ใกล้ตัวจากตำแหน่งจริง",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI",
   "☀️ สรุปวันที่/อากาศ/ข่าวให้ทุกเช้าอัตโนมัติ",
-  "🌐 ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวรผ่านเว็บ",
+  "🌐 ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวร/สิ่งที่ต้องทำผ่านเว็บ",
   "",
   "พิมพ์ \"วิธีใช้\" เพื่อดูคำสั่งทั้งหมดแบบละเอียด หรือแตะเมนูใต้ช่องพิมพ์ได้เลย",
 ].join("\n");
@@ -1608,6 +1609,7 @@ export default {
     if (url.pathname === "/view/calendar") return handleViewCalendarRequest(request, env);
     if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
     if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);
+    if (url.pathname === "/view/tasks") return handleViewTasksRequest(request, env);
     if (url.pathname === "/view/trips" || url.pathname.startsWith("/view/trips/")) {
       return handleViewTripsRequest(request, env);
     }
