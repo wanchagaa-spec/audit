@@ -48,6 +48,7 @@ import {
   getGroupMemberProfile,
   getGroupSummary,
   isImageMessageEvent,
+  isLocationMessageEvent,
   isTextMessageEvent,
   isUnsupportedMessageEvent,
   isVideoMessageEvent,
@@ -60,6 +61,7 @@ import {
   type LineVideoMessageEvent,
   type LineWebhookBody,
 } from "./line.ts";
+import { answerNearbySearch, matchPlacesCommand } from "./placesCommands.ts";
 import { canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
 import { signState, verifyState } from "./signedState.ts";
 import {
@@ -100,10 +102,16 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   STATE_SIGNING_SECRET: string;
   GEMINI_API_KEY: string;
+  // Optional, same degrade-gracefully treatment as GEMINI_API_KEY — a flat
+  // Google Maps Platform API key (PLAN.md 17.30), not an OAuth secret, so
+  // it's not tied to any linked account. "หา...ใกล้ฉัน" just tells the user
+  // the feature isn't set up yet if this is missing, same as ถาม/วิเคราะห์
+  // do when GEMINI_API_KEY is missing.
+  GOOGLE_MAPS_API_KEY: string;
 }
 
 const WELCOME_MESSAGE = [
-  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 10 เรื่องหลักๆ:`,
+  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 11 เรื่องหลักๆ:`,
   "",
   "💰 จดรายรับ-รายจ่าย พิมพ์ประโยคธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\"",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติ ขึ้น Google Drive แยกโฟลเดอร์ตามทริป",
@@ -112,6 +120,7 @@ const WELCOME_MESSAGE = [
   "🗓️ ตารางเวร ติ๊กผ่านเว็บได้ แล้วถามผ่านแชทได้เลย เช่น \"มีเวรมั้ย\"",
   "✅ สิ่งที่ต้องทำ พิมพ์ \"เพิ่มสิ่งที่ต้องทำ <ข้อความ>\" ขึ้น Google Tasks ให้อัตโนมัติ",
   "📧 เช็ค/ส่งอีเมลผ่านแชทได้เลย พิมพ์ \"เช็คอีเมล\" หรือ \"ส่งอีเมล ถึง ... เรื่อง ... ข้อความ ...\"",
+  "📍 หาสถานที่ใกล้ตัว พิมพ์ \"หา<สิ่งที่จะหา>ใกล้ฉัน\" แล้วแชร์ตำแหน่งผ่านไลน์",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
   "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — หรือรอรับอัตโนมัติตอน 7 โมงเช้าทุกวันได้เลย ไม่ต้องทักก่อนก็ได้ พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
   "🌐 พิมพ์ \"เปิดเว็บดูข้อมูล\" เพื่อขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวรผ่านเว็บ",
@@ -611,6 +620,14 @@ async function dispatchLegacyCommands(
     const provinceHandler = matchProvinceCommand(text);
     if (provinceHandler) {
       return await provinceHandler(env.ACCOUNTS, subjectId);
+    }
+
+    // Same reasoning as the province handler above: Places search (PLAN.md
+    // 17.30) only needs a flat Google Maps API key, not a per-user Google
+    // access token, so there's nothing here for withFreshAccessToken to do.
+    const placesHandler = await matchPlacesCommand(text);
+    if (placesHandler) {
+      return await placesHandler({ kv: env.ACCOUNTS, lineUserId: subjectId });
     }
 
     // Works in both modes (PLAN.md 17.7) — resolveViewSession (viewAuth.ts)
@@ -1305,11 +1322,30 @@ async function handleOneOtherEvent(
       }
       const reply = await handleTextMessage(env, event.source.userId, event.message.text, origin, tokenCache);
       await replyOrPush(event, reply, env);
+    } else if (isLocationMessageEvent(event)) {
+      // No reply at all when nothing was asked for (answerNearbySearch
+      // returns null) — same silent default every other unprompted event in
+      // this bot follows (an unmentioned group text, a group photo with no
+      // active trip). LINE's location-share message can't carry an @mention
+      // the way group text can, so "is a search actually pending for this
+      // subject" is the only signal available for "was this meant for the
+      // bot" — see placesCommands.ts's own comment.
+      const subjectId = subjectIdForSource(event.source);
+      const reply = await answerNearbySearch(
+        env.ACCOUNTS,
+        subjectId,
+        env.GOOGLE_MAPS_API_KEY,
+        event.message.latitude,
+        event.message.longitude
+      );
+      if (reply !== null) {
+        await replyOrPush(event, reply, env);
+      }
     } else if (isUnsupportedMessageEvent(event)) {
       await replyOrPush(event, "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ", env);
     }
   } catch (err) {
-    if (isTextMessageEvent(event) || isUnsupportedMessageEvent(event)) {
+    if (isTextMessageEvent(event) || isLocationMessageEvent(event) || isUnsupportedMessageEvent(event)) {
       await replyOrPush(event, "ขอโทษด้วย เกิดข้อผิดพลาดตอนบันทึก ลองใหม่อีกครั้งนะ", env).catch(() => undefined);
     }
     console.error("webhook handling failed", err);
@@ -1361,14 +1397,21 @@ async function processWebhookEvents(body: LineWebhookBody, env: Env, origin: str
   // forced one at a time.
   const otherEventsBySubject = new Map<string, typeof otherEvents>();
   for (const event of otherEvents) {
-    // Only text/unsupported events (the two kinds handleOneOtherEvent
+    // Only text/location/unsupported events (the kinds handleOneOtherEvent
     // actually does anything with) have a real, typed `source` — LINE's
     // other event types (follow/unfollow/join/leave/etc., none of which
     // this bot handles) fall through isTextMessageEvent/
-    // isUnsupportedMessageEvent and get silently ignored either way, so
-    // their grouping key doesn't matter.
+    // isLocationMessageEvent/isUnsupportedMessageEvent and get silently
+    // ignored either way, so their grouping key doesn't matter. Location
+    // events need the same one-at-a-time-per-subject treatment as text —
+    // they read/clear the same place-search pending slot (state.ts) that a
+    // preceding "หา...ใกล้ฉัน" text command in the same webhook call could
+    // have just set, the identical bundling race the comment above already
+    // covers for pendingConfirmation.
     const subjectId =
-      isTextMessageEvent(event) || isUnsupportedMessageEvent(event) ? subjectIdForSource(event.source) : "unrecognized";
+      isTextMessageEvent(event) || isLocationMessageEvent(event) || isUnsupportedMessageEvent(event)
+        ? subjectIdForSource(event.source)
+        : "unrecognized";
     const forSubject = otherEventsBySubject.get(subjectId) ?? [];
     forSubject.push(event);
     otherEventsBySubject.set(subjectId, forSubject);

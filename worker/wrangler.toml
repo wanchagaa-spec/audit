@@ -25,3 +25,8 @@ id = "18630d0859b24d9591cd9025ab557cfe"
 #   STATE_SIGNING_SECRET      - any random string, used to sign the OAuth state param
 #   GEMINI_API_KEY            - from https://aistudio.google.com/apikey (free tier) — powers
 #                               "ถาม <คำถาม>" / "วิเคราะห์" (see aiCommands.ts, PLAN.md 15.6)
+#   GOOGLE_MAPS_API_KEY       - a Maps Platform API key (Places API (New) enabled — NOT the
+#                               older "Places API") from the same Google Cloud project — powers
+#                               "หา...ใกล้ฉัน" (see places.ts, PLAN.md 17.30/17.31). A flat key,
+#                               not OAuth — optional, same degrade-gracefully treatment as
+#                               GEMINI_API_KEY if left unset

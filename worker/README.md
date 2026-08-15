@@ -79,6 +79,24 @@ see PLAN.md 15.10 for why this one feature deliberately breaks from the rest of 
    which model this uses and why). A single-user chat bot's Q&A feature is nowhere near
    enough traffic to hit them under normal use.
 
+### 4.5. Get a Google Maps API key (powers "หา...ใกล้ฉัน")
+
+Unlike every other Google integration in this bot, place search doesn't need OAuth at all —
+it's just a flat API key, the same shape as `GEMINI_API_KEY` above (PLAN.md 17.30/17.31).
+
+1. In the same Google Cloud project as before (or a new one — doesn't need to match), go to
+   **APIs & Services → Library**, search for **Places API (New)**, and click **Enable**. Note
+   the "(New)" — this bot uses the newer Places API (Text Search), not the older "Places API"
+   (they're two separate entries in the Library and bill/behave differently; see PLAN.md
+   17.31 for why the newer one was chosen: free-text keyword search only exists there,
+   the older API's Nearby Search only takes a fixed list of place-type categories).
+2. Go to **APIs & Services → Credentials → Create Credentials → API key**. Copy the key.
+3. Strongly recommended: click into the new key and under **API restrictions**, restrict it to
+   just **Places API (New)** — an unrestricted key that leaks can be used against your Cloud
+   billing for anything, not just this bot's place search.
+4. This is optional, same as `GEMINI_API_KEY` — skip it and every other feature works fine;
+   "หา...ใกล้ฉัน" will just reply that the feature isn't set up yet instead of crashing.
+
 ### 5. Deploy — no terminal needed, everything runs on GitHub
 
 Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
@@ -95,6 +113,7 @@ Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
    | `GOOGLE_CLIENT_SECRET` | from step 3 |
    | `STATE_SIGNING_SECRET` | any long random string you make up |
    | `GEMINI_API_KEY` | from step 4 (optional — omit and "ถาม"/"วิเคราะห์" just always reply with the fallback message) |
+   | `GOOGLE_MAPS_API_KEY` | from step 4.5 (optional — omit and "หา...ใกล้ฉัน" just replies that the feature isn't set up) |
 
 2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
    **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
@@ -499,6 +518,29 @@ contain the word "นัด" (a common Thai word for "appointment") could get mi
 attempted calendar create instead of reaching the task/email handler. Fixed by checking Task's
 and Gmail's own fixed, unambiguous command prefixes first — they never overlap with anything
 Calendar's own matcher recognizes, so this can't affect a genuine calendar command.
+
+### Nearby places (PLAN.md 17.30/17.31)
+
+Find something nearby using your real GPS location, shared through LINE's own location-sharing
+UI — the sixth Google integration this bot connects to, and the only one that doesn't need
+OAuth at all: place search is public data, not tied to any Google account, so it just uses a
+flat `GOOGLE_MAPS_API_KEY` (see setup step 4.5 above). Backed by Places API (New)'s Text
+Search, not the older/legacy Places API — see `places.ts`'s own comment for why (free-text
+keyword search only exists on the newer API's Text Search; the older API's closest equivalent,
+Nearby Search, only takes a fixed enum of place-type categories, not arbitrary Thai keywords).
+
+- `หา<สิ่งที่จะหา>ใกล้ฉัน` (or `...ใกล้ตัว` / `...แถวนี้` / `...ใกล้ๆ`) — e.g. "หาร้านกาแฟใกล้ฉัน".
+  The bot asks you to share your current location (tap the **+** icon next to the message box
+  in LINE → **Location**); once you share it, it searches within ~1.5km and replies with up to
+  5 results (name, rating if available, address, and a Google Maps link each).
+- No confirm-before-save step, unlike every write-capable feature in this bot — a place search
+  never creates, changes, or sends anything, it only reads back public place data.
+- The location-share message itself carries no text or @mention (LINE's location-sharing UI
+  has no way to attach either), so in group mode "was this meant for the bot" is answered by
+  whether a search is actually pending for that group (set by an earlier *mentioned*
+  "หา...ใกล้ฉัน" text command), not by re-mentioning the bot on the location share itself — the
+  same "trip active" pattern trip photos already use for the same reason. An unprompted
+  location share with nothing pending gets no reply at all, in either mode.
 
 ### Diary (PLAN.md 15.4)
 
