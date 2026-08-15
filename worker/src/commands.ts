@@ -130,7 +130,8 @@ export function buildHelpText(): string {
     // on purpose: read (inbox summaries only, no full body) + send only, no
     // reply/archive/delete/mark-as-read — see gmail.ts's own comment.
     "• เช็คอีเมล (ดูอีเมลใหม่ที่ยังไม่ได้อ่าน)",
-    "• ส่งอีเมล ถึง <อีเมลผู้รับ> เรื่อง <หัวข้อ> ข้อความ <เนื้อหา> — ยืนยันก่อนส่งทุกครั้ง ส่งแล้วเรียกคืนไม่ได้",
+    "• ส่งอีเมล ถึง <อีเมลผู้รับ หรือ ชื่อผู้ติดต่อ> เรื่อง <หัวข้อ> ข้อความ <เนื้อหา> — ยืนยันก่อนส่งทุกครั้ง ส่งแล้วเรียกคืนไม่ได้ พิมพ์ชื่อผู้ติดต่อแทนอีเมลเต็มๆได้เลย (PLAN.md 17.34)",
+    "• อีเมลของ<ชื่อผู้ติดต่อ> — ค้นหาอีเมลของผู้ติดต่อเฉยๆ ไม่ต้องส่งก็ได้",
     "",
     "📍 หาสถานที่ใกล้ตัว (Google Maps)",
     // Only the "ask for GPS via LINE's own location-sharing" flow (PLAN.md

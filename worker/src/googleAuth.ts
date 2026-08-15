@@ -7,12 +7,16 @@ const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 // gmail.readonly + gmail.send: inbox check + send only (PLAN.md 17.28) — the
 // narrowest pair of Gmail scopes that can still do what was actually asked
 // for; deliberately not gmail.modify (no mark-as-read/archive/label/delete)
+// contacts.readonly: name-to-email lookup for "ส่งอีเมล ถึง <ชื่อ>" and
+// "อีเมลของ<ชื่อ>" (PLAN.md 17.34) — read-only, this bot never writes to
+// Google Contacts
 const OAUTH_SCOPES = [
   "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/tasks",
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/contacts.readonly",
 ].join(" ");
 
 export function buildGoogleAuthorizeUrl(params: {

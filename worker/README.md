@@ -46,16 +46,17 @@ must never reach a browser.
    complete sign-in. See PLAN.md for the tradeoff against submitting the app for Google
    verification instead.
 5. Under **APIs & Services → Library**, make sure **Google Sheets API**, **Google Drive
-   API**, **Google Calendar API**, **Google Tasks API**, and **Gmail API** are all "Enabled"
-   for this project (search each by name, click it, click Enable if it isn't already) — a
-   disabled API fails with a clear `has not been used in this project` error from Google, so
-   this is worth checking first if something that used to work suddenly errors after adding a
-   new feature.
-6. **If you already linked accounts before the calendar/tasks/Gmail feature existed**: those
-   refresh tokens only cover whatever scopes existed at the time (e.g. `drive.file` alone, or
-   `drive.file` + `calendar.events` + `tasks` but not `gmail.readonly`/`gmail.send`). The bot
-   detects this itself and replies with a fresh link when someone tries a command that needs a
-   scope they don't have yet — no action needed here, just know it'll ask once per
+   API**, **Google Calendar API**, **Google Tasks API**, **Gmail API**, and **People API** are
+   all "Enabled" for this project (search each by name, click it, click Enable if it isn't
+   already) — a disabled API fails with a clear `has not been used in this project` error from
+   Google, so this is worth checking first if something that used to work suddenly errors
+   after adding a new feature.
+6. **If you already linked accounts before the calendar/tasks/Gmail/contacts feature
+   existed**: those refresh tokens only cover whatever scopes existed at the time (e.g.
+   `drive.file` alone, or `drive.file` + `calendar.events` + `tasks` + `gmail.readonly` +
+   `gmail.send` but not `contacts.readonly`). The bot detects this itself and replies with a
+   fresh link when someone tries a command that needs a scope they don't have yet — no action
+   needed here, just know it'll ask once per
    already-linked person, per new scope.
 
 ### 4. Get a free Gemini API key (powers "ถาม <คำถาม>" / "วิเคราะห์")
@@ -495,17 +496,22 @@ appointment is easy to undo, a sent email is not.
 
 - `เช็คอีเมล` (or `เช็คเมล` / `อีเมลใหม่` / `มีอีเมลใหม่ไหม` / `มีเมลใหม่ไหม`) — lists up to 5
   unread inbox messages: sender, subject, and Gmail's own snippet.
-- `ส่งอีเมล ถึง <อีเมลผู้รับ> เรื่อง <หัวข้อ> ข้อความ <เนื้อหา>` — e.g. "ส่งอีเมล ถึง
-  friend@example.com เรื่อง นัดพรุ่งนี้ ข้อความ เจอกันบ่ายสองนะ". Confirms before actually
-  sending, same as every other write action — but with an explicit "ส่งแล้วเรียกคืนไม่ได้"
-  ("can't be recalled once sent") warning in the confirmation prompt, since this is the one
-  action in the bot where confirming means the data leaves the bot's own system for good.
+- `ส่งอีเมล ถึง <อีเมลผู้รับ หรือ ชื่อผู้ติดต่อ> เรื่อง <หัวข้อ> ข้อความ <เนื้อหา>` — e.g. "ส่งอีเมล
+  ถึง friend@example.com เรื่อง นัดพรุ่งนี้ ข้อความ เจอกันบ่ายสองนะ" or "ส่งอีเมล ถึง สมชาย เรื่อง
+  ...". A recipient can be a full address or a Google Contacts name (PLAN.md 17.34) — see the
+  Contacts section below for how that resolution works. Confirms before actually sending, same
+  as every other write action — but with an explicit "ส่งแล้วเรียกคืนไม่ได้" ("can't be recalled
+  once sent") warning in the confirmation prompt, since this is the one action in the bot where
+  confirming means the data leaves the bot's own system for good. The confirm prompt always
+  shows the *resolved* address, even when a name was typed, so a wrong contact match still gets
+  caught before anything sends, not after.
 - The AI interpreter (`ถาม`-free natural language) can also trigger a send, but it's under a
-  strict extra rule: it will **never** guess, invent, or infer an email address from a name or
-  relationship (e.g. "แฟน", "หัวหน้า") — if the message doesn't contain a literal address the
-  user typed themselves, it always asks for one instead of proceeding, even if that address
-  was mentioned earlier in the conversation history (unlike calendar/transaction intents,
-  which are allowed to reconstruct missing details from recent turns).
+  strict extra rule: it will **never** guess, invent, or infer an email address *or a contact
+  name* from a vague relationship word (e.g. "แฟน", "หัวหน้า") — if the message doesn't contain
+  a literal address or a real name the user typed themselves, it always asks for one instead of
+  proceeding, even if that person was mentioned earlier in the conversation history (unlike
+  calendar/transaction intents, which are allowed to reconstruct missing details from recent
+  turns).
 
 Needs the extra `gmail.readonly` + `gmail.send` OAuth scopes (see setup step 3.5/3.6 above) —
 accounts linked before this feature existed will get a one-time re-link prompt the first time
@@ -518,6 +524,29 @@ contain the word "นัด" (a common Thai word for "appointment") could get mi
 attempted calendar create instead of reaching the task/email handler. Fixed by checking Task's
 and Gmail's own fixed, unambiguous command prefixes first — they never overlap with anything
 Calendar's own matcher recognizes, so this can't affect a genuine calendar command.
+
+### Contacts (PLAN.md 17.34)
+
+Look up a Google Contacts entry's email address by name — the seventh Google service this bot
+connects to, and the second (after Places) to be read-only. Built specifically to pair with
+Gmail: so "ส่งอีเมล ถึง <ชื่อ>" doesn't require typing someone's full address every time.
+
+- `อีเมลของ<ชื่อผู้ติดต่อ>` — e.g. "อีเมลของสมชาย". Looks the name up against your Google
+  Contacts and replies with the matching email address, if there's exactly one match. No
+  server-side keyword search on the People API side reliable enough to depend on (its
+  dedicated `searchContacts` endpoint has a known indexing lag for freshly added/edited
+  contacts), so this fetches your contacts once and matches by name client-side — the same
+  pattern already used for Task/Gmail keyword lookups.
+- If more than one contact's name contains the search term, it lists them and asks you to be
+  more specific instead of guessing which one you meant. If a matching contact has no email on
+  file, it says so instead of erroring.
+- Feeds directly into `ส่งอีเมล ถึง <ชื่อ>` (see the Gmail section above) — the same lookup, the
+  same "found exactly one, or ask" behavior, and the confirm-before-send step always shows the
+  address it actually resolved to before anything sends.
+
+Needs the extra `contacts.readonly` OAuth scope (see setup step 3.5/3.6 above) — accounts
+linked before this feature existed will get a one-time re-link prompt the first time they try
+a contact lookup or a name-addressed send.
 
 ### Nearby places (PLAN.md 17.30/17.31)
 
