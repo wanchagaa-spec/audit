@@ -92,6 +92,14 @@ let googleContacts = []; // simulates the account's People API connections: {nam
 let simulateInsufficientContactsScope = false;
 let simulateContactsApiDisabled = false;
 
+// Amadeus travel-search mocks (PLAN.md 17.37)
+const amadeusTokenCalls = []; // records {clientId, clientSecret} per token request
+let amadeusFlightOffers = []; // raw Flight Offers Search `data` entries for the next call
+let amadeusHotelIds = []; // hotel ids the by-city listing returns
+let amadeusHotelOffers = []; // raw hotel-offers `data` entries for the next call
+const amadeusFlightSearchCalls = []; // records the query params of each flight search
+let simulateAmadeusFailure = false; // makes the next Amadeus API call fail, to exercise the links-still-sent degradation
+
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
@@ -563,6 +571,34 @@ globalThis.fetch = async (url, init = {}) => {
     }));
     return new Response(JSON.stringify({ connections }), { status: 200 });
   }
+  if (u.startsWith("https://test.api.amadeus.com/")) {
+    if (simulateAmadeusFailure) {
+      simulateAmadeusFailure = false;
+      return new Response(JSON.stringify({ errors: [{ code: 38194, title: "simulated failure" }] }), { status: 500 });
+    }
+    const parsed = new URL(u);
+    if (parsed.pathname === "/v1/security/oauth2/token") {
+      const params = new URLSearchParams(init.body);
+      amadeusTokenCalls.push({ clientId: params.get("client_id"), clientSecret: params.get("client_secret") });
+      return new Response(JSON.stringify({ access_token: "fake-amadeus-token", expires_in: 1799 }), { status: 200 });
+    }
+    if (parsed.pathname === "/v2/shopping/flight-offers") {
+      amadeusFlightSearchCalls.push({
+        origin: parsed.searchParams.get("originLocationCode"),
+        destination: parsed.searchParams.get("destinationLocationCode"),
+        date: parsed.searchParams.get("departureDate"),
+        currency: parsed.searchParams.get("currencyCode"),
+        auth: init.headers?.Authorization,
+      });
+      return new Response(JSON.stringify({ data: amadeusFlightOffers }), { status: 200 });
+    }
+    if (parsed.pathname === "/v1/reference-data/locations/hotels/by-city") {
+      return new Response(JSON.stringify({ data: amadeusHotelIds.map((hotelId) => ({ hotelId })) }), { status: 200 });
+    }
+    if (parsed.pathname === "/v3/shopping/hotel-offers") {
+      return new Response(JSON.stringify({ data: amadeusHotelOffers }), { status: 200 });
+    }
+  }
   if (u === "https://places.googleapis.com/v1/places:searchText") {
     const body = JSON.parse(init.body);
     const circle = body.locationBias?.circle;
@@ -848,6 +884,8 @@ const env = {
   LINE_CHANNEL_ACCESS_TOKEN: "test-channel-access-token",
   GEMINI_API_KEY: "test-gemini-key",
   GOOGLE_MAPS_API_KEY: "test-maps-key",
+  AMADEUS_CLIENT_ID: "test-amadeus-id",
+  AMADEUS_CLIENT_SECRET: "test-amadeus-secret",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -1086,6 +1124,12 @@ check(
     helpReply.includes("📔 ไดอารี่") &&
     helpReply.includes("🤖 ถามคำถาม/วิเคราะห์")
 );
+// LINE truncates any text message over 5000 chars *silently* (line.ts
+// slices, the API would reject) — the help text is the one reply that
+// keeps growing with every feature, and it already brushed this cap once
+// (PLAN.md 17.35: a draft hit 5,998 and had to be trimmed). This check
+// fails the build before a silent mid-sentence cutoff ever ships.
+check("the full help text stays under LINE's 5000-character message cap", helpReply.length <= 5000);
 
 const weekReply = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
 check("week summary doesn't error", weekReply.includes("รายรับ"));
@@ -1096,7 +1140,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("11 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("12 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -2662,6 +2706,216 @@ check(
   replies.length === repliesBeforeBundled + 2 && replies.at(-1).includes("ร้านสะดวกซื้อ")
 );
 
+// 8.9. Travel search (PLAN.md 17.37): real flight/hotel prices via
+// Amadeus when configured, links always, 12Go links-only for bus/train,
+// and graceful degradation on every price-lookup failure mode.
+
+// Flight search via the deterministic "หาตั๋วเครื่องบิน" command.
+amadeusFlightOffers = [
+  {
+    itineraries: [
+      {
+        segments: [
+          { departure: { iataCode: "BKK", at: "2026-12-20T08:00:00" }, arrival: { iataCode: "CNX", at: "2026-12-20T09:20:00" }, carrierCode: "TG" },
+        ],
+      },
+    ],
+    price: { grandTotal: "1540.00", currency: "THB" },
+    validatingAirlineCodes: ["TG"],
+  },
+  {
+    itineraries: [
+      {
+        segments: [
+          { departure: { iataCode: "BKK", at: "2026-12-20T10:00:00" }, arrival: { iataCode: "UTH", at: "2026-12-20T11:00:00" }, carrierCode: "WE" },
+          { departure: { iataCode: "UTH", at: "2026-12-20T12:00:00" }, arrival: { iataCode: "CNX", at: "2026-12-20T13:00:00" }, carrierCode: "WE" },
+        ],
+      },
+    ],
+    price: { grandTotal: "2100.00", currency: "THB" },
+    validatingAirlineCodes: ["WE"],
+  },
+];
+const flightSearchReply = await handleTextMessage(env, lineUserId, "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", origin);
+check(
+  "flight search shows real prices from the API: airline, times, direct/stops, THB price",
+  flightSearchReply.includes("TG 08:00→09:20 บินตรง") &&
+    flightSearchReply.includes("1,540 THB") &&
+    flightSearchReply.includes("ต่อเครื่อง 1 ครั้ง") &&
+    flightSearchReply.includes("2,100 THB")
+);
+check(
+  "the flight search hit the API with the parsed route/date in THB",
+  amadeusFlightSearchCalls.at(-1)?.origin === "BKK" &&
+    amadeusFlightSearchCalls.at(-1)?.destination === "CNX" &&
+    amadeusFlightSearchCalls.at(-1)?.date === "2026-12-20" &&
+    amadeusFlightSearchCalls.at(-1)?.currency === "THB" &&
+    amadeusFlightSearchCalls.at(-1)?.auth === "Bearer fake-amadeus-token"
+);
+check(
+  "the flight reply always includes Google Flights + Skyscanner booking links with the route prefilled",
+  flightSearchReply.includes("google.com/travel/flights") &&
+    flightSearchReply.includes("skyscanner.co.th/transport/flights/bkk/cnx/261220/")
+);
+check(
+  "the flight reply warns that low-cost carriers may be missing from the in-chat prices",
+  flightSearchReply.includes("โลว์คอสต์")
+);
+check("the token request used the configured credentials", amadeusTokenCalls.at(-1)?.clientId === "test-amadeus-id");
+
+// Hotel search via the deterministic "หาที่พัก" command — cheapest-first.
+amadeusHotelIds = ["HOTEL_A", "HOTEL_B"];
+amadeusHotelOffers = [
+  { hotel: { name: "โรงแรมแพง" }, offers: [{ price: { total: "4500.00", currency: "THB" } }] },
+  { hotel: { name: "โรงแรมถูก" }, offers: [{ price: { total: "1200.00", currency: "THB" } }] },
+];
+const hotelSearchReply = await handleTextMessage(env, lineUserId, "หาที่พัก เชียงใหม่ 20/12/2569 ถึง 22/12/2569", origin);
+check(
+  "hotel search shows real prices cheapest-first",
+  hotelSearchReply.indexOf("โรงแรมถูก") !== -1 &&
+    hotelSearchReply.indexOf("โรงแรมถูก") < hotelSearchReply.indexOf("โรงแรมแพง") &&
+    hotelSearchReply.includes("1,200 THB")
+);
+check(
+  "the hotel reply always includes Agoda + Booking links with city and dates prefilled",
+  hotelSearchReply.includes("agoda.com/search") &&
+    hotelSearchReply.includes("booking.com/searchresults.html") &&
+    hotelSearchReply.includes("checkin=2026-12-20") &&
+    hotelSearchReply.includes("checkout=2026-12-22")
+);
+
+// One date and no checkout = a 1-night stay.
+const hotelOneNightReply = await handleTextMessage(env, lineUserId, "หาที่พัก ภูเก็ต 20/12/2569", origin);
+check(
+  "a hotel search with only a check-in date defaults to one night",
+  hotelOneNightReply.includes("checkin=2026-12-20") && hotelOneNightReply.includes("checkout=2026-12-21")
+);
+
+// Bus/train: links-only by design (no free price API exists), said openly.
+const groundSearchReply = await handleTextMessage(env, lineUserId, "หาตั๋วรถทัวร์ กรุงเทพ ไป ขอนแก่น 20/12/2569", origin);
+check(
+  "ground-transport search sends a 12Go link with the route and date prefilled, and says prices live there",
+  groundSearchReply.includes("12go.asia/th/travel/bangkok/khon-kaen?date=2026-12-20") &&
+    groundSearchReply.includes("ยังไม่มีระบบราคา")
+);
+
+// Degradation tier 1: Amadeus API fails — links still go out with a note.
+simulateAmadeusFailure = true;
+const flightApiFailReply = await handleTextMessage(env, lineUserId, "หาตั๋วเครื่องบิน กรุงเทพ ไป ภูเก็ต 21/12/2569", origin);
+check(
+  "an Amadeus API failure degrades to links-plus-note, never an empty or error reply",
+  flightApiFailReply.includes("ดึงราคามาโชว์ตรงนี้ไม่สำเร็จ") &&
+    flightApiFailReply.includes("google.com/travel/flights") &&
+    flightApiFailReply.includes("skyscanner.co.th")
+);
+
+// Degradation tier 2: no Amadeus key configured at all — links-only with a
+// different, honest note (same optional-secret treatment as GOOGLE_MAPS_API_KEY).
+const realAmadeusId = env.AMADEUS_CLIENT_ID;
+env.AMADEUS_CLIENT_ID = "";
+const flightNoKeyReply = await handleTextMessage(env, lineUserId, "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", origin);
+check(
+  "with no Amadeus key configured, the reply says so and still sends the booking links",
+  flightNoKeyReply.includes("ยังไม่ได้ตั้งค่า Amadeus API key") && flightNoKeyReply.includes("google.com/travel/flights")
+);
+env.AMADEUS_CLIENT_ID = realAmadeusId;
+
+// An unknown city in the deterministic command points at the AI phrasing
+// instead of failing silently.
+const unknownCityReply = await handleTextMessage(env, lineUserId, "หาตั๋วเครื่องบิน กรุงเทพ ไป เบตง 20/12/2569", origin);
+check("an unknown city in the fixed command suggests the natural-language phrasing", unknownCityReply.includes("ยังไม่รู้จักเมือง"));
+
+// Regression guard: "หาตั๋ว..."/"หาที่พัก..." must reach the travel handler,
+// not commands.ts's transaction-search regex ("^(?:ค้นหา|หา)...") which
+// would otherwise swallow them as a money-note search — and "หาที่พักใกล้ฉัน"
+// must still be a GPS nearby-search (Places), not a travel search.
+check(
+  "travel commands aren't swallowed by the transaction-search matcher",
+  !flightSearchReply.includes("ไม่พบรายการ") && !hotelSearchReply.includes("ไม่พบรายการ")
+);
+const nearbyHotelReply = await handleTextMessage(env, lineUserId, "หาที่พักใกล้ฉัน", origin);
+check(
+  '"หาที่พักใกล้ฉัน" still routes to the GPS nearby-search prompt, not travel search',
+  nearbyHotelReply.includes("แชร์ตำแหน่งปัจจุบัน")
+);
+// Clear the pending place search directly in KV — sending a chat message
+// to cancel it would itself get parsed as a new (incomplete) money entry
+// by the deterministic fallback chain and leave a dangling clarification.
+await env.ACCOUNTS.delete(`place-search:${lineUserId}`);
+
+// AI-interpreted paths route to the exact same answer functions.
+simulateInterpreterResult = {
+  intent: "flight_search",
+  flightOriginCode: "BKK",
+  flightDestinationCode: "CNX",
+  flightOriginName: "กรุงเทพ",
+  flightDestinationName: "เชียงใหม่",
+  flightDateKey: "2026-12-20",
+};
+const interpFlightReply = await handleTextMessage(env, lineUserId, "อยากบินไปเชียงใหม่วันที่ 20 ธันวา", origin);
+check(
+  "an AI-interpreted flight search reaches the same price+links pipeline",
+  interpFlightReply.includes("TG 08:00→09:20") && interpFlightReply.includes("skyscanner.co.th")
+);
+
+simulateInterpreterResult = {
+  intent: "hotel_search",
+  hotelCityCode: "CNX",
+  hotelCityName: "เชียงใหม่",
+  hotelCheckInDateKey: "2026-12-20",
+  hotelCheckOutDateKey: "2026-12-22",
+};
+const interpHotelReply = await handleTextMessage(env, lineUserId, "หาที่นอนเชียงใหม่ 20-22 ธันวาหน่อย", origin);
+check(
+  "an AI-interpreted hotel search reaches the same price+links pipeline",
+  interpHotelReply.includes("โรงแรมถูก") && interpHotelReply.includes("agoda.com")
+);
+
+simulateInterpreterResult = {
+  intent: "ground_ticket_search",
+  groundOriginName: "กรุงเทพ",
+  groundDestinationName: "เชียงใหม่",
+  groundOriginSlug: "bangkok",
+  groundDestinationSlug: "chiang-mai",
+};
+const interpGroundReply = await handleTextMessage(env, lineUserId, "นั่งรถไฟไปเชียงใหม่มีไหม", origin);
+check(
+  "an AI-interpreted ground-ticket search sends the 12Go link (no date = no date param)",
+  interpGroundReply.includes("12go.asia/th/travel/bangkok/chiang-mai") && !interpGroundReply.includes("date=")
+);
+
+// validateIntent must reject malformed codes/slugs outright — they feed
+// straight into API queries and URL paths.
+simulateInterpreterResult = {
+  intent: "flight_search",
+  flightOriginCode: "BKKX", // not a 3-letter IATA code
+  flightDestinationCode: "CNX",
+  flightOriginName: "กรุงเทพ",
+  flightDestinationName: "เชียงใหม่",
+  flightDateKey: "2026-12-20",
+};
+const interpBadCodeReply = await handleTextMessage(env, lineUserId, "อยากบินไปเชียงใหม่", origin);
+check(
+  "a malformed IATA code from the model is rejected by validateIntent (falls through to the deterministic chain)",
+  !interpBadCodeReply.includes("skyscanner.co.th")
+);
+
+check(
+  "the interpreter prompt actually teaches all three travel intents",
+  (() => {
+    const lastInterpreterCall = geminiRequests.findLast((r) => r.systemInstruction.includes(INTERPRETER_MARKER));
+    return (
+      lastInterpreterCall.systemInstruction.includes('"intent":"flight_search"') &&
+      lastInterpreterCall.systemInstruction.includes('"intent":"hotel_search"') &&
+      lastInterpreterCall.systemInstruction.includes('"intent":"ground_ticket_search"')
+    );
+  })()
+);
+
+amadeusFlightOffers = [];
+amadeusHotelIds = [];
+amadeusHotelOffers = [];
+
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
 // Snapshotted here rather than assuming diaryTabMetaCalls starts at 0 — the
@@ -4191,6 +4445,24 @@ googleContacts = [{ name: "ผู้ขายวัสดุ", email: "supplier@
 const groupContactLookupReply = await handleGroupTextMessage(env, groupId, groupSenderA, "อีเมลของผู้ขายวัสดุ", origin);
 check("contact lookup works in group mode", groupContactLookupReply.includes("supplier@example.com"));
 googleContacts = [];
+
+// Travel search (PLAN.md 17.37) works in group mode too — dispatch is the
+// same shared dispatchLegacyCommands, so one wiring check suffices.
+amadeusFlightOffers = [
+  {
+    itineraries: [
+      { segments: [{ departure: { iataCode: "BKK", at: "2026-12-20T08:00:00" }, arrival: { iataCode: "CNX", at: "2026-12-20T09:20:00" }, carrierCode: "TG" }] },
+    ],
+    price: { grandTotal: "1540.00", currency: "THB" },
+    validatingAirlineCodes: ["TG"],
+  },
+];
+const groupFlightReply = await handleGroupTextMessage(env, groupId, groupSenderA, "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", origin);
+check(
+  "flight search works in group mode: prices plus booking links",
+  groupFlightReply.includes("1,540 THB") && groupFlightReply.includes("google.com/travel/flights")
+);
+amadeusFlightOffers = [];
 
 // Nearby places (PLAN.md 17.30) works in group mode too — but the location-
 // share message itself can't carry a text/@mention at all (LINE's

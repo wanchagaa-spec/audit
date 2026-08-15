@@ -30,3 +30,9 @@ id = "18630d0859b24d9591cd9025ab557cfe"
 #                               "หา...ใกล้ฉัน" (see places.ts, PLAN.md 17.30/17.31). A flat key,
 #                               not OAuth — optional, same degrade-gracefully treatment as
 #                               GEMINI_API_KEY if left unset
+#   AMADEUS_CLIENT_ID         - Amadeus Self-Service app credentials from
+#   AMADEUS_CLIENT_SECRET       https://developers.amadeus.com (free signup) — power the real
+#                               flight/hotel prices in travel search (travel.ts, PLAN.md 17.37).
+#                               Optional: without them the feature still sends booking links,
+#                               just without in-chat prices. Base URL defaults to the free test
+#                               environment; set the AMADEUS_BASE_URL var below to switch.
