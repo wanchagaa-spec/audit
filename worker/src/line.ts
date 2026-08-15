@@ -49,11 +49,27 @@ export interface LineUnsupportedMessageEvent {
   timestamp: number;
 }
 
+// LINE's native "share location" message (PLAN.md 17.30) — sent through the
+// chat UI's location picker, never typed as text, so it carries no text/
+// mention info at all (unlike LineMessageEvent). Accepted from group
+// sources too, same as image/video, since the "was this meant for the bot"
+// question is answered structurally by whether a place search is pending
+// for this subject (see placesCommands.ts's answerNearbySearch), not by an
+// @mention LINE has no way to attach to this message type.
+export interface LineLocationMessageEvent {
+  type: "message";
+  message: { type: "location"; latitude: number; longitude: number };
+  source: LineEventSource;
+  replyToken: string;
+  timestamp: number;
+}
+
 export interface LineWebhookBody {
   events: Array<
     | LineMessageEvent
     | LineImageMessageEvent
     | LineVideoMessageEvent
+    | LineLocationMessageEvent
     | LineUnsupportedMessageEvent
     | { type: string; [key: string]: unknown }
   >;
@@ -152,6 +168,18 @@ export function isVideoMessageEvent(
   );
 }
 
+export function isLocationMessageEvent(
+  event: LineWebhookBody["events"][number]
+): event is LineLocationMessageEvent {
+  const sourceType = (event as LineLocationMessageEvent).source?.type;
+  return (
+    event.type === "message" &&
+    "message" in event &&
+    (event as LineLocationMessageEvent).message?.type === "location" &&
+    (sourceType === "user" || sourceType === "group")
+  );
+}
+
 /** Any other real message type LINE can send (file, audio, sticker,
  * location, ...) that this bot doesn't handle yet. Used so handleWebhook can
  * still send *something* back instead of silently dropping the event — a
@@ -171,7 +199,7 @@ export function isUnsupportedMessageEvent(
     event.type === "message" &&
     "message" in event &&
     typeof (event as LineUnsupportedMessageEvent).message?.type === "string" &&
-    !["text", "image", "video"].includes((event as LineUnsupportedMessageEvent).message.type) &&
+    !["text", "image", "video", "location"].includes((event as LineUnsupportedMessageEvent).message.type) &&
     (event as LineUnsupportedMessageEvent).source?.type === "user"
   );
 }

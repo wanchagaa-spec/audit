@@ -82,6 +82,10 @@ const gmailSent = []; // simulates sent messages: {to, subject, body} (decoded f
 let gmailIdSeq = 0;
 let simulateInsufficientGmailScope = false;
 let simulateGmailApiDisabled = false;
+
+const placesSearchCalls = []; // records {location, keyword, key} for every Nearby Search call made
+let nearbyPlacesResults = []; // simulates Google Places' `results` array for the next search
+let simulatePlacesApiError = false;
 let simulateGmailScopeErrorAs400 = false; // regression: Gmail can answer a scope problem with a non-401/403 status, unlike Calendar/Tasks
 
 let diaryTabExists = false;
@@ -517,6 +521,18 @@ globalThis.fetch = async (url, init = {}) => {
       );
     }
   }
+  if (u.startsWith("https://maps.googleapis.com/maps/api/place/nearbysearch/json")) {
+    const parsed = new URL(u);
+    placesSearchCalls.push({
+      location: parsed.searchParams.get("location"),
+      keyword: parsed.searchParams.get("keyword"),
+      key: parsed.searchParams.get("key"),
+    });
+    if (simulatePlacesApiError) {
+      return new Response(JSON.stringify({ status: "REQUEST_DENIED", error_message: "simulated API failure" }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ status: "OK", results: nearbyPlacesResults }), { status: 200 });
+  }
   if (u.includes("?fields=sheets.properties.title")) {
     diaryTabMetaCalls += 1;
     const titles = [
@@ -785,6 +801,7 @@ const env = {
   LINE_CHANNEL_SECRET: "test-channel-secret",
   LINE_CHANNEL_ACCESS_TOKEN: "test-channel-access-token",
   GEMINI_API_KEY: "test-gemini-key",
+  GOOGLE_MAPS_API_KEY: "test-maps-key",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -1010,7 +1027,7 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
   "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("10 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  greetingReply.includes("11 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -2315,6 +2332,115 @@ check(
 );
 simulateGmailApiDisabled = false;
 
+// 8.7. Nearby places (PLAN.md 17.30): "หา<คำ>ใกล้ฉัน" + LINE's native
+// location-sharing message. No OAuth, no confirm-before-save — the only
+// feature in this bot backed by a flat API key instead of a linked Google
+// account, and the only one that reads back public data without ever
+// writing/sending anything. Goes through the real webhook path (not
+// handleTextMessage directly) since a location message is a distinct LINE
+// event type handleTextMessage never sees.
+function personalLocationEvent(lat, lng, replyToken = "reply-location-1") {
+  return {
+    type: "message",
+    message: { type: "location", latitude: lat, longitude: lng },
+    source: { type: "user", userId: lineUserId },
+    replyToken,
+    timestamp: Date.now(),
+  };
+}
+
+async function sendWebhookEvents(events) {
+  const rawBody = JSON.stringify({ events });
+  const signature = await signLineBody(rawBody, env.LINE_CHANNEL_SECRET);
+  await handleWebhook(
+    new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": signature }, body: rawBody }),
+    env
+  );
+}
+
+nearbyPlacesResults = [{ name: "ร้านกาแฟดีใจ", vicinity: "ถนนสุขุมวิท", rating: 4.5, place_id: "place-1" }];
+
+const repliesBeforeNearbyPrompt = replies.length;
+await sendWebhookEvents([personalTextEvent("หาร้านกาแฟใกล้ฉัน", "reply-nearby-1")]);
+check(
+  "asking to find something nearby prompts to share a location",
+  replies.length === repliesBeforeNearbyPrompt + 1 && replies.at(-1).includes("ตำแหน่ง")
+);
+
+const repliesBeforeNearbyResult = replies.length;
+await sendWebhookEvents([personalLocationEvent(13.75, 100.5, "reply-nearby-2")]);
+check(
+  "sharing the location afterward searches nearby and replies with results",
+  replies.length === repliesBeforeNearbyResult + 1 &&
+    replies.at(-1).includes("ร้านกาแฟดีใจ") &&
+    replies.at(-1).includes("ถนนสุขุมวิท")
+);
+check(
+  "the search actually used the shared coordinates, the right keyword, and the configured API key",
+  placesSearchCalls.at(-1).location === "13.75,100.5" &&
+    placesSearchCalls.at(-1).keyword === "ร้านกาแฟ" &&
+    placesSearchCalls.at(-1).key === "test-maps-key"
+);
+
+const repliesBeforeUnpromptedLocation = replies.length;
+await sendWebhookEvents([personalLocationEvent(13.75, 100.5, "reply-nearby-3")]);
+check("sharing a location with nothing pending gets no reply at all", replies.length === repliesBeforeUnpromptedLocation);
+
+// A search with no nearby results degrades gracefully, not silently.
+nearbyPlacesResults = [];
+await sendWebhookEvents([personalTextEvent("หาปั๊มน้ำมันใกล้ฉัน", "reply-nearby-4")]);
+const repliesBeforeZeroResults = replies.length;
+await sendWebhookEvents([personalLocationEvent(13.75, 100.5, "reply-nearby-5")]);
+check(
+  "no nearby results says so instead of an empty list",
+  replies.length === repliesBeforeZeroResults + 1 && replies.at(-1).includes("ไม่พบ")
+);
+
+// A real Places API failure (bad key/quota/etc.) degrades to one generic
+// message — there's no per-user remediation to offer here, unlike Calendar/
+// Tasks/Gmail's re-link vs. enable-API split (an admin-only key/config
+// problem either way), so this doesn't need a dedicated error class.
+simulatePlacesApiError = true;
+await sendWebhookEvents([personalTextEvent("หาร้านอาหารใกล้ฉัน", "reply-nearby-6")]);
+const repliesBeforeApiError = replies.length;
+await sendWebhookEvents([personalLocationEvent(13.75, 100.5, "reply-nearby-7")]);
+check(
+  "a real Places API failure degrades to a friendly message, not a crash",
+  replies.length === repliesBeforeApiError + 1 && replies.at(-1).includes("ไม่สำเร็จ")
+);
+simulatePlacesApiError = false;
+
+// Missing GOOGLE_MAPS_API_KEY (optional, same degrade-gracefully treatment
+// as GEMINI_API_KEY) tells the user the feature isn't set up instead of
+// crashing or silently doing nothing.
+const realMapsKey = env.GOOGLE_MAPS_API_KEY;
+env.GOOGLE_MAPS_API_KEY = "";
+await sendWebhookEvents([personalTextEvent("หาที่จอดรถใกล้ฉัน", "reply-nearby-8")]);
+const repliesBeforeMissingKey = replies.length;
+await sendWebhookEvents([personalLocationEvent(13.75, 100.5, "reply-nearby-9")]);
+check(
+  "a missing Maps API key tells the user the feature isn't set up, not a crash",
+  replies.length === repliesBeforeMissingKey + 1 && replies.at(-1).includes("ยังไม่พร้อมใช้งาน")
+);
+env.GOOGLE_MAPS_API_KEY = realMapsKey;
+
+// LINE can bundle the "หา...ใกล้ฉัน" text command and the location share
+// into the same webhook call (e.g. a fast double-tap) — same real bundling
+// race as trip-start + photo (see processWebhookEvents's own comment); text
+// events are grouped and processed before location events for the same
+// subject, so the pending state the text just set is what the bundled
+// location event resolves, not left stranded for a message that never comes.
+nearbyPlacesResults = [{ name: "ร้านสะดวกซื้อ", vicinity: "ซอยหลังบ้าน", place_id: "place-3" }];
+const repliesBeforeBundled = replies.length;
+await sendWebhookEvents([
+  personalTextEvent("หาร้านสะดวกซื้อใกล้ฉัน", "reply-nearby-10"),
+  personalLocationEvent(13.8, 100.6, "reply-nearby-11"),
+]);
+check(
+  "a text command and its location share bundled into the same webhook call still resolve correctly",
+  replies.length === repliesBeforeBundled + 2 && replies.at(-1).includes("ร้านสะดวกซื้อ")
+);
+
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
 // Snapshotted here rather than assuming diaryTabMetaCalls starts at 0 — the
@@ -3566,6 +3692,45 @@ check(
   "any group member can confirm the shared pending email send, same as calendar/diary/task above",
   groupEmailConfirmReply.includes("vendor@example.com") && gmailSent.length === groupEmailSentCountBefore + 1
 );
+
+// Nearby places (PLAN.md 17.30) works in group mode too — but the location-
+// share message itself can't carry a text/@mention at all (LINE's
+// location-sharing UI has none), so "is this meant for the bot" is answered
+// purely by whether a search is pending, unlike every other group feature
+// which is gated by @mention on every single message.
+nearbyPlacesResults = [{ name: "ร้านชานม", vicinity: "ตลาดนัด", rating: 4.0, place_id: "place-group-1" }];
+const groupNearbyPromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "หาร้านชานมใกล้ฉัน", origin);
+check("asking to find something nearby in a group prompts to share a location", groupNearbyPromptReply.includes("ตำแหน่ง"));
+
+function groupLocationEvent(lat, lng, userId = groupSenderB, replyToken = "reply-group-location-1") {
+  return {
+    type: "message",
+    message: { type: "location", latitude: lat, longitude: lng },
+    source: { type: "group", groupId, userId },
+    replyToken,
+    timestamp: Date.now(),
+  };
+}
+const groupNearbyBody = JSON.stringify({ events: [groupLocationEvent(13.9, 100.7)] });
+const groupNearbySignature = await signLineBody(groupNearbyBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeGroupNearbyResult = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": groupNearbySignature }, body: groupNearbyBody }),
+  env
+);
+check(
+  "sharing location in the group afterward (no @mention possible on a location message) still resolves the pending search",
+  replies.length === repliesBeforeGroupNearbyResult + 1 && replies.at(-1).includes("ร้านชานม")
+);
+
+const groupNearbyBody2 = JSON.stringify({ events: [groupLocationEvent(13.9, 100.7, groupSenderA, "reply-group-location-2")] });
+const groupNearbySignature2 = await signLineBody(groupNearbyBody2, env.LINE_CHANNEL_SECRET);
+const repliesBeforeGroupUnprompted = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": groupNearbySignature2 }, body: groupNearbyBody2 }),
+  env
+);
+check("an unprompted location share in a group gets no reply at all either", replies.length === repliesBeforeGroupUnprompted);
 
 // Trip start/status via the real webhook path (mentioned, since these are
 // text commands) — sets up the group's active trip for the photo

@@ -165,3 +165,34 @@ export async function getUserProvince(kv: KVNamespace, lineUserId: string): Prom
 export async function setUserProvince(kv: KVNamespace, lineUserId: string, province: UserProvince): Promise<void> {
   await kv.put(`province:${lineUserId}`, JSON.stringify(province));
 }
+
+// Nearby-place search (PLAN.md 17.30): "หา<คำ>ใกล้ฉัน" only records what the
+// user wants to search for — LINE's location-sharing message that resolves
+// it always arrives as a *separate* message with no way to attach text, so
+// this bridges the two the same way the money-clarification pending slot
+// (getPending/setPending above) bridges an ambiguous message and its
+// follow-up answer. Same short TTL: a share that never comes shouldn't
+// leave a stale search waiting indefinitely.
+const PLACE_SEARCH_TTL_SECONDS = 10 * 60;
+
+export interface PendingPlaceSearch {
+  keyword: string;
+}
+
+export async function getPendingPlaceSearch(kv: KVNamespace, subjectId: string): Promise<PendingPlaceSearch | null> {
+  const raw = await kv.get(`place-search:${subjectId}`);
+  return raw ? (JSON.parse(raw) as PendingPlaceSearch) : null;
+}
+
+export async function setPendingPlaceSearch(
+  kv: KVNamespace,
+  subjectId: string,
+  pending: PendingPlaceSearch | null
+): Promise<void> {
+  const key = `place-search:${subjectId}`;
+  if (pending === null) {
+    await kv.delete(key);
+    return;
+  }
+  await kv.put(key, JSON.stringify(pending), { expirationTtl: PLACE_SEARCH_TTL_SECONDS });
+}
