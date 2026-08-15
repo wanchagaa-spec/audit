@@ -98,22 +98,27 @@ it's just a flat API key, the same shape as `GEMINI_API_KEY` above (PLAN.md 17.3
 4. This is optional, same as `GEMINI_API_KEY` — skip it and every other feature works fine;
    "หา...ใกล้ฉัน" will just reply that the feature isn't set up yet instead of crashing.
 
-### 4.6. Get free Amadeus API credentials (powers the prices in travel search)
+### 4.6. Get a free Travelpayouts token (powers the prices in travel search)
 
 Optional, same flat-key shape as the two keys above — travel search ("หาตั๋วเครื่องบิน...",
 "หาที่พัก...") always sends prefilled booking links (Google Flights/Skyscanner/Agoda/Booking/
-12Go) even without this; the credentials only add the real prices shown in chat (PLAN.md 17.37).
+12Go) even without this; the token only adds the real prices shown in chat (PLAN.md 17.37).
 
-1. Sign up free at https://developers.amadeus.com → **My Self-Service Workspace** →
-   **Create new app**. Copy the **API Key** (client id) and **API Secret** (client secret).
-2. New apps start in the **test environment** (free, no billing info) — limited, cached data
-   on a subset of routes, which is fine for trying the feature out. For live data, promote
-   the app to production in the same dashboard (still has a free monthly request quota) and
-   set the Worker var `AMADEUS_BASE_URL` to `https://api.amadeus.com`; without that var the
-   bot uses the test environment.
-3. Known coverage gap either way: Thai low-cost carriers (Thai AirAsia, Nok Air, Thai Lion)
-   mostly aren't in Amadeus' inventory, so in-chat prices can miss the cheapest option on
-   domestic routes — the reply says so itself and the links always show the full picture.
+1. Sign up free at https://www.travelpayouts.com (it's Aviasales/Hotellook's partner
+   platform — signup is free, no card). In the dashboard, find your **API token** (under
+   the developers/API section).
+2. That single token covers both the flight-prices API (Aviasales) and the hotel-prices
+   API (Hotellook) this bot uses.
+3. Honest caveat, said in every reply too: these are **cached** prices from recent
+   searches, not a live availability check — great for comparing (and the cache does
+   include Thai low-cost carriers like AirAsia/Nok Air), but the linked sites are the
+   source of truth at booking time.
+
+> **Why not Amadeus?** This feature was originally built against Amadeus Self-Service —
+> then turned out to be unusable before it ever went live: Amadeus decommissioned that
+> entire portal on 2026-07-17 (new registrations closed earlier; existing keys disabled),
+> discovered when signing up found no Register button at all. Travelpayouts is the
+> surviving free option.
 
 ### 5. Deploy — no terminal needed, everything runs on GitHub
 
@@ -132,8 +137,7 @@ Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
    | `STATE_SIGNING_SECRET` | any long random string you make up |
    | `GEMINI_API_KEY` | from step 4 (optional — omit and "ถาม"/"วิเคราะห์" just always reply with the fallback message) |
    | `GOOGLE_MAPS_API_KEY` | from step 4.5 (optional — omit and "หา...ใกล้ฉัน" just replies that the feature isn't set up) |
-   | `AMADEUS_CLIENT_ID` | from step 4.6 (optional — omit and travel search sends booking links without in-chat prices) |
-   | `AMADEUS_CLIENT_SECRET` | from step 4.6 (optional, pairs with the id above) |
+   | `TRAVELPAYOUTS_TOKEN` | from step 4.6 (optional — omit and travel search sends booking links without in-chat prices) |
 
 2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
    **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
@@ -607,15 +611,17 @@ honest note — a search never comes back empty-handed just because the price AP
 - `หาตั๋วเครื่องบิน <ต้นทาง> ไป <ปลายทาง> <วันที่>` — e.g. "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่
   20/12/2569" — or any natural phrasing via the AI interpreter ("หาตั๋วไปเชียงใหม่พรุ่งนี้", no
   origin = assumes Bangkok, stated in the reply so a wrong assumption is visible). Shows real
-  one-way prices (airline, times, direct/stops, THB) from Amadeus when configured, plus
-  Google Flights and Skyscanner links prefilled with the route and date. Every flight reply
-  carries a standing caveat: Thai low-cost carriers mostly aren't in Amadeus' inventory, so
-  the links can show cheaper options than the in-chat list.
+  one-way cached prices (airline — Thai low-cost carriers included, departure time,
+  direct/stops, baht) from Travelpayouts/Aviasales when configured, plus Google Flights and
+  Skyscanner links prefilled with the route and date. Every reply carries a standing caveat
+  that these are cached prices from recent searches, not a live quote — the linked sites are
+  the source of truth at booking time.
 - `หาที่พัก <เมือง> <เช็คอิน> ถึง <เช็คเอาท์>` — e.g. "หาที่พัก เชียงใหม่ 20/12/2569 ถึง
-  22/12/2569" (omit the checkout for a 1-night stay). Shows the cheapest real offers first,
-  plus Agoda and Booking.com links prefilled with city and dates. Note: "หาที่พักใกล้ฉัน" is
-  deliberately still a GPS nearby-search (the section above), not a travel search — the
-  dispatch order guarantees it.
+  22/12/2569" (omit the checkout for a 1-night stay). Shows the cheapest cached offers first
+  (Hotellook resolves free-text Thai/English city names itself, so any city works — no city
+  table needed for hotels), plus Agoda and Booking.com links prefilled with city and dates.
+  Note: "หาที่พักใกล้ฉัน" is deliberately still a GPS nearby-search (the section above), not a
+  travel search — the dispatch order guarantees it.
 - `หาตั๋วรถทัวร์ <ต้นทาง> ไป <ปลายทาง> [วันที่]` (also `หาตั๋วรถไฟ`) — ground transport has no
   free price API at all, so this tier is links-only *by design and says so in the reply*: a
   12Go link prefilled with the route (and date if given), covering bus/train/van/ferry
@@ -625,9 +631,10 @@ honest note — a search never comes back empty-handed just because the price AP
   (`^[A-Z]{3}$`, lowercase-kebab) since they feed straight into API queries and URLs, and the
   deterministic `หาตั๋ว...` commands use a small built-in table of common Thai cities,
   pointing anything unknown at the natural-language phrasing instead.
-- Backed by Amadeus Self-Service (`travel.ts`, setup step 4.6) — an app-level key pair like
-  `GOOGLE_MAPS_API_KEY`, so there are no per-user re-link error classes; any Amadeus problem
-  is admin-only and degrades to links.
+- Backed by Travelpayouts' Data API (`travel.ts`, setup step 4.6 — including why it replaced
+  Amadeus before this ever went live) — an app-level token like `GOOGLE_MAPS_API_KEY`, so
+  there are no per-user re-link error classes; any Travelpayouts problem is admin-only and
+  degrades to links.
 
 ### Diary (PLAN.md 15.4)
 

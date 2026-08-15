@@ -92,13 +92,12 @@ let googleContacts = []; // simulates the account's People API connections: {nam
 let simulateInsufficientContactsScope = false;
 let simulateContactsApiDisabled = false;
 
-// Amadeus travel-search mocks (PLAN.md 17.37)
-const amadeusTokenCalls = []; // records {clientId, clientSecret} per token request
-let amadeusFlightOffers = []; // raw Flight Offers Search `data` entries for the next call
-let amadeusHotelIds = []; // hotel ids the by-city listing returns
-let amadeusHotelOffers = []; // raw hotel-offers `data` entries for the next call
-const amadeusFlightSearchCalls = []; // records the query params of each flight search
-let simulateAmadeusFailure = false; // makes the next Amadeus API call fail, to exercise the links-still-sent degradation
+// Travelpayouts travel-search mocks (PLAN.md 17.37)
+let travelpayoutsFlightOffers = []; // raw prices_for_dates `data` entries for the next call
+let travelpayoutsHotelOffers = []; // raw Hotellook cache entries (bare array) for the next call
+const travelpayoutsFlightSearchCalls = []; // records the query params + token of each flight search
+const travelpayoutsHotelSearchCalls = []; // records the query params of each hotel search
+let simulateTravelpayoutsFailure = false; // makes the next Travelpayouts API call fail, to exercise the links-still-sent degradation
 
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
@@ -571,32 +570,32 @@ globalThis.fetch = async (url, init = {}) => {
     }));
     return new Response(JSON.stringify({ connections }), { status: 200 });
   }
-  if (u.startsWith("https://test.api.amadeus.com/")) {
-    if (simulateAmadeusFailure) {
-      simulateAmadeusFailure = false;
-      return new Response(JSON.stringify({ errors: [{ code: 38194, title: "simulated failure" }] }), { status: 500 });
+  if (u.startsWith("https://api.travelpayouts.com/") || u.startsWith("https://engine.hotellook.com/")) {
+    if (simulateTravelpayoutsFailure) {
+      simulateTravelpayoutsFailure = false;
+      return new Response(JSON.stringify({ success: false, error: "simulated failure" }), { status: 500 });
     }
     const parsed = new URL(u);
-    if (parsed.pathname === "/v1/security/oauth2/token") {
-      const params = new URLSearchParams(init.body);
-      amadeusTokenCalls.push({ clientId: params.get("client_id"), clientSecret: params.get("client_secret") });
-      return new Response(JSON.stringify({ access_token: "fake-amadeus-token", expires_in: 1799 }), { status: 200 });
-    }
-    if (parsed.pathname === "/v2/shopping/flight-offers") {
-      amadeusFlightSearchCalls.push({
-        origin: parsed.searchParams.get("originLocationCode"),
-        destination: parsed.searchParams.get("destinationLocationCode"),
-        date: parsed.searchParams.get("departureDate"),
-        currency: parsed.searchParams.get("currencyCode"),
-        auth: init.headers?.Authorization,
+    if (parsed.pathname === "/aviasales/v3/prices_for_dates") {
+      travelpayoutsFlightSearchCalls.push({
+        origin: parsed.searchParams.get("origin"),
+        destination: parsed.searchParams.get("destination"),
+        date: parsed.searchParams.get("departure_at"),
+        currency: parsed.searchParams.get("currency"),
+        oneWay: parsed.searchParams.get("one_way"),
+        token: init.headers?.["X-Access-Token"],
       });
-      return new Response(JSON.stringify({ data: amadeusFlightOffers }), { status: 200 });
+      return new Response(JSON.stringify({ success: true, data: travelpayoutsFlightOffers, currency: "thb" }), { status: 200 });
     }
-    if (parsed.pathname === "/v1/reference-data/locations/hotels/by-city") {
-      return new Response(JSON.stringify({ data: amadeusHotelIds.map((hotelId) => ({ hotelId })) }), { status: 200 });
-    }
-    if (parsed.pathname === "/v3/shopping/hotel-offers") {
-      return new Response(JSON.stringify({ data: amadeusHotelOffers }), { status: 200 });
+    if (parsed.pathname === "/api/v2/cache.json") {
+      travelpayoutsHotelSearchCalls.push({
+        location: parsed.searchParams.get("location"),
+        checkIn: parsed.searchParams.get("checkIn"),
+        checkOut: parsed.searchParams.get("checkOut"),
+        currency: parsed.searchParams.get("currency"),
+      });
+      // Hotellook's cache endpoint returns a bare array, no {data} envelope.
+      return new Response(JSON.stringify(travelpayoutsHotelOffers), { status: 200 });
     }
   }
   if (u === "https://places.googleapis.com/v1/places:searchText") {
@@ -884,8 +883,7 @@ const env = {
   LINE_CHANNEL_ACCESS_TOKEN: "test-channel-access-token",
   GEMINI_API_KEY: "test-gemini-key",
   GOOGLE_MAPS_API_KEY: "test-maps-key",
-  AMADEUS_CLIENT_ID: "test-amadeus-id",
-  AMADEUS_CLIENT_SECRET: "test-amadeus-secret",
+  TRAVELPAYOUTS_TOKEN: "test-travelpayouts-token",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -2711,46 +2709,26 @@ check(
 // and graceful degradation on every price-lookup failure mode.
 
 // Flight search via the deterministic "หาตั๋วเครื่องบิน" command.
-amadeusFlightOffers = [
-  {
-    itineraries: [
-      {
-        segments: [
-          { departure: { iataCode: "BKK", at: "2026-12-20T08:00:00" }, arrival: { iataCode: "CNX", at: "2026-12-20T09:20:00" }, carrierCode: "TG" },
-        ],
-      },
-    ],
-    price: { grandTotal: "1540.00", currency: "THB" },
-    validatingAirlineCodes: ["TG"],
-  },
-  {
-    itineraries: [
-      {
-        segments: [
-          { departure: { iataCode: "BKK", at: "2026-12-20T10:00:00" }, arrival: { iataCode: "UTH", at: "2026-12-20T11:00:00" }, carrierCode: "WE" },
-          { departure: { iataCode: "UTH", at: "2026-12-20T12:00:00" }, arrival: { iataCode: "CNX", at: "2026-12-20T13:00:00" }, carrierCode: "WE" },
-        ],
-      },
-    ],
-    price: { grandTotal: "2100.00", currency: "THB" },
-    validatingAirlineCodes: ["WE"],
-  },
+travelpayoutsFlightOffers = [
+  { price: 1540, airline: "FD", departure_at: "2026-12-20T08:00:00+07:00", transfers: 0 },
+  { price: 2100, airline: "WE", departure_at: "2026-12-20T10:00:00+07:00", transfers: 1 },
 ];
 const flightSearchReply = await handleTextMessage(env, lineUserId, "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", origin);
 check(
-  "flight search shows real prices from the API: airline, times, direct/stops, THB price",
-  flightSearchReply.includes("TG 08:00→09:20 บินตรง") &&
-    flightSearchReply.includes("1,540 THB") &&
+  "flight search shows real cached prices: airline (LCCs included), departure time, direct/stops, baht price",
+  flightSearchReply.includes("FD ออก 08:00 บินตรง") &&
+    flightSearchReply.includes("1,540 บาท") &&
     flightSearchReply.includes("ต่อเครื่อง 1 ครั้ง") &&
-    flightSearchReply.includes("2,100 THB")
+    flightSearchReply.includes("2,100 บาท")
 );
 check(
-  "the flight search hit the API with the parsed route/date in THB",
-  amadeusFlightSearchCalls.at(-1)?.origin === "BKK" &&
-    amadeusFlightSearchCalls.at(-1)?.destination === "CNX" &&
-    amadeusFlightSearchCalls.at(-1)?.date === "2026-12-20" &&
-    amadeusFlightSearchCalls.at(-1)?.currency === "THB" &&
-    amadeusFlightSearchCalls.at(-1)?.auth === "Bearer fake-amadeus-token"
+  "the flight search hit the API with the parsed route/date, one-way, THB, and the configured token",
+  travelpayoutsFlightSearchCalls.at(-1)?.origin === "BKK" &&
+    travelpayoutsFlightSearchCalls.at(-1)?.destination === "CNX" &&
+    travelpayoutsFlightSearchCalls.at(-1)?.date === "2026-12-20" &&
+    travelpayoutsFlightSearchCalls.at(-1)?.currency === "thb" &&
+    travelpayoutsFlightSearchCalls.at(-1)?.oneWay === "true" &&
+    travelpayoutsFlightSearchCalls.at(-1)?.token === "test-travelpayouts-token"
 );
 check(
   "the flight reply always includes Google Flights + Skyscanner booking links with the route prefilled",
@@ -2758,23 +2736,28 @@ check(
     flightSearchReply.includes("skyscanner.co.th/transport/flights/bkk/cnx/261220/")
 );
 check(
-  "the flight reply warns that low-cost carriers may be missing from the in-chat prices",
-  flightSearchReply.includes("โลว์คอสต์")
+  "the flight reply says prices come from a search cache, not a live quote",
+  flightSearchReply.includes("แคช")
 );
-check("the token request used the configured credentials", amadeusTokenCalls.at(-1)?.clientId === "test-amadeus-id");
 
 // Hotel search via the deterministic "หาที่พัก" command — cheapest-first.
-amadeusHotelIds = ["HOTEL_A", "HOTEL_B"];
-amadeusHotelOffers = [
-  { hotel: { name: "โรงแรมแพง" }, offers: [{ price: { total: "4500.00", currency: "THB" } }] },
-  { hotel: { name: "โรงแรมถูก" }, offers: [{ price: { total: "1200.00", currency: "THB" } }] },
+travelpayoutsHotelOffers = [
+  { hotelName: "โรงแรมแพง", stars: 5, priceFrom: 4500 },
+  { hotelName: "โรงแรมถูก", stars: 3, priceFrom: 1200 },
 ];
 const hotelSearchReply = await handleTextMessage(env, lineUserId, "หาที่พัก เชียงใหม่ 20/12/2569 ถึง 22/12/2569", origin);
 check(
-  "hotel search shows real prices cheapest-first",
+  "hotel search shows real cached prices cheapest-first, with star ratings",
   hotelSearchReply.indexOf("โรงแรมถูก") !== -1 &&
     hotelSearchReply.indexOf("โรงแรมถูก") < hotelSearchReply.indexOf("โรงแรมแพง") &&
-    hotelSearchReply.includes("1,200 THB")
+    hotelSearchReply.includes("เริ่ม 1,200 บาท") &&
+    hotelSearchReply.includes("⭐3")
+);
+check(
+  "the hotel lookup sent the free-text city name and stay dates to Hotellook",
+  travelpayoutsHotelSearchCalls.at(-1)?.location === "เชียงใหม่" &&
+    travelpayoutsHotelSearchCalls.at(-1)?.checkIn === "2026-12-20" &&
+    travelpayoutsHotelSearchCalls.at(-1)?.checkOut === "2026-12-22"
 );
 check(
   "the hotel reply always includes Agoda + Booking links with city and dates prefilled",
@@ -2800,10 +2783,10 @@ check(
 );
 
 // Degradation tier 1: Amadeus API fails — links still go out with a note.
-simulateAmadeusFailure = true;
+simulateTravelpayoutsFailure = true;
 const flightApiFailReply = await handleTextMessage(env, lineUserId, "หาตั๋วเครื่องบิน กรุงเทพ ไป ภูเก็ต 21/12/2569", origin);
 check(
-  "an Amadeus API failure degrades to links-plus-note, never an empty or error reply",
+  "a Travelpayouts API failure degrades to links-plus-note, never an empty or error reply",
   flightApiFailReply.includes("ดึงราคามาโชว์ตรงนี้ไม่สำเร็จ") &&
     flightApiFailReply.includes("google.com/travel/flights") &&
     flightApiFailReply.includes("skyscanner.co.th")
@@ -2811,14 +2794,14 @@ check(
 
 // Degradation tier 2: no Amadeus key configured at all — links-only with a
 // different, honest note (same optional-secret treatment as GOOGLE_MAPS_API_KEY).
-const realAmadeusId = env.AMADEUS_CLIENT_ID;
-env.AMADEUS_CLIENT_ID = "";
+const realTravelpayoutsToken = env.TRAVELPAYOUTS_TOKEN;
+env.TRAVELPAYOUTS_TOKEN = "";
 const flightNoKeyReply = await handleTextMessage(env, lineUserId, "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", origin);
 check(
-  "with no Amadeus key configured, the reply says so and still sends the booking links",
-  flightNoKeyReply.includes("ยังไม่ได้ตั้งค่า Amadeus API key") && flightNoKeyReply.includes("google.com/travel/flights")
+  "with no Travelpayouts token configured, the reply says so and still sends the booking links",
+  flightNoKeyReply.includes("ยังไม่ได้ตั้งค่า Travelpayouts token") && flightNoKeyReply.includes("google.com/travel/flights")
 );
-env.AMADEUS_CLIENT_ID = realAmadeusId;
+env.TRAVELPAYOUTS_TOKEN = realTravelpayoutsToken;
 
 // An unknown city in the deterministic command points at the AI phrasing
 // instead of failing silently.
@@ -2855,12 +2838,11 @@ simulateInterpreterResult = {
 const interpFlightReply = await handleTextMessage(env, lineUserId, "อยากบินไปเชียงใหม่วันที่ 20 ธันวา", origin);
 check(
   "an AI-interpreted flight search reaches the same price+links pipeline",
-  interpFlightReply.includes("TG 08:00→09:20") && interpFlightReply.includes("skyscanner.co.th")
+  interpFlightReply.includes("FD ออก 08:00") && interpFlightReply.includes("skyscanner.co.th")
 );
 
 simulateInterpreterResult = {
   intent: "hotel_search",
-  hotelCityCode: "CNX",
   hotelCityName: "เชียงใหม่",
   hotelCheckInDateKey: "2026-12-20",
   hotelCheckOutDateKey: "2026-12-22",
@@ -2912,9 +2894,8 @@ check(
   })()
 );
 
-amadeusFlightOffers = [];
-amadeusHotelIds = [];
-amadeusHotelOffers = [];
+travelpayoutsFlightOffers = [];
+travelpayoutsHotelOffers = [];
 
 // 9. Diary (PLAN.md 15.4): confirm-before-save with a default and an explicit
 // category, monthly listing, and search.
@@ -4448,21 +4429,13 @@ googleContacts = [];
 
 // Travel search (PLAN.md 17.37) works in group mode too — dispatch is the
 // same shared dispatchLegacyCommands, so one wiring check suffices.
-amadeusFlightOffers = [
-  {
-    itineraries: [
-      { segments: [{ departure: { iataCode: "BKK", at: "2026-12-20T08:00:00" }, arrival: { iataCode: "CNX", at: "2026-12-20T09:20:00" }, carrierCode: "TG" }] },
-    ],
-    price: { grandTotal: "1540.00", currency: "THB" },
-    validatingAirlineCodes: ["TG"],
-  },
-];
+travelpayoutsFlightOffers = [{ price: 1540, airline: "FD", departure_at: "2026-12-20T08:00:00+07:00", transfers: 0 }];
 const groupFlightReply = await handleGroupTextMessage(env, groupId, groupSenderA, "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", origin);
 check(
   "flight search works in group mode: prices plus booking links",
-  groupFlightReply.includes("1,540 THB") && groupFlightReply.includes("google.com/travel/flights")
+  groupFlightReply.includes("1,540 บาท") && groupFlightReply.includes("google.com/travel/flights")
 );
-amadeusFlightOffers = [];
+travelpayoutsFlightOffers = [];
 
 // Nearby places (PLAN.md 17.30) works in group mode too — but the location-
 // share message itself can't carry a text/@mention at all (LINE's

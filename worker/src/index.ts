@@ -112,14 +112,12 @@ export interface Env {
   // the feature isn't set up yet if this is missing, same as ถาม/วิเคราะห์
   // do when GEMINI_API_KEY is missing.
   GOOGLE_MAPS_API_KEY: string;
-  // Amadeus Self-Service credentials (PLAN.md 17.37) — optional, same
+  // Travelpayouts Data API token (PLAN.md 17.37) — optional, same
   // degrade-gracefully treatment as GOOGLE_MAPS_API_KEY: travel search
-  // still sends booking links without them, it just can't show prices in
-  // chat. AMADEUS_BASE_URL picks test vs production environment (defaults
-  // to test — see travel.ts).
-  AMADEUS_CLIENT_ID: string;
-  AMADEUS_CLIENT_SECRET: string;
-  AMADEUS_BASE_URL?: string;
+  // still sends booking links without it, it just can't show prices in
+  // chat. (Originally Amadeus credentials — swapped before ever going
+  // live, see travel.ts's own comment on the Amadeus portal shutdown.)
+  TRAVELPAYOUTS_TOKEN: string;
 }
 
 const WELCOME_MESSAGE = [
@@ -510,7 +508,6 @@ async function runInterpretedIntent(
         });
       case "hotel_search":
         return await answerHotelSearch(env, {
-          cityCode: intent.hotelCityCode,
           cityName: intent.hotelCityName,
           checkInDateKey: intent.hotelCheckInDateKey,
           checkOutDateKey: intent.hotelCheckOutDateKey,

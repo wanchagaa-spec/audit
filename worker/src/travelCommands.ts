@@ -13,22 +13,18 @@
 // links with a one-line note — a search must never come back empty-handed
 // just because the price API did.
 
-import {
-  AMADEUS_DEFAULT_BASE_URL,
-  getAmadeusToken,
-  searchFlightOffers,
-  searchHotelOffers,
-} from "./travel.ts";
+import { searchFlightOffers, searchHotelOffers } from "./travel.ts";
 import { addDaysToDateKey, bangkokYear, extractDate, formatThaiDateLabel } from "./thaiDate.ts";
 import type { Env } from "./index.ts";
 
-// Thai low-cost carriers (AirAsia, Nok Air, Thai Lion) mostly aren't in
-// Amadeus' inventory, so the in-chat prices can miss the cheapest actual
-// option on domestic routes — the links always show them. Said once per
-// flight reply so a user never mistakes the in-chat list for exhaustive.
-const FLIGHT_COVERAGE_NOTE = "หมายเหตุ: สายการบินโลว์คอสต์บางเจ้าอาจไม่โชว์ราคาตรงนี้ กดลิงก์ดูได้ครบกว่า และราคาจริงยึดตามหน้าเว็บตอนจอง";
+// Travelpayouts serves *cached* prices from recent Aviasales/Hotellook
+// searches, not a live availability check — great for comparing (and its
+// cache actually covers Thai low-cost carriers, unlike Amadeus' GDS
+// inventory did), but a cached fare can be hours-to-days old. Said once
+// per reply so a user never mistakes the in-chat list for a live quote.
+const FLIGHT_COVERAGE_NOTE = "หมายเหตุ: ราคาจากแคชการค้นหาล่าสุด อาจไม่ใช่ราคาสดเป๊ะๆ — ราคาจริงยึดตามหน้าเว็บตอนกดจอง";
 
-const PRICES_NOT_CONFIGURED_NOTE = "(ยังไม่ได้ตั้งค่า Amadeus API key เลยยังโชว์ราคาในแชทไม่ได้ — กดลิงก์ดูราคาได้เลย)";
+const PRICES_NOT_CONFIGURED_NOTE = "(ยังไม่ได้ตั้งค่า Travelpayouts token เลยยังโชว์ราคาในแชทไม่ได้ — กดลิงก์ดูราคาได้เลย)";
 const PRICES_FAILED_NOTE = "(ดึงราคามาโชว์ตรงนี้ไม่สำเร็จตอนนี้ — กดลิงก์ดูราคาได้เลย)";
 
 // Legacy-command city table: Thai name -> IATA code + 12Go slug + English
@@ -102,21 +98,19 @@ export async function answerFlightSearch(env: Env, req: FlightSearchRequest): Pr
   const links = ["เทียบราคา/กดจองได้เลย:", ...buildFlightLinks(req.originCode, req.destinationCode, req.dateKey)];
 
   let priceBlock: string[];
-  if (!env.AMADEUS_CLIENT_ID || !env.AMADEUS_CLIENT_SECRET) {
+  if (!env.TRAVELPAYOUTS_TOKEN) {
     priceBlock = [PRICES_NOT_CONFIGURED_NOTE];
   } else {
     try {
-      const baseUrl = env.AMADEUS_BASE_URL || AMADEUS_DEFAULT_BASE_URL;
-      const token = await getAmadeusToken(baseUrl, env.AMADEUS_CLIENT_ID, env.AMADEUS_CLIENT_SECRET);
-      const offers = await searchFlightOffers(baseUrl, token, req.originCode, req.destinationCode, req.dateKey);
+      const offers = await searchFlightOffers(env.TRAVELPAYOUTS_TOKEN, req.originCode, req.destinationCode, req.dateKey);
       priceBlock =
         offers.length === 0
-          ? ["ไม่เจอราคาเที่ยวบินในระบบสำหรับเส้นทาง/วันนี้ (กดลิงก์ดูอาจมีตัวเลือกมากกว่า)"]
+          ? ["ไม่เจอราคาเที่ยวบินในแคชสำหรับเส้นทาง/วันนี้ (กดลิงก์ดูอาจมีตัวเลือกมากกว่า)"]
           : [
-              "ราคาที่เจอ (ต่อคน เที่ยวเดียว):",
+              "ราคาที่เจอ (ต่อคน เที่ยวเดียว ถูกสุดก่อน):",
               ...offers.map(
                 (o, i) =>
-                  `${i + 1}. ${o.airline} ${o.departTime}→${o.arriveTime}${o.stops === 0 ? " บินตรง" : ` ต่อเครื่อง ${o.stops} ครั้ง`} — ${o.priceLabel}`
+                  `${i + 1}. ${o.airline} ออก ${o.departTime}${o.stops === 0 ? " บินตรง" : ` ต่อเครื่อง ${o.stops} ครั้ง`} — ${o.priceLabel}`
               ),
             ];
     } catch (err) {
@@ -129,7 +123,8 @@ export async function answerFlightSearch(env: Env, req: FlightSearchRequest): Pr
 }
 
 export interface HotelSearchRequest {
-  cityCode: string;
+  // Free-text city name — Hotellook resolves it itself (Thai or English),
+  // so hotels need no IATA code, unlike flights.
   cityName: string;
   checkInDateKey: string;
   checkOutDateKey: string;
@@ -140,19 +135,17 @@ export async function answerHotelSearch(env: Env, req: HotelSearchRequest): Prom
   const links = ["เทียบราคา/กดจองได้เลย:", ...buildHotelLinks(req.cityName, req.checkInDateKey, req.checkOutDateKey)];
 
   let priceBlock: string[];
-  if (!env.AMADEUS_CLIENT_ID || !env.AMADEUS_CLIENT_SECRET) {
+  if (!env.TRAVELPAYOUTS_TOKEN) {
     priceBlock = [PRICES_NOT_CONFIGURED_NOTE];
   } else {
     try {
-      const baseUrl = env.AMADEUS_BASE_URL || AMADEUS_DEFAULT_BASE_URL;
-      const token = await getAmadeusToken(baseUrl, env.AMADEUS_CLIENT_ID, env.AMADEUS_CLIENT_SECRET);
-      const offers = await searchHotelOffers(baseUrl, token, req.cityCode, req.checkInDateKey, req.checkOutDateKey);
+      const offers = await searchHotelOffers(env.TRAVELPAYOUTS_TOKEN, req.cityName, req.checkInDateKey, req.checkOutDateKey);
       priceBlock =
         offers.length === 0
-          ? ["ไม่เจอราคาที่พักในระบบสำหรับเมือง/ช่วงวันที่นี้ (กดลิงก์ดูมีตัวเลือกครบกว่าแน่นอน)"]
+          ? ["ไม่เจอราคาที่พักในแคชสำหรับเมือง/ช่วงวันที่นี้ (กดลิงก์ดูมีตัวเลือกครบกว่าแน่นอน)"]
           : [
-              "ราคาที่เจอ (รวมทั้งช่วงพัก ถูกสุดก่อน):",
-              ...offers.map((o, i) => `${i + 1}. ${o.name} — ${o.priceLabel}`),
+              "ราคาที่เจอ (ทั้งช่วงพัก ถูกสุดก่อน):",
+              ...offers.map((o, i) => `${i + 1}. ${o.name}${o.stars > 0 ? ` (⭐${o.stars})` : ""} — ${o.priceLabel}`),
             ];
     } catch (err) {
       console.error("answerHotelSearch: price lookup failed", err);
@@ -167,7 +160,7 @@ export async function answerHotelSearch(env: Env, req: HotelSearchRequest): Prom
     "",
     ...links,
     "",
-    "หมายเหตุ: ที่พักในระบบราคามีจำกัด ลิงก์ด้านบนมีตัวเลือก/โปรครบกว่า และราคาจริงยึดตามหน้าเว็บตอนจอง",
+    "หมายเหตุ: ราคาจากแคชการค้นหาล่าสุด ลิงก์ด้านบนมีตัวเลือก/โปรครบกว่า และราคาจริงยึดตามหน้าเว็บตอนจอง",
   ].join("\n");
 }
 
@@ -269,8 +262,10 @@ export async function matchTravelCommand(text: string): Promise<Handler | null> 
     const payload = hotelMatch[1].trim();
     const m = payload.match(/^(\S+)\s+(.*)$/s);
     const cityText = m ? m[1] : payload;
-    const city = lookupCity(cityText);
-    if (!city) return async () => UNKNOWN_CITY_REPLY(cityText);
+    // No lookupCity gate here, unlike flights/ground: Hotellook resolves
+    // free-text city names itself and the Agoda/Booking links take free
+    // text too, so any city works — the table is only needed where an
+    // IATA code or 12Go slug has to be derived.
     const restText = m ? m[2] : "";
     const checkIn = extractDate(restText, bangkokYear());
     if (!checkIn) {
@@ -281,7 +276,6 @@ export async function matchTravelCommand(text: string): Promise<Handler | null> 
     const checkOutDateKey = checkOut ? checkOut.dateKey : addDaysToDateKey(checkIn.dateKey, 1);
     return (env) =>
       answerHotelSearch(env, {
-        cityCode: city.iata,
         cityName: cityText,
         checkInDateKey: checkIn.dateKey,
         checkOutDateKey,

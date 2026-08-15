@@ -2035,3 +2035,22 @@ pending ถูก parser เงินตีเป็นรายจ่ายค�
 ตรงแทน) + เพิ่ม guard ถาวรกัน help text ยาวเกินเพดาน 5,000 ตัวอักษรของ LINE (เฉียดมาแล้วสองรอบ) —
 revert-and-confirm: ปิด validation ของ flight_search ชั่วคราว → test AI-interpreted พังจริง → เปิดกลับผ่านครบ
 — รวม **422 ผ่าน 0 ล้มเหลว**
+
+**เปลี่ยนแหล่งราคาก่อน merge: Amadeus → Travelpayouts** — ตอนผู้ใช้ไปสมัคร Amadeus จริงพบว่า**ไม่มีปุ่ม
+Register เหลืออยู่เลย** เช็คด้วย web search แล้วยืนยัน: Amadeus ปิดพอร์ทัล Self-Service ถาวรตั้งแต่
+17 ก.ค. 2026 (ปิดรับสมัครใหม่ก่อนหน้านั้น และ key เดิมของทุกคนถูกปิดด้วย เหลือแค่ Enterprise) — โค้ดส่วนราคา
+ที่เพิ่งเขียนจึงใช้จริงไม่ได้ตั้งแต่ยังไม่ทัน merge ทวนทางเลือกกับผู้ใช้ใหม่ (Travelpayouts / ลิงก์อย่างเดียว)
+ผู้ใช้เลือก **Travelpayouts** (แพลตฟอร์มของ Aviasales/Hotellook สมัครฟรี token เดียวใช้ได้ทั้งเที่ยวบิน+ที่พัก):
+
+- `travel.ts` เขียนใหม่: prices_for_dates (Aviasales, เที่ยวเดียว THB ถูกสุดก่อน) + Hotellook cache API
+  (ชื่อเมือง free-text ไทย/อังกฤษได้เลย → ที่พักไม่ต้องใช้รหัส IATA อีกแล้ว — hotel_search intent ตัด
+  hotelCityCode ทิ้ง และคำสั่งตรง "หาที่พัก" รับเมืองอะไรก็ได้ ไม่ติดตารางเมือง) auth เป็น token เดียว
+  (X-Access-Token) ไม่มีขั้น OAuth token แล้ว — โค้ดสั้นลง
+- ได้ข้อดีแถม: แคช Aviasales ครอบสายการบินโลว์คอสต์ไทย (AirAsia/Nok Air) ที่ Amadeus GDS ไม่มี — caveat
+  ในคำตอบเปลี่ยนจาก "โลว์คอสต์อาจไม่โชว์" เป็น "ราคาจากแคชการค้นหาล่าสุด ไม่ใช่ราคาสด ยึดหน้าเว็บตอนจอง"
+  ซึ่งเป็นข้อจำกัดจริงของแหล่งใหม่ (แคชอาจเก่าได้หลายชม.ถึงหลายวัน)
+- secrets เปลี่ยนเป็น TRAVELPAYOUTS_TOKEN ตัวเดียว (wrangler.toml + deploy workflow แก้พร้อมกัน)
+- mock/test สลับตาม (endpoint จริงของ Travelpayouts 2 ตัว, Hotellook คืน bare array ไม่มี {data} envelope
+  — บันทึกไว้ใน comment กันงง) — รวม **422 ผ่าน 0 ล้มเหลว** เท่าเดิม
+- ยังเช็คพฤติกรรม API จริงจาก sandbox ไม่ได้เหมือนเคย (ไม่มี egress) — ถ้ารูป response จริงคลาดจากที่เขียน
+  ใช้เทคนิค debug-reveal เดิม (แบบ 17.33 Places) ตามแก้ได้

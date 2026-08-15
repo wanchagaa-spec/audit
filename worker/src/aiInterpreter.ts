@@ -64,7 +64,6 @@ export type InterpretedIntent =
     }
   | {
       intent: "hotel_search";
-      hotelCityCode: string;
       hotelCityName: string;
       hotelCheckInDateKey: string;
       hotelCheckOutDateKey: string;
@@ -253,11 +252,10 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       };
     }
     case "hotel_search": {
-      if (!isValidIataCode(r.hotelCityCode) || !isNonEmptyString(r.hotelCityName)) return null;
+      if (!isNonEmptyString(r.hotelCityName)) return null;
       if (!isValidDateKey(r.hotelCheckInDateKey) || !isValidDateKey(r.hotelCheckOutDateKey)) return null;
       return {
         intent: "hotel_search",
-        hotelCityCode: r.hotelCityCode,
         hotelCityName: r.hotelCityName,
         hotelCheckInDateKey: r.hotelCheckInDateKey,
         hotelCheckOutDateKey: r.hotelCheckOutDateKey,
@@ -349,7 +347,7 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"contact_lookup","contactName":string} — ถามหาอีเมลของผู้ติดต่อคนนี้โดยตรง ไม่ใช่ตอนจะส่งอีเมล เช่น "อีเมลของสมชาย", "ขออีเมลสมหญิงหน่อย" (contactName ต้องเป็นชื่อจริงที่ผู้ใช้พิมพ์มาเท่านั้น ห้ามเดา)',
     '{"intent":"find_nearby_places","placeKeyword":string} — อยากหาสถานที่/ร้าน/บริการใกล้ตัว ไม่ว่าจะพิมพ์แบบไหนก็ตาม เช่น "ร้านกาแฟใกล้ฉัน", "แถวนี้มีร้านอาหารไหม", "หาปั๊มน้ำมันหน่อย" (placeKeyword คือสิ่งที่อยากหา ตัดคำว่า "ใกล้ฉัน/แถวนี้/ใกล้ๆ" ออก) — บอทจะขอตำแหน่ง GPS จริงจากผู้ใช้ต่อเอง ห้ามตอบชื่อร้าน/สถานที่จริงเองเด็ดขาดเพราะไม่มีข้อมูลตำแหน่งผู้ใช้ให้ค้นหาจริง',
     '{"intent":"flight_search","flightOriginCode":"IATA 3 ตัวใหญ่","flightDestinationCode":"IATA 3 ตัวใหญ่","flightOriginName":string,"flightDestinationName":string,"flightDateKey":"YYYY-MM-DD"} — หาตั๋วเครื่องบิน/เทียบราคาเที่ยวบิน เช่น "หาตั๋วไปเชียงใหม่พรุ่งนี้" (Code คือรหัสสนามบิน/เมืองมาตรฐาน IATA ที่ตรงกับเมืองนั้นจริงๆ เช่น กรุงเทพ=BKK เชียงใหม่=CNX ภูเก็ต=HKT — แปลงชื่อเมืองเป็นรหัสได้เลยเพราะเป็นข้อมูลมาตรฐานสากล ไม่ใช่การเดาข้อมูลส่วนตัว แต่ถ้าไม่แน่ใจรหัสของเมืองไหนจริงๆ ให้ใช้ unclear ถามกลับ; Name คือชื่อเมืองตามที่ผู้ใช้พิมพ์; ไม่บอกต้นทางให้ถือว่าออกจากกรุงเทพ/BKK ได้; ต้องรู้วันที่แน่ชัด ไม่รู้ให้ unclear)',
-    '{"intent":"hotel_search","hotelCityCode":"IATA 3 ตัวใหญ่","hotelCityName":string,"hotelCheckInDateKey":"YYYY-MM-DD","hotelCheckOutDateKey":"YYYY-MM-DD"} — หาที่พัก/โรงแรม/เทียบราคาที่พักในเมืองหนึ่งๆ เช่น "หาที่พักภูเก็ต ศุกร์นี้ 2 คืน" (กติการหัส IATA เดียวกับ flight_search; บอกจำนวนคืนมาก็คำนวณ checkOut จาก checkIn ได้; บอกแค่วันเดียวไม่บอกจำนวนคืน = พัก 1 คืน; ไม่รู้วันที่เลยให้ unclear)',
+    '{"intent":"hotel_search","hotelCityName":string,"hotelCheckInDateKey":"YYYY-MM-DD","hotelCheckOutDateKey":"YYYY-MM-DD"} — หาที่พัก/โรงแรม/เทียบราคาที่พักในเมืองหนึ่งๆ เช่น "หาที่พักภูเก็ต ศุกร์นี้ 2 คืน" (hotelCityName คือชื่อเมืองตามที่ผู้ใช้พิมพ์; บอกจำนวนคืนมาก็คำนวณ checkOut จาก checkIn ได้; บอกแค่วันเดียวไม่บอกจำนวนคืน = พัก 1 คืน; ไม่รู้วันที่เลยให้ unclear)',
     '{"intent":"ground_ticket_search","groundOriginName":string,"groundDestinationName":string,"groundOriginSlug":"ชื่อเมืองอังกฤษตัวเล็ก-คั่นขีด","groundDestinationSlug":"ชื่อเมืองอังกฤษตัวเล็ก-คั่นขีด","groundDateKey"?:"YYYY-MM-DD"} — หาตั๋วรถทัวร์/รถไฟ/รถตู้/เรือระหว่างเมือง เช่น "ตั๋วรถทัวร์ไปขอนแก่น" (slug คือชื่อเมืองภาษาอังกฤษตัวพิมพ์เล็กคั่นด้วยขีด เช่น bangkok, chiang-mai, khon-kaen; ไม่บอกต้นทางให้ถือว่า bangkok; วันที่ใส่เฉพาะตอนผู้ใช้ระบุ)',
     '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
