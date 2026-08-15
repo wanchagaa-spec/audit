@@ -196,3 +196,21 @@ export async function setPendingPlaceSearch(
   }
   await kv.put(key, JSON.stringify(pending), { expirationTtl: PLACE_SEARCH_TTL_SECONDS });
 }
+
+// Task due-time reminders (PLAN.md 17.35): the reminder check runs on the
+// same once-a-minute cron as everything else, but the actual send window
+// around "about an hour before due" is several minutes wide (see
+// reminders.ts) — so this marker is what stops the same task's reminder
+// from going out more than once, not the timing itself. TTL only needs to
+// outlive same-day creation-to-due-time plus the send window; 2 days is
+// comfortable headroom without leaving markers in KV forever for tasks that
+// get completed or deleted afterward.
+const TASK_REMINDER_TTL_SECONDS = 2 * 24 * 60 * 60;
+
+export async function getTaskReminderSent(kv: KVNamespace, lineUserId: string, taskId: string): Promise<boolean> {
+  return (await kv.get(`task-reminded:${lineUserId}:${taskId}`)) !== null;
+}
+
+export async function markTaskReminderSent(kv: KVNamespace, lineUserId: string, taskId: string): Promise<void> {
+  await kv.put(`task-reminded:${lineUserId}:${taskId}`, "1", { expirationTtl: TASK_REMINDER_TTL_SECONDS });
+}

@@ -800,6 +800,7 @@ const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting, broadcastMorningBriefings } = await import("../src/greetingCommands.ts");
 const { getConversationHistory } = await import("../src/conversationHistory.ts");
+const { pushTaskDueReminders } = await import("../src/reminders.ts");
 
 async function signLineBody(rawBody, secret) {
   const key = await crypto.subtle.importKey(
@@ -1176,6 +1177,15 @@ calendarEvents.push({
 });
 const yesterdayKeyForBroadcast = addDaysToDateKey(bangkokDateKey(), -1);
 diaryRows.push(["diary-broadcast-test-1", yesterdayKeyForBroadcast, "ทั่วไป", "เมื่อวานไปวิ่งออกกำลังกายมา", new Date().toISOString()]);
+// PLAN.md 17.35: a task due today (exercises buildTodayDueTasksLine's
+// "has something due" branch, alongside the Calendar line's own real event
+// above).
+googleTasks.push({
+  id: "task-broadcast-test-1",
+  title: "ส่งรายงานประจำเดือน",
+  status: "needsAction",
+  due: new Date(`${bangkokDateKey()}T16:00:00+07:00`).toISOString(),
+});
 
 await broadcastMorningBriefings(env, env.ACCOUNTS, notSevenOClockUtc);
 check("the broadcast is a no-op outside the 07:00 Bangkok minute", pushes.length === pushesBeforeBroadcast);
@@ -1206,8 +1216,13 @@ check(
   "the broadcast's diary line is an AI reflection built from yesterday's real diary text",
   broadcastPushes[0]?.text.includes("เมื่อวานไปวิ่งออกกำลังกายมา")
 );
+check(
+  "the broadcast includes today's real due task (PLAN.md 17.35)",
+  broadcastPushes[0]?.text.includes("ส่งรายงานประจำเดือน") && broadcastPushes[0]?.text.includes("16:00")
+);
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
+googleTasks.length = 0; // clean up — the Tasks test section below assumes it starts empty
 
 await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
 check("a second 07:00 firing the same day doesn't send a duplicate broadcast", pushes.length === pushesBeforeBroadcast + 1);
@@ -1217,6 +1232,69 @@ check(
   "a greeting later the same day as the broadcast gets the short return-greeting, not another briefing",
   returnGreetingAfterBroadcastReply === buildReturnGreeting()
 );
+
+// 6.5. Task due-time reminders (PLAN.md 17.35): a task due in exactly 60
+// minutes gets a proactive push once, is never reminded twice, and a task
+// too far out (or with no due time at all) is left alone. Also reuses the
+// group account link set up above to confirm groups never get this push
+// either, same precedent as the 07:00 broadcast.
+const dueSoonAt = new Date(`${bangkokDateKey()}T15:00:00+07:00`);
+
+// A separate, still-fresh task 3 hours out — checked (and immediately
+// removed again) before the due-soon task below ever gets marked as
+// reminded, so this only exercises the window filter, not the dedupe.
+const farOffTaskId = "task-reminder-test-far-off";
+googleTasks.push({
+  id: farOffTaskId,
+  title: "ทบทวนเอกสาร",
+  status: "needsAction",
+  due: new Date(dueSoonAt.getTime() + 2 * 60 * 60 * 1000).toISOString(),
+});
+const pushesBeforeFarOff = pushes.length;
+await pushTaskDueReminders(env, env.ACCOUNTS, new Date(dueSoonAt.getTime() - 60 * 60 * 1000));
+check(
+  "a task due in ~3 hours (well outside the ~60-minute window) isn't reminded yet",
+  pushes.length === pushesBeforeFarOff
+);
+googleTasks.length = 0;
+
+const dueSoonTaskId = "task-reminder-test-1";
+googleTasks.push({
+  id: dueSoonTaskId,
+  title: "ประชุมลูกค้า",
+  status: "needsAction",
+  due: dueSoonAt.toISOString(),
+});
+const nowSixtyMinutesBeforeDue = new Date(dueSoonAt.getTime() - 60 * 60 * 1000);
+const pushesBeforeReminder = pushes.length;
+
+await pushTaskDueReminders(env, env.ACCOUNTS, nowSixtyMinutesBeforeDue);
+const reminderPushes = pushes.slice(pushesBeforeReminder);
+check("a task due in ~60 minutes gets exactly one reminder push (the personal account only)", reminderPushes.length === 1);
+check("the reminder push targets the personal lineUserId, not the group", reminderPushes[0]?.to === lineUserId);
+check(
+  "the reminder mentions the task title and its due date/time",
+  reminderPushes[0]?.text.includes("ประชุมลูกค้า") &&
+    reminderPushes[0]?.text.includes(bangkokDateKey()) &&
+    reminderPushes[0]?.text.includes("15:00")
+);
+
+await pushTaskDueReminders(env, env.ACCOUNTS, new Date(nowSixtyMinutesBeforeDue.getTime() + 2 * 60 * 1000));
+check("the same task isn't reminded twice, even while still inside the send window", pushes.length === pushesBeforeReminder + 1);
+
+googleTasks.length = 0; // clean up — the Tasks test section below assumes it starts empty
+
+const dateOnlyTaskId = "task-reminder-test-2";
+googleTasks.push({
+  id: dateOnlyTaskId,
+  title: "จ่ายค่าเช่า",
+  status: "needsAction",
+  due: new Date(`${bangkokDateKey()}T00:00:00+07:00`).toISOString(), // Bangkok-local midnight = "no time set" (see tasks.ts's parseDueField)
+});
+const pushesBeforeDateOnly = pushes.length;
+await pushTaskDueReminders(env, env.ACCOUNTS, new Date());
+check("a task with no due time set (date only) never gets this near-due-time push", pushes.length === pushesBeforeDateOnly);
+googleTasks.length = 0; // clean up — the Tasks test section below assumes it starts empty
 
 // 7. Trip photo album (PLAN.md 15.2): image with no active trip is rejected,
 // starting a trip creates the album-root + trip folders, images then upload

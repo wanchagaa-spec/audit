@@ -14,6 +14,7 @@ import { buildGoldBtcLines, fetchMarketSnapshot } from "./marketData.ts";
 import { fetchNewsSummary } from "./news.ts";
 import { applyPersona } from "./persona.ts";
 import { readAllDiaryEntries, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
+import { listIncompleteTasks } from "./tasks.ts";
 import { geocodeProvince, fetchWeatherSummary } from "./weather.ts";
 import {
   getAccountLink,
@@ -203,6 +204,24 @@ async function buildTodayShiftLine(
   }
 }
 
+// PLAN.md 17.35: today's due Google Tasks, same-day-heads-up treatment as
+// buildTodayCalendarLine above — tasks with a due *time* also get a nearer,
+// more-timely ping on their own (reminders.ts's pushTaskDueReminders), but
+// showing every task due today here too isn't redundant, it's an overview
+// of the whole day versus a just-in-time nudge for one item.
+async function buildTodayDueTasksLine(accessToken: string, today: string): Promise<string> {
+  try {
+    const tasks = await listIncompleteTasks(accessToken);
+    const dueToday = tasks.filter((t) => t.dueDateKey === today);
+    if (dueToday.length === 0) return "✅ วันนี้ไม่มีสิ่งที่ต้องทำที่ครบกำหนดเลยนะ";
+    const lines = dueToday.map((t) => (t.dueTime ? `${t.dueTime} ${t.title}` : t.title));
+    return ["✅ สิ่งที่ต้องทำวันนี้:", ...lines].join("\n");
+  } catch (err) {
+    console.error("buildTodayDueTasksLine failed", err);
+    return "";
+  }
+}
+
 async function buildYesterdayDiaryLine(
   env: Env,
   accessToken: string,
@@ -287,12 +306,13 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
             clientId: env.GOOGLE_CLIENT_ID,
             clientSecret: env.GOOGLE_CLIENT_SECRET,
           });
-          const [calendarLine, shiftLine, diaryLine] = await Promise.all([
+          const [calendarLine, shiftLine, diaryLine, tasksLine] = await Promise.all([
             buildTodayCalendarLine(accessToken, today),
             buildTodayShiftLine(accessToken, link.spreadsheetId, kv, today),
             buildYesterdayDiaryLine(env, accessToken, link.spreadsheetId, kv, yesterday),
+            buildTodayDueTasksLine(accessToken, today),
           ]);
-          for (const line of [calendarLine, shiftLine, diaryLine]) if (line) extras.push(line);
+          for (const line of [calendarLine, shiftLine, diaryLine, tasksLine]) if (line) extras.push(line);
         } catch (err) {
           console.error("broadcastMorningBriefings: refreshing access token failed, sending base briefing only", lineUserId, err);
         }

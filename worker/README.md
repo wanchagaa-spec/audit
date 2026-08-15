@@ -485,6 +485,25 @@ the *date* part of it, ignoring whatever time-of-day was sent. This bot sends th
 to verify from this sandboxed dev environment whether Google's own apps actually surface it.
 Worth checking for yourself in the real Google Tasks app after a task with a time is created.
 
+### Task and appointment reminders (PLAN.md 17.35)
+
+Proactive pushes, not just replies to something you typed — the first feature in this bot that
+messages you unprompted outside the existing 07:00 morning broadcast (see "Morning briefing"
+below). Personal accounts only, never groups, same reasoning as that broadcast: an unsolicited
+push into a group chat is more likely noise than a personal DM is.
+
+- A task with both a due **date and time** set gets a one-time push roughly an hour before it's
+  due — e.g. "⏰ อีกประมาณ 1 ชั่วโมงจะถึงกำหนด: ...". Checked on the same once-a-minute cron as
+  everything else; the actual send window is a few minutes wide (to tolerate cron jitter), and a
+  per-task marker in KV (2-day TTL) stops the same task from being reminded twice even though the
+  window itself is wider than one exact minute.
+- A task due **today with no time set** (an all-day task) instead shows up as a line in the
+  existing 07:00 morning broadcast — "✅ สิ่งที่ต้องทำวันนี้: ..." — the same same-day-heads-up
+  treatment today's Calendar events already get there. Not redundant with the near-due push
+  above: this is a once-a-day overview of the whole day, that's a just-in-time nudge for one item.
+
+No new OAuth scope needed — this only reads with the `tasks` scope Tasks itself already requires.
+
 ### Gmail (PLAN.md 17.28)
 
 Check unread mail and send new messages — the fifth Google service this bot connects to
@@ -704,16 +723,17 @@ noise than a personal DM is).
   mean one Gemini call per linked account firing within the same minute for no benefit.
 - Marks the same "already greeted today" state the reactive flow uses, so a "สวัสดี" later that
   day gets the short return-greeting instead of a duplicate full briefing.
-- **Broadcast-only extras (PLAN.md 17.22)**: on top of the date/weather/news the reactive greeting
-  also gets, the broadcast additionally includes today's gold/BTC price (`buildGoldBtcLines`,
-  reused from the finance-news feature, minus the stock movers — not personalized, fetched once
-  per run same as news), today's Calendar appointments, today's shift (from the shift-schedule
-  feature above), and a short AI reflection on yesterday's diary entries (or a plain "nothing
+- **Broadcast-only extras (PLAN.md 17.22, extended by 17.35)**: on top of the date/weather/news
+  the reactive greeting also gets, the broadcast additionally includes today's gold/BTC price
+  (`buildGoldBtcLines`, reused from the finance-news feature, minus the stock movers — not
+  personalized, fetched once per run same as news), today's Calendar appointments, today's shift
+  (from the shift-schedule feature above), today's due Google Tasks (see "Task and appointment
+  reminders" above), and a short AI reflection on yesterday's diary entries (or a plain "nothing
   written" line if there's nothing to reflect on, no Gemini call needed for that case). These
-  three are per-user and need a fresh Google access token, unlike everything else in the
+  four are per-user and need a fresh Google access token, unlike everything else in the
   broadcast — a token refresh failure for one account degrades to just the base weather/news
-  briefing for that person rather than failing their whole broadcast, and each of the three is
-  independently best-effort on top of that (one failing never blocks the other two).
+  briefing for that person rather than failing their whole broadcast, and each of the four is
+  independently best-effort on top of that (one failing never blocks the others).
 
 ### Web viewer (PLAN.md 16)
 

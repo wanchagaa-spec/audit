@@ -64,6 +64,7 @@ import {
   type LineWebhookBody,
 } from "./line.ts";
 import { answerNearbySearch, matchPlacesCommand, promptPlaceSearch } from "./placesCommands.ts";
+import { pushTaskDueReminders } from "./reminders.ts";
 import { canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
 import { signState, verifyState } from "./signedState.ts";
 import {
@@ -1641,5 +1642,9 @@ export default {
     // is a no-op outside the 07:00 Bangkok minute (PLAN.md 17.21), so this
     // doesn't need its own separate cron trigger entry in wrangler.toml.
     ctx.waitUntil(broadcastMorningBriefings(env, env.ACCOUNTS));
+    // Same once-a-minute cron again — pushTaskDueReminders (PLAN.md 17.35)
+    // only actually sends anything for a task within a few minutes of its
+    // ~60-minutes-out window, everything else is a cheap per-account no-op.
+    ctx.waitUntil(pushTaskDueReminders(env, env.ACCOUNTS));
   },
 };
