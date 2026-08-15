@@ -1808,3 +1808,11 @@ admin เท่านั้น), ไม่ได้ตั้งค่า API key
 key แทน query string) และปรับ fixture ข้อมูลสถานที่จำลองให้ตรง response shape ใหม่ — เทสต์เดิมทั้งหมดที่เขียน
 ไว้ใน 17.30 ยังใช้ได้และผ่านครบ (367/367) โดยไม่ต้องเพิ่มเทสต์ใหม่ เพราะพฤติกรรมที่สังเกตได้จากภายนอกไม่เปลี่ยน
 เลย เปลี่ยนแค่วิธีคุยกับ Google เท่านั้น
+
+**พบช่องโหว่จริงระหว่างตั้งค่า**: ตอนผู้ใช้เดินตามขั้นตอนตั้ง secret จริง พบว่า `.github/workflows/
+worker-deploy.yml`'s "Set Worker secrets" step (ที่ push แต่ละ secret เข้า Cloudflare Worker ด้วย
+`wrangler secret put`) **ไม่มีบรรทัดสำหรับ `GOOGLE_MAPS_API_KEY` เลย** — ต่อให้ตั้ง GitHub repo secret ไว้
+ครบแล้ว ก็จะไม่มีทางไปถึง Worker จริงได้เลย (`env.GOOGLE_MAPS_API_KEY` จะว่างเปล่าเสมอ) เพราะ workflow
+ลิสต์ชื่อ secret ที่จะ push ไว้ตายตัวทีละบรรทัด ไม่ใช่ push อัตโนมัติทุกตัว — พลาดไปตอนเขียน 17.30 เพราะ
+โฟกัสอยู่ที่โค้ดบอทอย่างเดียว ไม่ได้เช็ค deploy workflow ด้วย แก้โดยเพิ่มบรรทัดเดียว:
+`echo "${{ secrets.GOOGLE_MAPS_API_KEY }}" | npx wrangler secret put GOOGLE_MAPS_API_KEY`
