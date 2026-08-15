@@ -65,13 +65,7 @@ export async function answerNearbySearch(
     // just degrades to one generic message rather than a specific error
     // class the caller would have to classify.
     console.error("searchNearbyPlaces failed", err);
-    // TEMPORARY diagnostic (PLAN.md 17.32 follow-up): a real report of this
-    // failing in production with no way to see live Worker logs from this
-    // environment — surfacing the real error straight into the reply is the
-    // fastest way to see it. Revert back to the plain generic message once
-    // diagnosed; not meant to stay in the shipped bot long-term.
-    const debugDetail = err instanceof Error ? ` [debug: ${err.message.slice(0, 300)}]` : "";
-    return `ค้นหาสถานที่ไม่สำเร็จ ลองใหม่อีกครั้งนะ${debugDetail}`;
+    return "ค้นหาสถานที่ไม่สำเร็จ ลองใหม่อีกครั้งนะ";
   }
 
   if (places.length === 0) return `ไม่พบ "${pending.keyword}" ใกล้ๆ ตำแหน่งที่แชร์มาเลยนะ`;

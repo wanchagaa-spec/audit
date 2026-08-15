@@ -1835,3 +1835,23 @@ deterministic matcher เสมอ) **ไม่เคยรู้จักฟี
 
 **ทดสอบ**: เพิ่ม regression test จำลองสถานการณ์จริงเป๊ะๆ ("ร้านกาแฟใกล้ฉัน" ผ่าน AI interpreter path) —
 ยืนยันแล้วว่าถ้าย้อนแก้ทั้ง 3 จุดออก เทสต์จะพังจริง ไม่ใช่ปลอม
+
+### 17.33 แก้บั๊กจริง: ค้นหาสถานที่พังทุกครั้ง — `locationRestriction` ไม่รองรับ `circle`
+
+หลัง 17.32 แก้ให้ขอตำแหน่งได้ถูกต้องแล้ว แต่พอแชร์ตำแหน่งจริง ค้นหาสถานที่กลับพังทุกครั้ง (ตอบ "ค้นหาสถานที่
+ไม่สำเร็จ") — เปิดโค้ด debug ชั่วคราวแบบเดียวกับตอนแก้บั๊ก Gmail (17.28 follow-up) เพื่อดู error จริง เพราะไม่มี
+สิทธิ์เข้า Cloudflare log จากในนี้
+
+**error จริงที่ได้**: `Invalid JSON payload received. Unknown name "circle" at 'location_restriction':
+Cannot find field.` — สรุปคือ Text Search (New) ไม่รองรับ field `circle` ใต้ `locationRestriction` เลย
+(อาจรองรับแค่ `rectangle`) ตอนเขียน 17.31 เข้าใจผิดว่า `locationRestriction.circle` ใช้ได้เหมือน
+`locationBias.circle` — แก้โดยเปลี่ยนไปใช้ `locationBias.circle` แทน (field เดียวกันแต่คนละ key บนสุด)
+
+**trade-off ที่เปลี่ยนไปเล็กน้อย**: `locationBias` เป็นการ "โน้มน้าว" อันดับผลลัพธ์ให้เอนเอียงมาทางวงกลมที่ระบุ
+ไม่ใช่ตัดขาดบังคับเหมือน `locationRestriction` — ผลลัพธ์ที่ตรงกับคำค้นหามากกว่ามากๆอาจหลุดจากรัศมีมาได้บ้าง
+แต่ยอมรับได้ เพราะ "หาใกล้ฉัน" ก็แค่อยากได้ที่ใกล้ๆเป็นหลักอยู่แล้ว ไม่ใช่ต้องบังคับตัดทิ้งทุกอย่างนอกรัศมีเป๊ะๆ
+
+**ทดสอบ**: แก้ mock ให้อ่าน field `locationBias.circle` แทน `locationRestriction.circle` — เทสต์เดิมที่เช็ค
+พิกัด/คำค้นหาที่ส่งไปจริง (ผ่าน `placesSearchCalls`) ทำหน้าที่เป็น regression guard อยู่แล้วในตัว (ถ้าโค้ด
+ย้อนกลับไปใช้ `locationRestriction` เทสต์จะ fail ทันทีเพราะ mock จะอ่าน field ผิดตำแหน่ง ไม่ต้องเพิ่มเทสต์ใหม่)
+รวม 369 ผ่าน 0 ล้มเหลว
