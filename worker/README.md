@@ -451,12 +451,19 @@ Needs the extra `tasks` OAuth scope (see setup step 3.5/3.6 above) — accounts 
 this feature existed will get a one-time re-link prompt the first time they try a task
 command.
 
-**Known uncertainty about due times**: Google Tasks' `due` field has a long-standing quirk
-where the official Tasks apps historically only respected the *date* part of it, ignoring
-whatever time-of-day was sent. This bot sends the time anyway (best effort — newer Tasks
-clients with time-based reminders may honor it), but there's no way to verify from this
-sandboxed dev environment whether Google actually keeps it. Worth checking for yourself in
-the real Google Tasks app after a task with a time is created.
+**Real bug, fixed (PLAN.md 17.29)**: due dates/times used to display wrong — off by a fixed
+7 hours, and for early-morning times, off by a whole day too. Google's API returns `due` as a
+genuine UTC timestamp, same as every other Google integration in this bot, but the code that
+read it back was slicing the raw string as if it were already Bangkok-local text. Fixed by
+converting through the same `bangkokDateKey`/`bangkokHourMinute` helpers every other feature
+already uses for the reverse direction.
+
+**Known uncertainty that's separate from the bug above and still unverified**: Google Tasks'
+`due` field has a long-standing quirk where the official Tasks apps historically only respected
+the *date* part of it, ignoring whatever time-of-day was sent. This bot sends the time anyway
+(best effort — newer Tasks clients with time-based reminders may honor it), but there's no way
+to verify from this sandboxed dev environment whether Google's own apps actually surface it.
+Worth checking for yourself in the real Google Tasks app after a task with a time is created.
 
 ### Gmail (PLAN.md 17.28)
 
@@ -485,13 +492,13 @@ Needs the extra `gmail.readonly` + `gmail.send` OAuth scopes (see setup step 3.5
 accounts linked before this feature existed will get a one-time re-link prompt the first time
 they try an email command.
 
-**Known limitation, not yet fixed**: `matchCalendarCommand`'s "นัด" trigger matches that word
-anywhere in a message (not just at the start), and calendar's handler is checked before Tasks'
-and Gmail's in the dispatch chain — so a task or email whose free text happens to contain the
-word "นัด" (a common Thai word for "appointment") can get misrouted into an attempted calendar
-create instead of reaching the task/email handler. Found while writing this feature's tests;
-out of scope for this change (same shape of bug as PLAN.md 17.13/17.20's calendar/shift-schedule
-mixups, just a different pair of features colliding this time) — worth a dedicated fix later.
+**Real bug, fixed (PLAN.md 17.29)**: `matchCalendarCommand`'s "นัด" trigger matches that word
+anywhere in a message (not just at the start), and calendar's handler used to be checked before
+Tasks' and Gmail's in the dispatch chain — so a task or email whose free text happened to
+contain the word "นัด" (a common Thai word for "appointment") could get misrouted into an
+attempted calendar create instead of reaching the task/email handler. Fixed by checking Task's
+and Gmail's own fixed, unambiguous command prefixes first — they never overlap with anything
+Calendar's own matcher recognizes, so this can't affect a genuine calendar command.
 
 ### Diary (PLAN.md 15.4)
 

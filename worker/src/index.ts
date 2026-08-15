@@ -551,16 +551,19 @@ async function dispatchLegacyCommands(
       );
     }
 
-    const calendarHandler = await matchCalendarCommand(text);
-    if (calendarHandler) {
-      return await withFreshAccessToken(
-        env,
-        link.refreshToken,
-        (accessToken) => calendarHandler(actionCtx(accessToken)),
-        tokenCache
-      );
-    }
-
+    // Task and Gmail are checked *before* Calendar here, even though
+    // Calendar was wired up first historically — real bug found in
+    // production: matchCalendarCommand's "นัด" trigger matches that word
+    // anywhere in a message (see extractNadPayload's own comment), so a
+    // task/email whose free text happened to contain "นัด" (a common Thai
+    // word) got swallowed into a failed calendar-create attempt before ever
+    // reaching matchTaskCommand/matchGmailCommand below. Task's and Gmail's
+    // own matchers only fire on their own fixed, unambiguous prefixes
+    // ("เพิ่มสิ่งที่ต้องทำ", "ทำเสร็จแล้ว", "ลบสิ่งที่ต้องทำ", "ส่งอีเมล", plus a
+    // short fixed list of exact list/check phrases) — none of those overlap
+    // with anything Calendar's own matcher recognizes, so checking them
+    // first can never swallow a genuine calendar command; it only ever
+    // stops Calendar's looser "นัด anywhere" trigger from swallowing *them*.
     const taskHandler = await matchTaskCommand(text);
     if (taskHandler) {
       return await withFreshAccessToken(
@@ -577,6 +580,16 @@ async function dispatchLegacyCommands(
         env,
         link.refreshToken,
         (accessToken) => gmailHandler(actionCtx(accessToken)),
+        tokenCache
+      );
+    }
+
+    const calendarHandler = await matchCalendarCommand(text);
+    if (calendarHandler) {
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => calendarHandler(actionCtx(accessToken)),
         tokenCache
       );
     }

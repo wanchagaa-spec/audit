@@ -7,7 +7,7 @@
 // no separate lookup needed) is used — this bot never manages multiple
 // task lists.
 
-import { toRfc3339 } from "./thaiDate.ts";
+import { bangkokDateKey, bangkokHourMinute, toRfc3339 } from "./thaiDate.ts";
 
 const TASKS_BASE = "https://tasks.googleapis.com/tasks/v1";
 const DEFAULT_TASKLIST = "@default";
@@ -54,19 +54,39 @@ export interface TaskSummary {
   dueTime?: string;
 }
 
-// Google Tasks' `due` field has a long-standing, well-known quirk: the
-// Tasks apps/UI historically only ever respected the *date* part of it,
-// silently treating the time-of-day as 00:00 UTC no matter what was sent —
-// this may or may not have changed with Google Tasks' newer time-based
-// reminder UI, and there's no way to verify that from this sandbox (no
-// live Google API access). So on the way back in, an exact 00:00 UTC is
-// treated as "no real time was set" rather than surfaced as a literal
-// midnight due time; anything else is shown as-is, best effort.
+// Real bug found in production: this used to slice the returned `due`
+// string directly (`due.slice(0, 10)` / `due.slice(11, 16)`) as if it were
+// already Bangkok-local text — but Google's API returns it as a real
+// UTC timestamp (a trailing "Z"), the same as everything else in this
+// codebase's Google integrations. Slicing it raw showed the *UTC* date/time
+// instead of the Bangkok one: created via `toRfc3339` (which always encodes
+// with the +07:00 offset, e.g. "2026-01-20T14:00:00+07:00"), Google's
+// response came back UTC-normalized ("2026-01-20T07:00:00.000Z" — 7 hours
+// off), and for anything before 07:00 Bangkok time the UTC date itself
+// rolls back to the previous day on top of that. Fixed by parsing it as a
+// real `Date` and converting through the same `bangkokDateKey`/
+// `bangkokHourMinute` helpers every other feature in this bot already uses
+// for the reverse direction, instead of ever assuming a fixed textual
+// layout in a specific timezone.
+//
+// Separately (still unverified, still worth knowing): Google Tasks' `due`
+// field has a long-standing, well-known quirk where the Tasks apps/UI
+// historically only ever respected the *date* part of it, silently
+// resetting the time-of-day to 00:00 no matter what was sent — this may or
+// may not still hold, and there's no way to check from this sandbox (no
+// live Google API access). An exact Bangkok-local 00:00 after conversion is
+// still treated as "no real time was set" rather than shown as a literal
+// midnight due time, since that's what this bot itself sends by default
+// when no time is given.
 function parseDueField(due: string | undefined): { dateKey: string; time?: string } | undefined {
   if (!due) return undefined;
-  const dateKey = due.slice(0, 10);
-  const hhmm = due.slice(11, 16);
-  return hhmm && hhmm !== "00:00" ? { dateKey, time: hhmm } : { dateKey };
+  const d = new Date(due);
+  if (Number.isNaN(d.getTime())) return undefined;
+  const dateKey = bangkokDateKey(d);
+  const { hour, minute } = bangkokHourMinute(d);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hhmm = `${pad(hour)}:${pad(minute)}`;
+  return hhmm !== "00:00" ? { dateKey, time: hhmm } : { dateKey };
 }
 
 /** Incomplete tasks only — a finished to-do list is meant to disappear from
