@@ -26,7 +26,6 @@ import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import type { EntryType } from "../../app/src/types.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
-import { EMAIL_RE } from "./gmail.ts";
 import { BOT_NAME } from "./persona.ts";
 import { bangkokDateKey } from "./thaiDate.ts";
 
@@ -53,6 +52,7 @@ export type InterpretedIntent =
   | { intent: "task_list" }
   | { intent: "email_check" }
   | { intent: "email_send"; emailTo: string; emailSubject: string; emailBody: string }
+  | { intent: "contact_lookup"; contactName: string }
   | { intent: "find_nearby_places"; placeKeyword: string }
   | { intent: "trip_start"; tripName: string }
   | { intent: "trip_end" }
@@ -181,9 +181,20 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     case "email_check":
       return { intent: "email_check" };
     case "email_send": {
-      if (typeof r.emailTo !== "string" || !EMAIL_RE.test(r.emailTo)) return null;
+      // emailTo can be a real email address OR a contact's name (validated
+      // as "the user actually typed *something* specific," not as a valid
+      // email format) — resolveEmailRecipient (contactsCommands.ts) sorts
+      // out which one it is and does the actual lookup/validation, never
+      // this file. See the no-guessing rule below for why a name is only
+      // ever acceptable here when it's a real name the user typed, not an
+      // invented or inferred one.
+      if (!isNonEmptyString(r.emailTo)) return null;
       if (!isNonEmptyString(r.emailSubject) || !isNonEmptyString(r.emailBody)) return null;
       return { intent: "email_send", emailTo: r.emailTo, emailSubject: r.emailSubject, emailBody: r.emailBody };
+    }
+    case "contact_lookup": {
+      if (!isNonEmptyString(r.contactName)) return null;
+      return { intent: "contact_lookup", contactName: r.contactName };
     }
     case "find_nearby_places": {
       if (!isNonEmptyString(r.placeKeyword)) return null;
@@ -233,7 +244,7 @@ function buildCategoryList(): string {
 // same way persona.ts's system instruction has its own marker string.
 function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
   return [
-    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/หาสถานที่ใกล้ตัว/ถามคำถาม)`,
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/ผู้ติดต่อ/หาสถานที่ใกล้ตัว/ถามคำถาม)`,
     `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
     "",
     "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",
@@ -258,7 +269,8 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"task_delete","taskKeyword":string} — ลบสิ่งที่ต้องทำที่มีคำค้นหานี้ออกจากลิสต์',
     '{"intent":"task_list"} — ขอดูรายการสิ่งที่ต้องทำทั้งหมดที่ยังไม่เสร็จ',
     '{"intent":"email_check"} — ขอเช็คอีเมลใหม่ที่ยังไม่ได้อ่าน',
-    '{"intent":"email_send","emailTo":string,"emailSubject":string,"emailBody":string} — ส่งอีเมลใหม่ ต้องรู้ที่อยู่อีเมลผู้รับ หัวข้อ และเนื้อหาแน่ชัดทั้งหมด (ดูกติกาด้านล่างเรื่องห้ามเดาที่อยู่อีเมล)',
+    '{"intent":"email_send","emailTo":string,"emailSubject":string,"emailBody":string} — ส่งอีเมลใหม่ emailTo เป็นได้ทั้งที่อยู่อีเมลเต็มๆ หรือชื่อผู้ติดต่อจริงที่ผู้ใช้พิมพ์มา (มีระบบค้นหาผู้ติดต่อแปลงชื่อเป็นอีเมลให้เองอีกที ไม่ต้องแปลงเอง) ต้องรู้หัวข้อและเนื้อหาแน่ชัดทั้งหมดด้วย (ดูกติกาด้านล่างเรื่องห้ามเดาที่อยู่อีเมล/ชื่อ)',
+    '{"intent":"contact_lookup","contactName":string} — ถามหาอีเมลของผู้ติดต่อคนนี้โดยตรง ไม่ใช่ตอนจะส่งอีเมล เช่น "อีเมลของสมชาย", "ขออีเมลสมหญิงหน่อย" (contactName ต้องเป็นชื่อจริงที่ผู้ใช้พิมพ์มาเท่านั้น ห้ามเดา)',
     '{"intent":"find_nearby_places","placeKeyword":string} — อยากหาสถานที่/ร้าน/บริการใกล้ตัว ไม่ว่าจะพิมพ์แบบไหนก็ตาม เช่น "ร้านกาแฟใกล้ฉัน", "แถวนี้มีร้านอาหารไหม", "หาปั๊มน้ำมันหน่อย" (placeKeyword คือสิ่งที่อยากหา ตัดคำว่า "ใกล้ฉัน/แถวนี้/ใกล้ๆ" ออก) — บอทจะขอตำแหน่ง GPS จริงจากผู้ใช้ต่อเอง ห้ามตอบชื่อร้าน/สถานที่จริงเองเด็ดขาดเพราะไม่มีข้อมูลตำแหน่งผู้ใช้ให้ค้นหาจริง',
     '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
@@ -279,7 +291,15 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     // General guessing is already banned above; spelled out again here
     // specifically for email_send because the cost of getting it wrong is
     // categorically different from every other intent in this list.
-    '- ที่อยู่อีเมลใน email_send ต้องเป็นข้อความที่ผู้ใช้พิมพ์มาเป๊ะๆ เท่านั้น ห้ามเดา ห้ามแต่งขึ้นเอง ห้ามอนุมานจากชื่อคน/ความสัมพันธ์ (เช่น "แฟน", "หัวหน้า") เด็ดขาด ถ้าข้อความไม่มีที่อยู่อีเมลชัดเจนที่พิมพ์มาเอง ให้ใช้ intent unclear ถามที่อยู่อีเมลก่อนเสมอ แม้จะเคยคุยถึงอีเมลของคนนั้นในประวัติมาก่อนก็ตาม (ต่างจากกติกาการรวมข้อมูลจากประวัติของ calendar_create/transaction ด้านล่าง — เรื่องอีเมลไม่ใช้กติกานั้น)',
+    //
+    // Loosened from "must be a literal email address" once contact lookup
+    // (PLAN.md 17.34) shipped: emailTo can now be a real person's name too,
+    // since a deterministic Contacts lookup (never this model) resolves it
+    // to an address, and the confirm-before-send step always shows the
+    // final resolved address before anything is sent — but the "no
+    // guessing" rule itself doesn't loosen at all, it just now also covers
+    // names, not only addresses.
+    '- emailTo ใน email_send (ที่อยู่อีเมลหรือชื่อผู้ติดต่อ) ต้องเป็นข้อความที่ผู้ใช้พิมพ์มาเป๊ะๆ เท่านั้น ห้ามเดา ห้ามแต่งขึ้นเอง ห้ามอนุมานชื่อหรือที่อยู่อีเมลจากความสัมพันธ์ทั่วไป (เช่น "แฟน", "หัวหน้า", "เพื่อน") เด็ดขาด ถ้าข้อความไม่มีทั้งที่อยู่อีเมลชัดเจนและไม่มีชื่อคนจริงที่พิมพ์มาเอง ให้ใช้ intent unclear ถามก่อนเสมอ แม้จะเคยคุยถึงคนนั้นในประวัติมาก่อนก็ตาม (ต่างจากกติกาการรวมข้อมูลจากประวัติของ calendar_create/transaction ด้านล่าง — เรื่องอีเมลไม่ใช้กติกานั้น) contactName ใน contact_lookup ก็อยู่ภายใต้กติกาเดียวกันนี้ทุกประการ',
     "- categoryId ต้องเป็นค่าที่มีอยู่จริงในลิสต์หมวดหมู่ข้างบนเท่านั้น และต้อง type ตรงกับ income/expense ที่เลือก",
     // Found in a real report: "พรุ่งนี้เค้ามีเวรมั้ย"/"พรุ่งนี้ได้ขึ้นเวรมั้ย" got
     // classified as calendar_query and answered from Google Calendar

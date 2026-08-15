@@ -88,6 +88,10 @@ let nearbyPlacesResults = []; // simulates Places API (New)'s `places` array for
 let simulatePlacesApiError = false;
 let simulateGmailScopeErrorAs400 = false; // regression: Gmail can answer a scope problem with a non-401/403 status, unlike Calendar/Tasks
 
+let googleContacts = []; // simulates the account's People API connections: {name, email}
+let simulateInsufficientContactsScope = false;
+let simulateContactsApiDisabled = false;
+
 let diaryTabExists = false;
 let diaryTabMetaCalls = 0; // counts spreadsheets.get calls, to verify the KV cache actually skips them
 const diaryRows = []; // simulates the Diary tab
@@ -520,6 +524,27 @@ globalThis.fetch = async (url, init = {}) => {
         { status: 200 }
       );
     }
+  }
+  if (u.startsWith("https://people.googleapis.com/v1/people/me/connections")) {
+    if (simulateInsufficientContactsScope) return new Response("forbidden", { status: 403 });
+    if (simulateContactsApiDisabled) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 403,
+            message:
+              "People API has not been used in project 123 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/people.googleapis.com/overview",
+            errors: [{ reason: "accessNotConfigured" }],
+          },
+        }),
+        { status: 403 }
+      );
+    }
+    const connections = googleContacts.map((c) => ({
+      names: [{ displayName: c.name }],
+      ...(c.email ? { emailAddresses: [{ value: c.email }] } : {}),
+    }));
+    return new Response(JSON.stringify({ connections }), { status: 200 });
   }
   if (u === "https://places.googleapis.com/v1/places:searchText") {
     const body = JSON.parse(init.body);
@@ -2219,13 +2244,21 @@ check(
   emailSendBadFormatReply.includes("รูปแบบไม่ถูกต้อง") && gmailSent.length === 0
 );
 
+// "not-an-email" isn't a valid address, so it's treated as a contact name
+// (PLAN.md 17.34) — with no matching contact, this degrades to a friendly
+// "didn't find that contact" message rather than a confirm prompt, same
+// end result (rejected before ever confirming) as the old plain
+// invalid-format check this replaced.
 const emailSendBadAddressReply = await handleTextMessage(
   env,
   lineUserId,
   "ส่งอีเมล ถึง not-an-email เรื่อง ทดสอบ ข้อความ สวัสดี",
   origin
 );
-check("an invalid email address is rejected before ever prompting to confirm", emailSendBadAddressReply.includes("ไม่ถูกต้อง"));
+check(
+  "an unresolvable recipient (not an email, no matching contact) is rejected before ever prompting to confirm",
+  emailSendBadAddressReply.includes("ไม่พบผู้ติดต่อ") && gmailSent.length === 0
+);
 
 const emailSendPromptReply = await handleTextMessage(
   env,
@@ -2336,7 +2369,125 @@ check(
 );
 simulateGmailApiDisabled = false;
 
-// 8.7. Nearby places (PLAN.md 17.30): "หา<คำ>ใกล้ฉัน" + LINE's native
+// 8.7. Contacts (PLAN.md 17.34): "อีเมลของ<ชื่อ>" lookup, plus letting
+// "ส่งอีเมล ถึง <ชื่อ>" accept a contact's name instead of a full email
+// address. Read-only, no confirm-before-save of its own — the actual write
+// this feeds into (sending) still confirms via the usual flow, always
+// showing the *resolved* address before anything goes out.
+googleContacts = [
+  { name: "สมชาย ใจดี", email: "somchai@example.com" },
+  { name: "สมหญิง", email: "somying@example.com" },
+  { name: "สมศักดิ์ ไม่มีอีเมล" }, // a real contact with no email on file
+];
+
+const contactLookupReply = await handleTextMessage(env, lineUserId, "อีเมลของสมชาย", origin);
+check("looking up a contact's email finds the exact match", contactLookupReply.includes("somchai@example.com"));
+
+const contactLookupMissingReply = await handleTextMessage(env, lineUserId, "อีเมลของไม่มีตัวตน", origin);
+check("looking up a nonexistent contact says so instead of erroring", contactLookupMissingReply.includes("ไม่พบผู้ติดต่อ"));
+
+const contactLookupNoEmailReply = await handleTextMessage(env, lineUserId, "อีเมลของสมศักดิ์", origin);
+check(
+  "looking up a real contact with no email on file says so, not a crash",
+  contactLookupNoEmailReply.includes("ไม่มีอีเมลบันทึกไว้")
+);
+
+// Sending by name: resolves through the exact same lookup, then the normal
+// confirm-before-send prompt shows the *resolved* address — so a wrong
+// match is still caught before anything is sent, not after.
+const sendByNamePromptReply = await handleTextMessage(
+  env,
+  lineUserId,
+  "ส่งอีเมล ถึง สมชาย เรื่อง นัดพรุ่งนี้ ข้อความ เจอกันบ่ายโมงนะ",
+  origin
+);
+check(
+  "sending to a contact's name resolves it and shows the real address in the confirm prompt",
+  sendByNamePromptReply.includes("somchai@example.com")
+);
+const sendByNameConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming sends to the resolved address, not the typed name",
+  sendByNameConfirmReply.includes("somchai@example.com") && gmailSent.at(-1).to === "somchai@example.com"
+);
+
+// A multi-word name ("สมชาย ใจดี") must survive the "ถึง <token> เรื่อง"
+// regex capture, which used to be \S+ (single token only, would have cut
+// this off at the space) before PLAN.md 17.34 widened it.
+const sendByFullNamePromptReply = await handleTextMessage(
+  env,
+  lineUserId,
+  "ส่งอีเมล ถึง สมชาย ใจดี เรื่อง ทดสอบชื่อเต็ม ข้อความ สวัสดี",
+  origin
+);
+check(
+  "a multi-word contact name (with a space) still resolves correctly",
+  sendByFullNamePromptReply.includes("somchai@example.com")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+
+const ambiguousNameReply = await handleTextMessage(env, lineUserId, "อีเมลของสม", origin);
+check(
+  "an ambiguous name (matches multiple contacts) asks to be more specific instead of guessing",
+  ambiguousNameReply.includes("พบหลายคน") &&
+    ambiguousNameReply.includes("สมชาย ใจดี") &&
+    ambiguousNameReply.includes("สมหญิง") &&
+    ambiguousNameReply.includes("สมศักดิ์")
+);
+
+// A real email address bypasses contact lookup entirely — the two paths
+// (literal address vs. name) must both still work side by side.
+const sendByRealAddressReply = await handleTextMessage(
+  env,
+  lineUserId,
+  "ส่งอีเมล ถึง friend2@example.com เรื่อง ทดสอบ ข้อความ สวัสดี",
+  origin
+);
+check("a literal email address still bypasses contact lookup entirely", sendByRealAddressReply.includes("friend2@example.com"));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+
+// AI interpreter routing (PLAN.md 17.11/17.34): both a standalone lookup
+// and a send-by-name go through the exact same resolution/lookup functions.
+simulateInterpreterResult = { intent: "contact_lookup", contactName: "สมหญิง" };
+const interpContactLookupReply = await handleTextMessage(env, lineUserId, "ขออีเมลสมหญิงหน่อย", origin);
+check("an AI-interpreted contact_lookup reaches the same answerContactEmail function", interpContactLookupReply.includes("somying@example.com"));
+
+simulateInterpreterResult = {
+  intent: "email_send",
+  emailTo: "สมหญิง",
+  emailSubject: "นัดพรุ่งนี้",
+  emailBody: "เจอกันบ่ายสองนะ",
+};
+const interpSendByNameReply = await handleTextMessage(env, lineUserId, "ส่งเมลหาสมหญิงว่าเจอกันบ่ายสองพรุ่งนี้นะ", origin);
+check(
+  "an AI-interpreted email_send with a contact name also resolves through the same lookup",
+  interpSendByNameReply.includes("somying@example.com")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming the AI-interpreted send-by-name actually sends to the resolved address",
+  gmailSent.at(-1).to === "somying@example.com"
+);
+
+simulateInsufficientContactsScope = true;
+const contactsRelinkReply = await handleTextMessage(env, lineUserId, "อีเมลของสมชาย", origin);
+check(
+  "a scope-less refresh token gets a re-link prompt for Contacts, not a crash",
+  contactsRelinkReply.includes("สิทธิ์ผู้ติดต่อเพิ่ม") && contactsRelinkReply.includes("accounts.google.com")
+);
+simulateInsufficientContactsScope = false;
+
+simulateContactsApiDisabled = true;
+const contactsApiDisabledReply = await handleTextMessage(env, lineUserId, "อีเมลของสมชาย", origin);
+check(
+  "a disabled People API gets an 'enable it in Cloud Console' message, not a re-link loop",
+  contactsApiDisabledReply.includes("Google Cloud Console") && !contactsApiDisabledReply.includes("เชื่อมบัญชี Google ใหม่อีกครั้ง")
+);
+simulateContactsApiDisabled = false;
+
+googleContacts = []; // clean up — the sections below don't expect any contacts to exist
+
+// 8.8. Nearby places (PLAN.md 17.30): "หา<คำ>ใกล้ฉัน" + LINE's native
 // location-sharing message. No OAuth, no confirm-before-save — the only
 // feature in this bot backed by a flat API key instead of a linked Google
 // account, and the only one that reads back public data without ever
@@ -3722,6 +3873,13 @@ check(
   "any group member can confirm the shared pending email send, same as calendar/diary/task above",
   groupEmailConfirmReply.includes("vendor@example.com") && gmailSent.length === groupEmailSentCountBefore + 1
 );
+
+// Contacts (PLAN.md 17.34) works in group mode too, for the same reason —
+// resolves against whichever Google account the group itself is linked to.
+googleContacts = [{ name: "ผู้ขายวัสดุ", email: "supplier@example.com" }];
+const groupContactLookupReply = await handleGroupTextMessage(env, groupId, groupSenderA, "อีเมลของผู้ขายวัสดุ", origin);
+check("contact lookup works in group mode", groupContactLookupReply.includes("supplier@example.com"));
+googleContacts = [];
 
 // Nearby places (PLAN.md 17.30) works in group mode too — but the location-
 // share message itself can't carry a text/@mention at all (LINE's

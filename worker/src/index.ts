@@ -4,6 +4,7 @@ import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { answerQuestion, matchAiCommand } from "./aiCommands.ts";
 import { interpretMessage, type InterpretedIntent } from "./aiInterpreter.ts";
 import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";
+import { ContactsApiDisabledError, InsufficientContactsScopeError } from "./contacts.ts";
 import { GmailApiDisabledError, InsufficientGmailScopeError } from "./gmail.ts";
 import { InsufficientTasksScopeError, TasksApiDisabledError } from "./tasks.ts";
 import {
@@ -32,7 +33,8 @@ import {
   promptTaskCreate,
   promptTaskDelete,
 } from "./taskCommands.ts";
-import { answerEmailCheck, matchGmailCommand, promptEmailSend } from "./gmailCommands.ts";
+import { answerEmailCheck, matchGmailCommand, promptEmailSendResolved } from "./gmailCommands.ts";
+import { answerContactEmail, matchContactsCommand } from "./contactsCommands.ts";
 import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
 import {
   broadcastMorningBriefings,
@@ -119,7 +121,7 @@ const WELCOME_MESSAGE = [
   "📔 บันทึกไดอารี่ประจำวัน ค้นย้อนหลังได้",
   "🗓️ ตารางเวร ติ๊กผ่านเว็บได้ แล้วถามผ่านแชทได้เลย เช่น \"มีเวรมั้ย\"",
   "✅ สิ่งที่ต้องทำ พิมพ์ \"เพิ่มสิ่งที่ต้องทำ <ข้อความ>\" ขึ้น Google Tasks ให้อัตโนมัติ",
-  "📧 เช็ค/ส่งอีเมลผ่านแชทได้เลย พิมพ์ \"เช็คอีเมล\" หรือ \"ส่งอีเมล ถึง ... เรื่อง ... ข้อความ ...\"",
+  "📧 เช็ค/ส่งอีเมลผ่านแชทได้เลย พิมพ์ \"เช็คอีเมล\" หรือ \"ส่งอีเมล ถึง ... เรื่อง ... ข้อความ ...\" (พิมพ์ชื่อผู้ติดต่อแทนอีเมลเต็มๆก็ได้ หรือถาม \"อีเมลของ<ชื่อ>\" เพื่อค้นหาเฉยๆ)",
   "📍 หาสถานที่ใกล้ตัว พิมพ์ \"หา<สิ่งที่จะหา>ใกล้ฉัน\" แล้วแชร์ตำแหน่งผ่านไลน์",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\"",
   "☀️ ทักทาย (\"สวัสดี\") ครั้งแรกของวัน สรุปวันที่/อากาศ/ข่าวให้ — หรือรอรับอัตโนมัติตอน 7 โมงเช้าทุกวันได้เลย ไม่ต้องทักก่อนก็ได้ พิมพ์ \"ตั้งจังหวัด <ชื่อ>\" ถ้าอยากให้บอกอากาศด้วย",
@@ -334,6 +336,18 @@ async function buildGmailRelinkPrompt(env: Env, lineUserId: string, origin: stri
 const GMAIL_API_DISABLED_MESSAGE =
   'อีเมลยังใช้ไม่ได้ เพราะ "Gmail API" ยังไม่ได้เปิดใช้งานในโปรเจกต์ Google Cloud (คนละเรื่องกับสิทธิ์ของบัญชีที่เชื่อมไว้ เชื่อมบัญชีใหม่ไม่ช่วย) ผู้ดูแลต้องไปที่ Google Cloud Console → APIs & Services → Library → ค้นหา "Gmail API" → กด Enable แล้วลองพิมพ์คำสั่งใหม่อีกครั้ง';
 
+// Same two functions again, for Contacts (PLAN.md 17.34) — accounts linked
+// before this feature shipped won't have contacts.readonly yet, needed both
+// for the standalone "อีเมลของ<ชื่อ>" lookup and for resolving a name typed
+// into "ส่งอีเมล ถึง <ชื่อ>".
+async function buildContactsRelinkPrompt(env: Env, lineUserId: string, origin: string): Promise<string> {
+  const authorizeUrl = await buildAuthorizeUrl(env, lineUserId, origin);
+  return `ต้องเชื่อมบัญชี Google ใหม่อีกครั้งเพื่อขอสิทธิ์ผู้ติดต่อเพิ่ม (บัญชีเดิมยังไม่มีสิทธิ์นี้) กดลิงก์นี้แล้วเลือกบัญชีเดิมได้เลย ข้อมูลเก่าจะไม่หายนะ\n${authorizeUrl}`;
+}
+
+const CONTACTS_API_DISABLED_MESSAGE =
+  'ผู้ติดต่อยังใช้ไม่ได้ เพราะ "People API" ยังไม่ได้เปิดใช้งานในโปรเจกต์ Google Cloud (คนละเรื่องกับสิทธิ์ของบัญชีที่เชื่อมไว้ เชื่อมบัญชีใหม่ไม่ช่วย) ผู้ดูแลต้องไปที่ Google Cloud Console → APIs & Services → Library → ค้นหา "People API" → กด Enable แล้วลองพิมพ์คำสั่งใหม่อีกครั้ง';
+
 // Builds the ActionCtx factory shared by dispatch functions below — pulled
 // out once so resolvePendingConfirmation, dispatchLegacyCommands, and
 // runInterpretedIntent (the AI interpreter's own routing table) all build it
@@ -385,6 +399,8 @@ async function resolvePendingConfirmation(
     if (err instanceof InsufficientTasksScopeError) return buildTasksRelinkPrompt(env, subjectId, origin);
     if (err instanceof GmailApiDisabledError) return GMAIL_API_DISABLED_MESSAGE;
     if (err instanceof InsufficientGmailScopeError) return buildGmailRelinkPrompt(env, subjectId, origin);
+    if (err instanceof ContactsApiDisabledError) return CONTACTS_API_DISABLED_MESSAGE;
+    if (err instanceof InsufficientContactsScopeError) return buildContactsRelinkPrompt(env, subjectId, origin);
     throw err;
   }
 }
@@ -461,8 +477,10 @@ async function runInterpretedIntent(
         return await withToken((ctx) => answerEmailCheck(ctx));
       case "email_send":
         return await withToken((ctx) =>
-          promptEmailSend(ctx, { to: intent.emailTo, subject: intent.emailSubject, body: intent.emailBody })
+          promptEmailSendResolved(ctx, intent.emailTo, intent.emailSubject, intent.emailBody)
         );
+      case "contact_lookup":
+        return await withToken((ctx) => answerContactEmail(ctx, intent.contactName));
       case "find_nearby_places":
         // No withFreshAccessToken here on purpose, same reasoning as
         // set_province/matchPlacesCommand below — place search only needs
@@ -493,6 +511,8 @@ async function runInterpretedIntent(
     if (err instanceof InsufficientTasksScopeError) return buildTasksRelinkPrompt(env, subjectId, origin);
     if (err instanceof GmailApiDisabledError) return GMAIL_API_DISABLED_MESSAGE;
     if (err instanceof InsufficientGmailScopeError) return buildGmailRelinkPrompt(env, subjectId, origin);
+    if (err instanceof ContactsApiDisabledError) return CONTACTS_API_DISABLED_MESSAGE;
+    if (err instanceof InsufficientContactsScopeError) return buildContactsRelinkPrompt(env, subjectId, origin);
     throw err;
   }
 }
@@ -598,6 +618,16 @@ async function dispatchLegacyCommands(
       );
     }
 
+    const contactsHandler = await matchContactsCommand(text);
+    if (contactsHandler) {
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => contactsHandler(actionCtx(accessToken)),
+        tokenCache
+      );
+    }
+
     const calendarHandler = await matchCalendarCommand(text);
     if (calendarHandler) {
       return await withFreshAccessToken(
@@ -678,6 +708,12 @@ async function dispatchLegacyCommands(
     }
     if (err instanceof InsufficientGmailScopeError) {
       return buildGmailRelinkPrompt(env, subjectId, origin);
+    }
+    if (err instanceof ContactsApiDisabledError) {
+      return CONTACTS_API_DISABLED_MESSAGE;
+    }
+    if (err instanceof InsufficientContactsScopeError) {
+      return buildContactsRelinkPrompt(env, subjectId, origin);
     }
     throw err;
   }
