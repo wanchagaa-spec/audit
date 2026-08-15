@@ -50,6 +50,11 @@ function renderTasksPage(token: string, tasks: TaskSummary[]): string {
     .map((dateKey) => {
       const rows = dated
         .get(dateKey)!
+        // Within a day, earliest time first too — the Tasks API returns
+        // manual position order, not due order, so two tasks due today at
+        // 15:30 and 09:00 would otherwise render in creation order.
+        // Timeless tasks ("ไม่ระบุเวลา") sort after every timed one.
+        .sort((a, b) => (a.dueTime ?? "\uffff").localeCompare(b.dueTime ?? "\uffff"))
         .map(
           (t) =>
             `<div class="row"><span>${escapeHtml(t.title)}</span><span class="meta">${escapeHtml(t.dueTime || "ไม่ระบุเวลา")}</span></div>`

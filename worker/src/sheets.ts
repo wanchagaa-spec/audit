@@ -116,29 +116,24 @@ export async function readTransactionsForMonth(
   return all.filter((r) => r.date?.startsWith(month));
 }
 
-/**
- * Deletes the most recently *created* transaction (by createdAt, matching
- * "รายการล่าสุด"'s own sort order) and returns the row that was removed, or
- * null if there's nothing to delete. Used by the "ลบรายการล่าสุด" /
- * "ยกเลิกรายการล่าสุด" undo command.
- */
-export async function deleteMostRecentTransaction(
+/** Shared by deleteMostRecentTransaction and deleteDiaryEntry — resolves
+ * the tab's sheetId and deletes one data row. `dataRowIndex` is 0-based
+ * within the raw A2:... values range (row 2 = index 0), so blank rows
+ * count — see updateDiaryEntry's comment on why indices must come from
+ * the raw response, never a filtered list. */
+async function deleteSheetRow(
   accessToken: string,
-  spreadsheetId: string
-): Promise<TransactionRow | null> {
-  const all = await readAllTransactions(accessToken, spreadsheetId);
-  if (all.length === 0) return null;
-
-  const mostRecent = [...all].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-  const rowIndex = all.findIndex((r) => r.id === mostRecent.id); // index within the A2:... data range
-
+  spreadsheetId: string,
+  sheetTitle: string,
+  dataRowIndex: number
+): Promise<void> {
   const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties`);
-  const sheet = (meta.sheets ?? []).find((s: any) => s.properties.title === "Transactions");
+  const sheet = (meta.sheets ?? []).find((s: any) => s.properties.title === sheetTitle);
   const sheetId = sheet?.properties?.sheetId;
-  if (sheetId === undefined) throw new Error("Transactions sheet not found");
+  if (sheetId === undefined) throw new Error(`${sheetTitle} sheet not found`);
 
   // +1 because data starts at row index 1 (0-based) — row 0 is the header.
-  const startIndex = rowIndex + 1;
+  const startIndex = dataRowIndex + 1;
   await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
     method: "POST",
     body: JSON.stringify({
@@ -151,7 +146,53 @@ export async function deleteMostRecentTransaction(
       ],
     }),
   });
+}
 
+/**
+ * Deletes the most recently *created* transaction (by createdAt, matching
+ * "รายการล่าสุด"'s own sort order) and returns the row that was removed, or
+ * null if there's nothing to delete. Used by the "ลบรายการล่าสุด" /
+ * "ยกเลิกรายการล่าสุด" undo command.
+ *
+ * Scans the *raw* values response to find the physical row, not the
+ * filtered list readAllTransactions returns — a blank (cells-cleared) row
+ * anywhere above the target would otherwise skew the index and delete a
+ * neighboring row. Same fix as updateDiaryEntry/deleteDiaryEntry (see the
+ * Diary section's comment), applied here because this function had the
+ * identical latent flaw.
+ */
+export async function deleteMostRecentTransaction(
+  accessToken: string,
+  spreadsheetId: string
+): Promise<TransactionRow | null> {
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Transactions!A2:J100000`);
+  const rawRows: string[][] = data.values ?? [];
+
+  // Most recent by createdAt (column index 9); ties keep the earliest row,
+  // matching the previous sort-based implementation's stable-sort behavior.
+  let rawIndex = -1;
+  for (let i = 0; i < rawRows.length; i++) {
+    const r = rawRows[i];
+    if (!r[0]) continue;
+    if (rawIndex === -1 || (r[9] ?? "") > (rawRows[rawIndex][9] ?? "")) rawIndex = i;
+  }
+  if (rawIndex === -1) return null;
+
+  const r = rawRows[rawIndex];
+  const mostRecent: TransactionRow = {
+    id: r[0],
+    date: r[1],
+    type: r[2] as "income" | "expense",
+    amount: Number(r[3]),
+    categoryId: r[4],
+    note: r[5] ?? "",
+    rawText: r[6] ?? "",
+    addedBy: r[7] ?? "",
+    addedByName: r[8] ?? "",
+    createdAt: r[9] ?? "",
+  };
+
+  await deleteSheetRow(accessToken, spreadsheetId, "Transactions", rawIndex);
   return mostRecent;
 }
 
@@ -247,11 +288,30 @@ export async function readAllDiaryEntries(
 
 // PLAN.md 17.36: edit/delete now live on /view/diary (viewDiaryPage.ts)
 // instead of chat commands — a diary entry is a single row identified by
-// `id`, the same row-per-entry shape as Transactions, so both of these
-// mirror deleteMostRecentTransaction's find-row-index-then-batchUpdate
-// approach. `createdAt` is deliberately preserved (never part of the
-// caller's `updates`) — it's when the entry was originally written, not
-// when it was last edited, so an edit shouldn't change it.
+// `id`, the same row-per-entry shape as Transactions. `createdAt` is
+// deliberately preserved on edit (never part of the caller's `updates`) —
+// it's when the entry was originally written, not when it was last edited.
+//
+// Both helpers locate the row by scanning the *raw* values response, NOT
+// the filtered list readAllDiaryEntries returns — the values API returns
+// a blank row (one whose cells were cleared by hand in Google Sheets, as
+// opposed to the row itself being deleted) as an empty [] entry, which
+// the filtered list drops. An index into the filtered list would then be
+// off by one physical row for everything below the blank, silently
+// editing/deleting a *neighboring* entry. Caught in code review before
+// this ever shipped, along with the same latent flaw in
+// deleteMostRecentTransaction (fixed there too, further up).
+//
+// Known, accepted race (no fix available): the Sheets API has no
+// transactions, so between the raw read here and the PUT/batchUpdate that
+// follows, a concurrent delete from another tab can shift rows and land
+// this write on the wrong one. The window is milliseconds wide on a
+// single-user personal tool — noted honestly rather than pretended away.
+
+async function readDiaryRawRows(accessToken: string, spreadsheetId: string): Promise<string[][]> {
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A2:E100000`);
+  return data.values ?? [];
+}
 
 /** Returns false (not an error) if no row with this id exists — the entry
  * may already have been deleted by a concurrent edit from the same user in
@@ -263,12 +323,13 @@ export async function updateDiaryEntry(
   id: string,
   updates: { date: string; category: string; text: string }
 ): Promise<boolean> {
-  const all = await readAllDiaryEntries(accessToken, spreadsheetId, kv);
-  const rowIndex = all.findIndex((r) => r.id === id);
-  if (rowIndex === -1) return false;
+  await ensureDiaryTab(accessToken, spreadsheetId, kv);
+  const rawRows = await readDiaryRawRows(accessToken, spreadsheetId);
+  const rawIndex = rawRows.findIndex((r) => r[0] === id);
+  if (rawIndex === -1) return false;
 
-  const rowNumber = rowIndex + 2; // +1 for the header row, +1 to go from 0-based to 1-based
-  const values = [[id, updates.date, updates.category, updates.text, all[rowIndex].createdAt]];
+  const rowNumber = rawIndex + 2; // +1 for the header row, +1 to go from 0-based to 1-based
+  const values = [[id, updates.date, updates.category, updates.text, rawRows[rawIndex][4] ?? ""]];
   await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A${rowNumber}:E${rowNumber}?valueInputOption=RAW`, {
     method: "PUT",
     body: JSON.stringify({ values }),
@@ -284,24 +345,12 @@ export async function deleteDiaryEntry(
   kv: KVNamespace,
   id: string
 ): Promise<boolean> {
-  const all = await readAllDiaryEntries(accessToken, spreadsheetId, kv);
-  const rowIndex = all.findIndex((r) => r.id === id);
-  if (rowIndex === -1) return false;
+  await ensureDiaryTab(accessToken, spreadsheetId, kv);
+  const rawRows = await readDiaryRawRows(accessToken, spreadsheetId);
+  const rawIndex = rawRows.findIndex((r) => r[0] === id);
+  if (rawIndex === -1) return false;
 
-  const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties`);
-  const sheet = (meta.sheets ?? []).find((s: any) => s.properties.title === "Diary");
-  const sheetId = sheet?.properties?.sheetId;
-  if (sheetId === undefined) throw new Error("Diary sheet not found");
-
-  // +1 because data starts at row index 1 (0-based) — row 0 is the header,
-  // same convention deleteMostRecentTransaction already uses.
-  const startIndex = rowIndex + 1;
-  await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
-    method: "POST",
-    body: JSON.stringify({
-      requests: [{ deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex, endIndex: startIndex + 1 } } }],
-    }),
-  });
+  await deleteSheetRow(accessToken, spreadsheetId, "Diary", rawIndex);
   return true;
 }
 

@@ -26,6 +26,17 @@ import { DATA_FETCH_FAILED_MESSAGE, escapeHtml, html, pageShell, renderErrorPage
 const MONTH_KEY_PATTERN = /^\d{4}-\d{2}$/;
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
+/** Shape AND calendar validity — the pattern alone accepts "2026-99-99",
+ * which would be written verbatim and orphan the entry from every month
+ * view (only text search could ever find it again). Round-tripping
+ * through Date catches that: Date("2026-99-99") is Invalid Date, and
+ * Date("2026-02-30") normalizes to a different ISO day than was given. */
+function isValidDateKey(raw: string): boolean {
+  if (!DATE_KEY_PATTERN.test(raw)) return false;
+  const d = new Date(`${raw}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === raw;
+}
+
 function shiftMonthKey(monthKey: string, delta: number): string {
   const [y, m] = monthKey.split("-").map(Number);
   const d = new Date(Date.UTC(y, m - 1 + delta, 1));
@@ -210,24 +221,41 @@ export async function handleViewDiaryRequest(request: Request, env: Env): Promis
       const op = String(formData.get("op") ?? "");
       const id = String(formData.get("id") ?? "");
 
-      if (op === "delete") {
-        await deleteDiaryEntry(session.accessToken, session.spreadsheetId, env.ACCOUNTS, id);
+      const renderMonthWithNotice = async (notice: string) => {
         const monthRows = (await readAllDiaryEntries(session.accessToken, session.spreadsheetId, env.ACCOUNTS)).filter(
           (r) => r.date?.startsWith(month)
         );
-        return html(renderDiaryPage(session.token, month, monthRows, "ลบบันทึกแล้ว"));
+        return html(renderDiaryPage(session.token, month, monthRows, notice));
+      };
+
+      if (op === "delete") {
+        // The helper returns false when the id is already gone (deleted
+        // from another tab, or a stale page) — say so honestly instead of
+        // claiming this request deleted anything.
+        const deleted = await deleteDiaryEntry(session.accessToken, session.spreadsheetId, env.ACCOUNTS, id);
+        return renderMonthWithNotice(deleted ? "ลบบันทึกแล้ว" : "ไม่พบบันทึกนี้แล้ว อาจถูกลบไปก่อนหน้านี้");
       }
 
       if (op === "update") {
         const rawDate = String(formData.get("date") ?? "");
-        const date = DATE_KEY_PATTERN.test(rawDate) ? rawDate : month + "-01";
         const category = String(formData.get("category") ?? "").trim() || "อื่นๆ";
         const text = String(formData.get("text") ?? "").trim();
-        await updateDiaryEntry(session.accessToken, session.spreadsheetId, env.ACCOUNTS, id, { date, category, text });
-        const monthRows = (await readAllDiaryEntries(session.accessToken, session.spreadsheetId, env.ACCOUNTS)).filter(
-          (r) => r.date?.startsWith(month)
-        );
-        return html(renderDiaryPage(session.token, month, monthRows, "บันทึกการแก้ไขแล้ว"));
+        // Both rejections below re-render with the entry's *stored* state
+        // untouched — never silently substitute a different date, and
+        // never let an accidental select-all-then-save blank an entry's
+        // text with less friction than the delete flow's confirm page.
+        if (!isValidDateKey(rawDate)) {
+          return renderMonthWithNotice("วันที่ไม่ถูกต้อง ยังไม่ได้บันทึกการแก้ไขนะ ลองใหม่อีกครั้ง");
+        }
+        if (!text) {
+          return renderMonthWithNotice('ข้อความว่างเปล่า ยังไม่ได้บันทึกนะ ถ้าต้องการลบบันทึกนี้ให้กดปุ่ม "ลบ" แทน');
+        }
+        const updated = await updateDiaryEntry(session.accessToken, session.spreadsheetId, env.ACCOUNTS, id, {
+          date: rawDate,
+          category,
+          text,
+        });
+        return renderMonthWithNotice(updated ? "บันทึกการแก้ไขแล้ว" : "ไม่พบบันทึกนี้แล้ว อาจถูกลบไปก่อนหน้านี้ เลยไม่ได้บันทึกการแก้ไข");
       }
 
       return html(renderErrorPage("เกิดข้อผิดพลาด", "ไม่รู้จักคำสั่งนี้ ลองกลับไปที่หน้าไดอารี่แล้วลองใหม่นะ"), 400);

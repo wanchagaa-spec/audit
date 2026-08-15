@@ -1025,6 +1025,29 @@ check(
   deleteLastConfirmReply.includes("ลบรายการล่าสุดแล้ว") && sheetRows.length === rowCountBeforeDelete - 1
 );
 
+// Code-review fix (found while reviewing PLAN.md 17.36's diary helpers,
+// which copied this function's shape): a blank (cells-cleared) sheet row
+// comes back from the values API as [], which readAllTransactions filters
+// out — deleteMostRecentTransaction used to compute the physical row from
+// the *filtered* index, so a blank row above the target deleted the
+// neighboring row instead. Must scan the raw response now.
+const blankRowInsertAt = sheetRows.length; // insert the blank right above where the new row will land
+sheetRows.push([]);
+const blankRowDeletePromptReply = await handleTextMessage(env, lineUserId, "น้ำเปล่า 10", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin); // confirm-save it
+const rowCountBeforeBlankRowDelete = sheetRows.length;
+await handleTextMessage(env, lineUserId, "ลบรายการล่าสุด", origin);
+const blankRowDeleteConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "deleting the last transaction below a hand-cleared blank sheet row removes the right physical row, not a neighbor",
+  blankRowDeletePromptReply.includes("10") &&
+    blankRowDeleteConfirmReply.includes("ลบรายการล่าสุดแล้ว") &&
+    sheetRows.length === rowCountBeforeBlankRowDelete - 1 &&
+    sheetRows[blankRowInsertAt].length === 0 && // the blank row itself is untouched
+    !sheetRows.some((r) => r[5] === "น้ำเปล่า" || r[6] === "น้ำเปล่า 10")
+);
+sheetRows.splice(blankRowInsertAt, 1); // remove the blank so later exact-count assertions aren't perturbed
+
 // Regression test for a real report: several items sent as one message, one
 // per line, used to be logged as a single transaction — extractAmount only
 // ever finds the first number in the whole text, so everything after the
@@ -3418,9 +3441,120 @@ const diaryEditMissingIdResponse = await worker.fetch(
   env,
   new FakeExecutionContext()
 );
+const diaryEditMissingIdHtml = await diaryEditMissingIdResponse.text();
 check(
-  "editing an id that no longer exists degrades gracefully instead of erroring",
-  diaryEditMissingIdResponse.status === 200
+  "editing an id that no longer exists says so honestly instead of showing a false success notice (code-review fix)",
+  diaryEditMissingIdResponse.status === 200 &&
+    diaryEditMissingIdHtml.includes("ไม่พบบันทึกนี้แล้ว") &&
+    !diaryEditMissingIdHtml.includes("บันทึกการแก้ไขแล้ว")
+);
+
+// Code-review fixes (post-17.36 review pass), each with its own regression
+// test: (1) an empty-textarea save must not silently wipe an entry's text,
+// (2) an invalid date must be rejected, never silently rewritten or
+// written verbatim, (3) a blank (cells-cleared) sheet row above the target
+// must not skew the edit/delete onto a neighboring row.
+
+diaryRows.push(["diary-review-fix-1", bangkokDateKey(), "ทั่วไป", "ข้อความเดิมห้ามหาย", new Date().toISOString()]);
+
+const diaryEmptyTextResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ op: "update", id: "diary-review-fix-1", date: bangkokDateKey(), category: "ทั่วไป", text: "   " }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+const diaryEmptyTextHtml = await diaryEmptyTextResponse.text();
+check(
+  "an empty-textarea save is rejected with a pointer to the delete button, and the stored text is untouched",
+  diaryEmptyTextResponse.status === 200 &&
+    diaryEmptyTextHtml.includes("ข้อความว่างเปล่า") &&
+    !diaryEmptyTextHtml.includes("บันทึกการแก้ไขแล้ว") &&
+    diaryRows.find((r) => r[0] === "diary-review-fix-1")[3] === "ข้อความเดิมห้ามหาย"
+);
+
+const diaryBadDateResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ op: "update", id: "diary-review-fix-1", date: "15/08/2026", category: "ทั่วไป", text: "ใหม่" }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "a wrong-format date (e.g. a browser without <input type=date>) is rejected, not silently rewritten to the 1st of the month",
+  diaryBadDateResponse.status === 200 &&
+    (await diaryBadDateResponse.text()).includes("วันที่ไม่ถูกต้อง") &&
+    diaryRows.find((r) => r[0] === "diary-review-fix-1")[3] === "ข้อความเดิมห้ามหาย"
+);
+
+const diaryFakeDateResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ op: "update", id: "diary-review-fix-1", date: "2026-99-99", category: "ทั่วไป", text: "ใหม่" }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "a pattern-shaped but non-calendar date (2026-99-99) is rejected too, so no entry can be orphaned from every month view",
+  diaryFakeDateResponse.status === 200 &&
+    (await diaryFakeDateResponse.text()).includes("วันที่ไม่ถูกต้อง") &&
+    diaryRows.find((r) => r[0] === "diary-review-fix-1")[1] === bangkokDateKey()
+);
+
+// Blank-row skew: a row whose cells were cleared by hand in Google Sheets
+// comes back from the values API as [], which readAllDiaryEntries filters
+// out — the edit/delete row arithmetic must come from the RAW response, or
+// everything below the blank is off by one physical row.
+diaryRows.length = 0;
+diaryRows.push(["diary-blank-above-1", bangkokDateKey(), "ทั่วไป", "แถวบน", new Date().toISOString()]);
+diaryRows.push([]); // the hand-cleared blank row
+diaryRows.push(["diary-blank-below-1", bangkokDateKey(), "ทั่วไป", "แถวล่างที่จะแก้", new Date().toISOString()]);
+
+const diaryBlankRowEditResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      op: "update",
+      id: "diary-blank-below-1",
+      date: bangkokDateKey(),
+      category: "ทั่วไป",
+      text: "แก้แล้วถูกแถว",
+    }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "editing an entry below a hand-cleared blank sheet row lands on the right physical row (code-review fix)",
+  diaryBlankRowEditResponse.status === 200 &&
+    diaryRows[2][0] === "diary-blank-below-1" &&
+    diaryRows[2][3] === "แก้แล้วถูกแถว" &&
+    diaryRows[0][3] === "แถวบน" && // the neighbor above the blank is untouched
+    diaryRows[1].length === 0 // the blank row itself is untouched
+);
+
+const diaryBlankRowDeleteResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ op: "delete", id: "diary-blank-below-1" }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "deleting an entry below a blank sheet row removes the right physical row, not a neighbor",
+  diaryBlankRowDeleteResponse.status === 200 &&
+    diaryRows.length === 2 &&
+    diaryRows[0][0] === "diary-blank-above-1" &&
+    diaryRows[1].length === 0
 );
 diaryRows.length = 0; // clean up — nothing after this reads diaryRows
 
@@ -3565,6 +3699,16 @@ googleTasks.push({
 });
 const tasksViewUndatedTaskId = "task-view-test-2";
 googleTasks.push({ id: tasksViewUndatedTaskId, title: "จัดตู้เย็น", status: "needsAction" });
+// Created AFTER the 15:30 task but due EARLIER the same day — the Tasks
+// API returns manual position order, so without an explicit within-day
+// sort this would render 15:30 before 09:00 (code-review fix).
+const tasksViewEarlierTaskId = "task-view-test-3";
+googleTasks.push({
+  id: tasksViewEarlierTaskId,
+  title: "ประชุมเช้า",
+  status: "needsAction",
+  due: new Date(`${bangkokDateKey()}T09:00:00+07:00`).toISOString(),
+});
 
 const tasksViewResponse = await worker.fetch(new Request(`${origin}/view/tasks?token=${viewToken}`), env, new FakeExecutionContext());
 const tasksViewHtml = await tasksViewResponse.text();
@@ -3575,6 +3719,10 @@ check(
 check(
   "a task with no due date at all shows up under its own \"ไม่มีกำหนด\" section, not dropped",
   tasksViewHtml.includes("จัดตู้เย็น") && tasksViewHtml.includes("ไม่มีกำหนด")
+);
+check(
+  "within one day, tasks render earliest due time first regardless of creation order",
+  tasksViewHtml.indexOf("ประชุมเช้า") !== -1 && tasksViewHtml.indexOf("ประชุมเช้า") < tasksViewHtml.indexOf("ส่งรายงานทีม")
 );
 
 simulateInsufficientTasksScope = true;
@@ -3593,10 +3741,10 @@ check(
 );
 simulateTasksApiDisabled = false;
 
-const tasksViewIdx1 = googleTasks.findIndex((t) => t.id === tasksViewDueTaskId);
-if (tasksViewIdx1 >= 0) googleTasks.splice(tasksViewIdx1, 1);
-const tasksViewIdx2 = googleTasks.findIndex((t) => t.id === tasksViewUndatedTaskId);
-if (tasksViewIdx2 >= 0) googleTasks.splice(tasksViewIdx2, 1);
+for (const cleanupId of [tasksViewDueTaskId, tasksViewUndatedTaskId, tasksViewEarlierTaskId]) {
+  const idx = googleTasks.findIndex((t) => t.id === cleanupId);
+  if (idx >= 0) googleTasks.splice(idx, 1);
+}
 
 // Group mode (PLAN.md 17) — a shared account bound to a LINE groupId
 // instead of an individual's userId, gated on the bot being @-mentioned.
