@@ -81,6 +81,7 @@ import {
 import { applyPersona, BOT_NAME } from "./persona.ts";
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
+import { answerFlightSearch, answerGroundSearch, answerHotelSearch, matchTravelCommand } from "./travelCommands.ts";
 import { endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
@@ -111,10 +112,16 @@ export interface Env {
   // the feature isn't set up yet if this is missing, same as ถาม/วิเคราะห์
   // do when GEMINI_API_KEY is missing.
   GOOGLE_MAPS_API_KEY: string;
+  // Travelpayouts Data API token (PLAN.md 17.37) — optional, same
+  // degrade-gracefully treatment as GOOGLE_MAPS_API_KEY: travel search
+  // still sends booking links without it, it just can't show prices in
+  // chat. (Originally Amadeus credentials — swapped before ever going
+  // live, see travel.ts's own comment on the Amadeus portal shutdown.)
+  TRAVELPAYOUTS_TOKEN: string;
 }
 
 const WELCOME_MESSAGE = [
-  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 11 เรื่องหลักๆ:`,
+  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 12 เรื่องหลักๆ:`,
   "",
   "💰 จดรายรับ-รายจ่ายประจำวัน พร้อมสรุปรายงาน",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติขึ้น Google Drive",
@@ -124,6 +131,7 @@ const WELCOME_MESSAGE = [
   "✅ จัดการสิ่งที่ต้องทำ (Google Tasks)",
   "📧 เช็ค/ส่งอีเมล พร้อมค้นหาอีเมลผู้ติดต่อให้",
   "📍 หาร้าน/สถานที่ใกล้ตัวจากตำแหน่งจริง",
+  "🎫 หาตั๋วเครื่องบิน/รถทัวร์/รถไฟ และที่พัก เทียบราคาพร้อมลิงก์กดจองเอง",
   "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI",
   "☀️ สรุปวันที่/อากาศ/ข่าวให้ทุกเช้าอัตโนมัติ",
   "🌐 ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวร/สิ่งที่ต้องทำผ่านเว็บ",
@@ -487,6 +495,31 @@ async function runInterpretedIntent(
         // set_province/matchPlacesCommand below — place search only needs
         // the flat Maps API key, never a per-user Google access token.
         return await promptPlaceSearch({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.placeKeyword);
+      // Travel search (PLAN.md 17.37) — read-only, no per-user Google auth
+      // (an app-level Amadeus key at most), same no-withToken reasoning as
+      // find_nearby_places above.
+      case "flight_search":
+        return await answerFlightSearch(env, {
+          originCode: intent.flightOriginCode,
+          destinationCode: intent.flightDestinationCode,
+          originName: intent.flightOriginName,
+          destinationName: intent.flightDestinationName,
+          dateKey: intent.flightDateKey,
+        });
+      case "hotel_search":
+        return await answerHotelSearch(env, {
+          cityName: intent.hotelCityName,
+          checkInDateKey: intent.hotelCheckInDateKey,
+          checkOutDateKey: intent.hotelCheckOutDateKey,
+        });
+      case "ground_ticket_search":
+        return answerGroundSearch({
+          originName: intent.groundOriginName,
+          destinationName: intent.groundDestinationName,
+          originSlug: intent.groundOriginSlug,
+          destinationSlug: intent.groundDestinationSlug,
+          dateKey: intent.groundDateKey,
+        });
       case "trip_start":
         return await withToken((ctx) => promptOrStartTrip(ctx, intent.tripName));
       case "trip_end":
@@ -664,6 +697,17 @@ async function dispatchLegacyCommands(
     const placesHandler = await matchPlacesCommand(text);
     if (placesHandler) {
       return await placesHandler({ kv: env.ACCOUNTS, lineUserId: subjectId });
+    }
+
+    // Travel search (PLAN.md 17.37) — no per-user Google auth either (an
+    // app-level Amadeus key at most, see travelCommands.ts). Ordering
+    // matters twice here: after Places, so "หาที่พักใกล้ฉัน" stays a GPS
+    // nearby-search; before matchCommand's report handler at the bottom,
+    // whose transaction-search regex ("^(?:ค้นหา|หา)...") would otherwise
+    // swallow every "หาตั๋ว..."/"หาที่พัก..." as a money-note search.
+    const travelHandler = await matchTravelCommand(text);
+    if (travelHandler) {
+      return await travelHandler(env);
     }
 
     // Works in both modes (PLAN.md 17.7) — resolveViewSession (viewAuth.ts)

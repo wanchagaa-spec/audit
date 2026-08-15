@@ -54,6 +54,28 @@ export type InterpretedIntent =
   | { intent: "email_send"; emailTo: string; emailSubject: string; emailBody: string }
   | { intent: "contact_lookup"; contactName: string }
   | { intent: "find_nearby_places"; placeKeyword: string }
+  | {
+      intent: "flight_search";
+      flightOriginCode: string;
+      flightDestinationCode: string;
+      flightOriginName: string;
+      flightDestinationName: string;
+      flightDateKey: string;
+    }
+  | {
+      intent: "hotel_search";
+      hotelCityName: string;
+      hotelCheckInDateKey: string;
+      hotelCheckOutDateKey: string;
+    }
+  | {
+      intent: "ground_ticket_search";
+      groundOriginName: string;
+      groundDestinationName: string;
+      groundOriginSlug: string;
+      groundDestinationSlug: string;
+      groundDateKey?: string;
+    }
   | { intent: "trip_start"; tripName: string }
   | { intent: "trip_end" }
   | { intent: "trip_status" }
@@ -89,6 +111,17 @@ function isValidTime(s: unknown): s is string {
 
 function isNonEmptyString(s: unknown): s is string {
   return typeof s === "string" && s.trim().length > 0;
+}
+
+// Travel search (PLAN.md 17.37): these two go straight into API query
+// params and URL path segments respectively, so their shape is pinned to
+// exactly what those sinks accept — anything else rejects the whole intent.
+function isValidIataCode(s: unknown): s is string {
+  return typeof s === "string" && /^[A-Z]{3}$/.test(s);
+}
+
+function isValid12GoSlug(s: unknown): s is string {
+  return typeof s === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s);
 }
 
 function validateTransaction(raw: unknown): InterpretedTransaction | null {
@@ -200,6 +233,47 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       if (!isNonEmptyString(r.placeKeyword)) return null;
       return { intent: "find_nearby_places", placeKeyword: r.placeKeyword };
     }
+    // Travel search (PLAN.md 17.37): the codes/slugs the model produces
+    // feed straight into API queries and URLs, so their *shape* is pinned
+    // hard here (3-letter IATA, lowercase-kebab slug) — a wrong-but-
+    // well-formed code degrades to an empty result plus working links,
+    // never to a malformed request.
+    case "flight_search": {
+      if (!isValidIataCode(r.flightOriginCode) || !isValidIataCode(r.flightDestinationCode)) return null;
+      if (!isNonEmptyString(r.flightOriginName) || !isNonEmptyString(r.flightDestinationName)) return null;
+      if (!isValidDateKey(r.flightDateKey)) return null;
+      return {
+        intent: "flight_search",
+        flightOriginCode: r.flightOriginCode,
+        flightDestinationCode: r.flightDestinationCode,
+        flightOriginName: r.flightOriginName,
+        flightDestinationName: r.flightDestinationName,
+        flightDateKey: r.flightDateKey,
+      };
+    }
+    case "hotel_search": {
+      if (!isNonEmptyString(r.hotelCityName)) return null;
+      if (!isValidDateKey(r.hotelCheckInDateKey) || !isValidDateKey(r.hotelCheckOutDateKey)) return null;
+      return {
+        intent: "hotel_search",
+        hotelCityName: r.hotelCityName,
+        hotelCheckInDateKey: r.hotelCheckInDateKey,
+        hotelCheckOutDateKey: r.hotelCheckOutDateKey,
+      };
+    }
+    case "ground_ticket_search": {
+      if (!isNonEmptyString(r.groundOriginName) || !isNonEmptyString(r.groundDestinationName)) return null;
+      if (!isValid12GoSlug(r.groundOriginSlug) || !isValid12GoSlug(r.groundDestinationSlug)) return null;
+      const groundDateKey = isValidDateKey(r.groundDateKey) ? r.groundDateKey : undefined;
+      return {
+        intent: "ground_ticket_search",
+        groundOriginName: r.groundOriginName,
+        groundDestinationName: r.groundDestinationName,
+        groundOriginSlug: r.groundOriginSlug,
+        groundDestinationSlug: r.groundDestinationSlug,
+        groundDateKey,
+      };
+    }
     case "trip_start": {
       if (!isNonEmptyString(r.tripName)) return null;
       return { intent: "trip_start", tripName: r.tripName };
@@ -244,7 +318,7 @@ function buildCategoryList(): string {
 // same way persona.ts's system instruction has its own marker string.
 function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
   return [
-    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/ผู้ติดต่อ/หาสถานที่ใกล้ตัว/ถามคำถาม)`,
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/ผู้ติดต่อ/หาสถานที่ใกล้ตัว/หาตั๋วเดินทาง-ที่พัก/ถามคำถาม)`,
     `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
     "",
     "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",
@@ -272,6 +346,9 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"email_send","emailTo":string,"emailSubject":string,"emailBody":string} — ส่งอีเมลใหม่ emailTo เป็นได้ทั้งที่อยู่อีเมลเต็มๆ หรือชื่อผู้ติดต่อจริงที่ผู้ใช้พิมพ์มา (มีระบบค้นหาผู้ติดต่อแปลงชื่อเป็นอีเมลให้เองอีกที ไม่ต้องแปลงเอง) ต้องรู้หัวข้อและเนื้อหาแน่ชัดทั้งหมดด้วย (ดูกติกาด้านล่างเรื่องห้ามเดาที่อยู่อีเมล/ชื่อ)',
     '{"intent":"contact_lookup","contactName":string} — ถามหาอีเมลของผู้ติดต่อคนนี้โดยตรง ไม่ใช่ตอนจะส่งอีเมล เช่น "อีเมลของสมชาย", "ขออีเมลสมหญิงหน่อย" (contactName ต้องเป็นชื่อจริงที่ผู้ใช้พิมพ์มาเท่านั้น ห้ามเดา)',
     '{"intent":"find_nearby_places","placeKeyword":string} — อยากหาสถานที่/ร้าน/บริการใกล้ตัว ไม่ว่าจะพิมพ์แบบไหนก็ตาม เช่น "ร้านกาแฟใกล้ฉัน", "แถวนี้มีร้านอาหารไหม", "หาปั๊มน้ำมันหน่อย" (placeKeyword คือสิ่งที่อยากหา ตัดคำว่า "ใกล้ฉัน/แถวนี้/ใกล้ๆ" ออก) — บอทจะขอตำแหน่ง GPS จริงจากผู้ใช้ต่อเอง ห้ามตอบชื่อร้าน/สถานที่จริงเองเด็ดขาดเพราะไม่มีข้อมูลตำแหน่งผู้ใช้ให้ค้นหาจริง',
+    '{"intent":"flight_search","flightOriginCode":"IATA 3 ตัวใหญ่","flightDestinationCode":"IATA 3 ตัวใหญ่","flightOriginName":string,"flightDestinationName":string,"flightDateKey":"YYYY-MM-DD"} — หาตั๋วเครื่องบิน/เทียบราคาเที่ยวบิน เช่น "หาตั๋วไปเชียงใหม่พรุ่งนี้" (Code คือรหัสสนามบิน/เมืองมาตรฐาน IATA ที่ตรงกับเมืองนั้นจริงๆ เช่น กรุงเทพ=BKK เชียงใหม่=CNX ภูเก็ต=HKT — แปลงชื่อเมืองเป็นรหัสได้เลยเพราะเป็นข้อมูลมาตรฐานสากล ไม่ใช่การเดาข้อมูลส่วนตัว แต่ถ้าไม่แน่ใจรหัสของเมืองไหนจริงๆ ให้ใช้ unclear ถามกลับ; Name คือชื่อเมืองตามที่ผู้ใช้พิมพ์; ไม่บอกต้นทางให้ถือว่าออกจากกรุงเทพ/BKK ได้; ต้องรู้วันที่แน่ชัด ไม่รู้ให้ unclear)',
+    '{"intent":"hotel_search","hotelCityName":string,"hotelCheckInDateKey":"YYYY-MM-DD","hotelCheckOutDateKey":"YYYY-MM-DD"} — หาที่พัก/โรงแรม/เทียบราคาที่พักในเมืองหนึ่งๆ เช่น "หาที่พักภูเก็ต ศุกร์นี้ 2 คืน" (hotelCityName คือชื่อเมืองตามที่ผู้ใช้พิมพ์; บอกจำนวนคืนมาก็คำนวณ checkOut จาก checkIn ได้; บอกแค่วันเดียวไม่บอกจำนวนคืน = พัก 1 คืน; ไม่รู้วันที่เลยให้ unclear)',
+    '{"intent":"ground_ticket_search","groundOriginName":string,"groundDestinationName":string,"groundOriginSlug":"ชื่อเมืองอังกฤษตัวเล็ก-คั่นขีด","groundDestinationSlug":"ชื่อเมืองอังกฤษตัวเล็ก-คั่นขีด","groundDateKey"?:"YYYY-MM-DD"} — หาตั๋วรถทัวร์/รถไฟ/รถตู้/เรือระหว่างเมือง เช่น "ตั๋วรถทัวร์ไปขอนแก่น" (slug คือชื่อเมืองภาษาอังกฤษตัวพิมพ์เล็กคั่นด้วยขีด เช่น bangkok, chiang-mai, khon-kaen; ไม่บอกต้นทางให้ถือว่า bangkok; วันที่ใส่เฉพาะตอนผู้ใช้ระบุ)',
     '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
     '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',

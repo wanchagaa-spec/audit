@@ -98,6 +98,28 @@ it's just a flat API key, the same shape as `GEMINI_API_KEY` above (PLAN.md 17.3
 4. This is optional, same as `GEMINI_API_KEY` — skip it and every other feature works fine;
    "หา...ใกล้ฉัน" will just reply that the feature isn't set up yet instead of crashing.
 
+### 4.6. Get a free Travelpayouts token (powers the prices in travel search)
+
+Optional, same flat-key shape as the two keys above — travel search ("หาตั๋วเครื่องบิน...",
+"หาที่พัก...") always sends prefilled booking links (Google Flights/Skyscanner/Agoda/Booking/
+12Go) even without this; the token only adds the real prices shown in chat (PLAN.md 17.37).
+
+1. Sign up free at https://www.travelpayouts.com (it's Aviasales/Hotellook's partner
+   platform — signup is free, no card). In the dashboard, find your **API token** (under
+   the developers/API section).
+2. That single token covers both the flight-prices API (Aviasales) and the hotel-prices
+   API (Hotellook) this bot uses.
+3. Honest caveat, said in every reply too: these are **cached** prices from recent
+   searches, not a live availability check — great for comparing (and the cache does
+   include Thai low-cost carriers like AirAsia/Nok Air), but the linked sites are the
+   source of truth at booking time.
+
+> **Why not Amadeus?** This feature was originally built against Amadeus Self-Service —
+> then turned out to be unusable before it ever went live: Amadeus decommissioned that
+> entire portal on 2026-07-17 (new registrations closed earlier; existing keys disabled),
+> discovered when signing up found no Register button at all. Travelpayouts is the
+> surviving free option.
+
 ### 5. Deploy — no terminal needed, everything runs on GitHub
 
 Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
@@ -115,6 +137,7 @@ Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
    | `STATE_SIGNING_SECRET` | any long random string you make up |
    | `GEMINI_API_KEY` | from step 4 (optional — omit and "ถาม"/"วิเคราะห์" just always reply with the fallback message) |
    | `GOOGLE_MAPS_API_KEY` | from step 4.5 (optional — omit and "หา...ใกล้ฉัน" just replies that the feature isn't set up) |
+   | `TRAVELPAYOUTS_TOKEN` | from step 4.6 (optional — omit and travel search sends booking links without in-chat prices) |
 
 2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
    **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
@@ -575,6 +598,43 @@ Nearby Search, only takes a fixed enum of place-type categories, not arbitrary T
   "หา...ใกล้ฉัน" text command), not by re-mentioning the bot on the location share itself — the
   same "trip active" pattern trip photos already use for the same reason. An unprompted
   location share with nothing pending gets no reply at all, in either mode.
+
+### Travel search: flights, hotels, buses/trains (PLAN.md 17.37)
+
+Search and compare, then book on the linked sites yourself — the bot never books, holds, or
+pays for anything on the user's behalf, so (like Nearby places) this is read-only and never
+confirms-before-anything. The links are the product; the in-chat prices are best-effort
+decoration on top, and every failure mode of the price lookup (no Amadeus key configured,
+quota exhausted, API down, route not covered) degrades to the same links plus a one-line
+honest note — a search never comes back empty-handed just because the price API did.
+
+- `หาตั๋วเครื่องบิน <ต้นทาง> ไป <ปลายทาง> <วันที่>` — e.g. "หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่
+  20/12/2569" — or any natural phrasing via the AI interpreter ("หาตั๋วไปเชียงใหม่พรุ่งนี้", no
+  origin = assumes Bangkok, stated in the reply so a wrong assumption is visible). Shows real
+  one-way cached prices (airline — Thai low-cost carriers included, departure time,
+  direct/stops, baht) from Travelpayouts/Aviasales when configured, plus Google Flights and
+  Skyscanner links prefilled with the route and date. Every reply carries a standing caveat
+  that these are cached prices from recent searches, not a live quote — the linked sites are
+  the source of truth at booking time.
+- `หาที่พัก <เมือง> <เช็คอิน> ถึง <เช็คเอาท์>` — e.g. "หาที่พัก เชียงใหม่ 20/12/2569 ถึง
+  22/12/2569" (omit the checkout for a 1-night stay). Shows the cheapest cached offers first
+  (Hotellook resolves free-text Thai/English city names itself, so any city works — no city
+  table needed for hotels), plus Agoda and Booking.com links prefilled with city and dates.
+  Note: "หาที่พักใกล้ฉัน" is deliberately still a GPS nearby-search (the section above), not a
+  travel search — the dispatch order guarantees it.
+- `หาตั๋วรถทัวร์ <ต้นทาง> ไป <ปลายทาง> [วันที่]` (also `หาตั๋วรถไฟ`) — ground transport has no
+  free price API at all, so this tier is links-only *by design and says so in the reply*: a
+  12Go link prefilled with the route (and date if given), covering bus/train/van/ferry
+  comparison on one page.
+- The AI interpreter maps city names to IATA codes / 12Go slugs itself (standard public
+  reference data, not personal-data guessing); `validateIntent` pins the shapes hard
+  (`^[A-Z]{3}$`, lowercase-kebab) since they feed straight into API queries and URLs, and the
+  deterministic `หาตั๋ว...` commands use a small built-in table of common Thai cities,
+  pointing anything unknown at the natural-language phrasing instead.
+- Backed by Travelpayouts' Data API (`travel.ts`, setup step 4.6 — including why it replaced
+  Amadeus before this ever went live) — an app-level token like `GOOGLE_MAPS_API_KEY`, so
+  there are no per-user re-link error classes; any Travelpayouts problem is admin-only and
+  degrades to links.
 
 ### Diary (PLAN.md 15.4)
 

@@ -31,6 +31,7 @@ jobs:
           echo "${{ secrets.STATE_SIGNING_SECRET }}" | npx wrangler secret put STATE_SIGNING_SECRET
           echo "${{ secrets.GEMINI_API_KEY }}" | npx wrangler secret put GEMINI_API_KEY
           echo "${{ secrets.GOOGLE_MAPS_API_KEY }}" | npx wrangler secret put GOOGLE_MAPS_API_KEY
+          echo "${{ secrets.TRAVELPAYOUTS_TOKEN }}" | npx wrangler secret put TRAVELPAYOUTS_TOKEN
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
