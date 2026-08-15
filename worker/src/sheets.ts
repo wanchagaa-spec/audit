@@ -245,6 +245,66 @@ export async function readAllDiaryEntries(
     }));
 }
 
+// PLAN.md 17.36: edit/delete now live on /view/diary (viewDiaryPage.ts)
+// instead of chat commands — a diary entry is a single row identified by
+// `id`, the same row-per-entry shape as Transactions, so both of these
+// mirror deleteMostRecentTransaction's find-row-index-then-batchUpdate
+// approach. `createdAt` is deliberately preserved (never part of the
+// caller's `updates`) — it's when the entry was originally written, not
+// when it was last edited, so an edit shouldn't change it.
+
+/** Returns false (not an error) if no row with this id exists — the entry
+ * may already have been deleted by a concurrent edit from the same user in
+ * another tab; the caller treats this the same as "nothing to update". */
+export async function updateDiaryEntry(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  id: string,
+  updates: { date: string; category: string; text: string }
+): Promise<boolean> {
+  const all = await readAllDiaryEntries(accessToken, spreadsheetId, kv);
+  const rowIndex = all.findIndex((r) => r.id === id);
+  if (rowIndex === -1) return false;
+
+  const rowNumber = rowIndex + 2; // +1 for the header row, +1 to go from 0-based to 1-based
+  const values = [[id, updates.date, updates.category, updates.text, all[rowIndex].createdAt]];
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A${rowNumber}:E${rowNumber}?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values }),
+  });
+  return true;
+}
+
+/** Returns false (not an error) if no row with this id exists — same
+ * already-gone reasoning as updateDiaryEntry above. */
+export async function deleteDiaryEntry(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  id: string
+): Promise<boolean> {
+  const all = await readAllDiaryEntries(accessToken, spreadsheetId, kv);
+  const rowIndex = all.findIndex((r) => r.id === id);
+  if (rowIndex === -1) return false;
+
+  const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties`);
+  const sheet = (meta.sheets ?? []).find((s: any) => s.properties.title === "Diary");
+  const sheetId = sheet?.properties?.sheetId;
+  if (sheetId === undefined) throw new Error("Diary sheet not found");
+
+  // +1 because data starts at row index 1 (0-based) — row 0 is the header,
+  // same convention deleteMostRecentTransaction already uses.
+  const startIndex = rowIndex + 1;
+  await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({
+      requests: [{ deleteDimension: { range: { sheetId, dimension: "ROWS", startIndex, endIndex: startIndex + 1 } } }],
+    }),
+  });
+  return true;
+}
+
 // ---- Shifts (PLAN.md 17.18) ----------------------------------------------
 // Personal-only grid ("ตารางเวรของฉัน"): a tab per month, shaped exactly like
 // the web page shows it — a header row of day-of-month numbers, then one

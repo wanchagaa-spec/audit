@@ -176,6 +176,11 @@ globalThis.fetch = async (url, init = {}) => {
           { properties: { sheetId: 0, title: "Transactions" } },
           { properties: { sheetId: 1, title: "Categories" } },
           { properties: { sheetId: 2, title: "Budgets" } },
+          // PLAN.md 17.36's deleteDiaryEntry looks this up the same way
+          // deleteMostRecentTransaction does — only present once the tab
+          // has actually been created, same gating as the .title variant
+          // of this same endpoint above.
+          ...(diaryTabExists ? [{ properties: { sheetId: 100, title: "Diary" } }] : []),
         ],
       }),
       { status: 200 }
@@ -185,11 +190,23 @@ globalThis.fetch = async (url, init = {}) => {
     const body = init.body ? JSON.parse(init.body) : {};
     const deleteReq = (body.requests ?? []).find((r) => r.deleteDimension);
     if (deleteReq) {
-      const { startIndex, endIndex } = deleteReq.deleteDimension.range;
-      // sheetRows holds only data rows (no header), matching the real sheet's
-      // row 2 = index 0 offset already applied by the real code under test.
-      sheetRows.splice(startIndex - 1, endIndex - startIndex);
+      const { sheetId, startIndex, endIndex } = deleteReq.deleteDimension.range;
+      // Both sheetRows and diaryRows hold only data rows (no header),
+      // matching the real sheet's row 2 = index 0 offset already applied
+      // by the real code under test — sheetId tells the two sheets' delete
+      // requests apart, same as a real spreadsheet would.
+      const target = sheetId === 100 ? diaryRows : sheetRows;
+      target.splice(startIndex - 1, endIndex - startIndex);
     }
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  // updateDiaryEntry (PLAN.md 17.36): overwrites one specific row in place,
+  // unlike the append-only Diary!A1:append path below.
+  const diaryRowUpdateMatch = u.match(/Diary!A(\d+):E\1\?valueInputOption=RAW/);
+  if (diaryRowUpdateMatch) {
+    const rowNumber = Number(diaryRowUpdateMatch[1]);
+    const body = JSON.parse(init.body);
+    diaryRows[rowNumber - 2] = body.values[0]; // -2: 1-based row number, minus the header row
     return new Response(JSON.stringify({}), { status: 200 });
   }
   if (u.includes("Transactions!A1:append")) {
@@ -3309,6 +3326,104 @@ check(
     diarySearchXssHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt;")
 );
 
+// /view/diary is write-capable now (PLAN.md 17.36) — edit/delete moved
+// here from being a documented chat gap, reusing "diary-view-test-1" (this
+// month) and "diary-view-search-1" (2020-03-15) already pushed above.
+check(
+  "each entry in the month view is rendered as its own editable form, with the escaped text inside a textarea (not just a static div)",
+  diaryViewHtml.includes('name="id" value="diary-view-test-1"') &&
+    diaryViewHtml.includes(">&lt;b&gt;ทดสอบ&lt;/b&gt; วันนี้อากาศดี</textarea>") &&
+    diaryViewHtml.includes(`confirmDelete=diary-view-test-1`)
+);
+
+const diaryRowsBeforeEdit = diaryRows.length;
+// Snapshot of every OTHER row — an off-by-one in updateDiaryEntry's row
+// arithmetic wouldn't show up in the row-count or find()-based checks
+// below (it corrupts a *neighboring* row with a duplicate id, and find()
+// happily returns the corrupted clone first), so this is the assertion
+// that actually pins the write to the right row. Proven necessary: the
+// first version of these tests passed with rowIndex+1 instead of +2.
+const diaryOtherRowsSnapshot = JSON.stringify(diaryRows.filter((r) => r[0] !== "diary-view-test-1"));
+const diaryUpdateResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      op: "update",
+      id: "diary-view-test-1",
+      date: bangkokDateKey(),
+      category: "สุขภาพ",
+      text: "แก้ไขข้อความแล้วนะ",
+    }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+const diaryUpdateHtml = await diaryUpdateResponse.text();
+check(
+  "editing an entry saves in place (same row count) and shows a save notice with the new text",
+  diaryUpdateResponse.status === 200 &&
+    diaryUpdateHtml.includes("บันทึกการแก้ไขแล้ว") &&
+    diaryUpdateHtml.includes("แก้ไขข้อความแล้วนะ") &&
+    diaryRows.length === diaryRowsBeforeEdit
+);
+check(
+  "the underlying row was actually overwritten, not appended as a new one",
+  diaryRows.filter((r) => r[0] === "diary-view-test-1").length === 1 &&
+    diaryRows.find((r) => r[0] === "diary-view-test-1")[2] === "สุขภาพ" &&
+    diaryRows.find((r) => r[0] === "diary-view-test-1")[3] === "แก้ไขข้อความแล้วนะ"
+);
+check(
+  "every other diary row is untouched by the edit (no neighboring-row corruption from a row-offset bug)",
+  JSON.stringify(diaryRows.filter((r) => r[0] !== "diary-view-test-1")) === diaryOtherRowsSnapshot
+);
+
+const confirmDeleteResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}&confirmDelete=diary-view-search-1`),
+  env,
+  new FakeExecutionContext()
+);
+const confirmDeleteHtml = await confirmDeleteResponse.text();
+check(
+  "visiting the delete-confirm link shows the entry's own text and asks to confirm, without deleting it yet",
+  confirmDeleteResponse.status === 200 &&
+    confirmDeleteHtml.includes("หาโน้ตเรื่องแมวส้มตัวนี้") &&
+    confirmDeleteHtml.includes("ยืนยันลบ") &&
+    diaryRows.some((r) => r[0] === "diary-view-search-1")
+);
+
+const diaryDeleteResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ op: "delete", id: "diary-view-search-1" }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+const diaryDeleteHtml = await diaryDeleteResponse.text();
+check(
+  "confirming the delete actually removes the row and shows a deleted notice",
+  diaryDeleteResponse.status === 200 &&
+    diaryDeleteHtml.includes("ลบบันทึกแล้ว") &&
+    !diaryRows.some((r) => r[0] === "diary-view-search-1")
+);
+
+const diaryEditMissingIdResponse = await worker.fetch(
+  new Request(`${origin}/view/diary?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ op: "update", id: "does-not-exist", date: bangkokDateKey(), category: "x", text: "y" }).toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "editing an id that no longer exists degrades gracefully instead of erroring",
+  diaryEditMissingIdResponse.status === 200
+);
+diaryRows.length = 0; // clean up — nothing after this reads diaryRows
+
 // Trip photos view reuses the "ทะเล" trip folder and its already-uploaded
 // files from the trip-photo tests earlier in this run (see tripFolderId
 // above) instead of manufacturing fresh Drive mock data — the view layer
@@ -3434,6 +3549,54 @@ check(
   lastShiftsGeminiRequest.systemInstruction.includes("ตารางเวร") &&
     lastShiftsGeminiRequest.systemInstruction.includes("3: เวรเช้า")
 );
+
+// /view/tasks (PLAN.md 17.36) — read-only, reuses listIncompleteTasks the
+// same way /view/calendar reuses listCalendarEvents. googleTasks may
+// already hold leftover incomplete tasks from earlier chat-command tests
+// in this same run (never reset between sections, unlike diaryRows/
+// calendarEvents) — these assertions only check for the two tasks pushed
+// here, not an exact total count, so that's fine.
+const tasksViewDueTaskId = "task-view-test-1";
+googleTasks.push({
+  id: tasksViewDueTaskId,
+  title: "ส่งรายงานทีม",
+  status: "needsAction",
+  due: new Date(`${bangkokDateKey()}T15:30:00+07:00`).toISOString(),
+});
+const tasksViewUndatedTaskId = "task-view-test-2";
+googleTasks.push({ id: tasksViewUndatedTaskId, title: "จัดตู้เย็น", status: "needsAction" });
+
+const tasksViewResponse = await worker.fetch(new Request(`${origin}/view/tasks?token=${viewToken}`), env, new FakeExecutionContext());
+const tasksViewHtml = await tasksViewResponse.text();
+check(
+  "/view/tasks shows a task with a due date/time under that date's heading",
+  tasksViewResponse.status === 200 && tasksViewHtml.includes("ส่งรายงานทีม") && tasksViewHtml.includes("15:30")
+);
+check(
+  "a task with no due date at all shows up under its own \"ไม่มีกำหนด\" section, not dropped",
+  tasksViewHtml.includes("จัดตู้เย็น") && tasksViewHtml.includes("ไม่มีกำหนด")
+);
+
+simulateInsufficientTasksScope = true;
+const tasksViewScopeResponse = await worker.fetch(new Request(`${origin}/view/tasks?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "/view/tasks degrades to a friendly re-link message on insufficient scope instead of a raw error",
+  tasksViewScopeResponse.status === 400 && (await tasksViewScopeResponse.text()).includes("เชื่อมใหม่")
+);
+simulateInsufficientTasksScope = false;
+
+simulateTasksApiDisabled = true;
+const tasksViewApiDisabledResponse = await worker.fetch(new Request(`${origin}/view/tasks?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "/view/tasks degrades gracefully when the Tasks API itself is disabled too",
+  tasksViewApiDisabledResponse.status === 400 && (await tasksViewApiDisabledResponse.text()).includes("Google Tasks API")
+);
+simulateTasksApiDisabled = false;
+
+const tasksViewIdx1 = googleTasks.findIndex((t) => t.id === tasksViewDueTaskId);
+if (tasksViewIdx1 >= 0) googleTasks.splice(tasksViewIdx1, 1);
+const tasksViewIdx2 = googleTasks.findIndex((t) => t.id === tasksViewUndatedTaskId);
+if (tasksViewIdx2 >= 0) googleTasks.splice(tasksViewIdx2, 1);
 
 // Group mode (PLAN.md 17) — a shared account bound to a LINE groupId
 // instead of an individual's userId, gated on the bot being @-mentioned.

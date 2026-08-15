@@ -43,7 +43,7 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-export type ViewNavKey = "accounts" | "calendar" | "diary" | "trips" | "shifts";
+export type ViewNavKey = "accounts" | "calendar" | "diary" | "trips" | "shifts" | "tasks";
 
 const NAV_ITEMS: Array<{ key: ViewNavKey; path: string; label: string }> = [
   { key: "accounts", path: "/view", label: "บัญชี" },
@@ -51,6 +51,7 @@ const NAV_ITEMS: Array<{ key: ViewNavKey; path: string; label: string }> = [
   { key: "diary", path: "/view/diary", label: "ไดอารี่" },
   { key: "trips", path: "/view/trips", label: "รูปทริป" },
   { key: "shifts", path: "/view/shifts", label: "ตารางเวร" },
+  { key: "tasks", path: "/view/tasks", label: "สิ่งที่ต้องทำ" },
 ];
 
 function renderNav(token: string, active: ViewNavKey): string {
@@ -136,6 +137,33 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
     background: #16a34a; color: #fff; font-size: .92rem; font-family: inherit; font-weight: 600; cursor: pointer;
   }
   .save-notice { text-align: center; color: #16a34a; font-size: .85rem; margin: 0 0 1rem; }
+  .diary-edit-form { margin-bottom: 0; }
+  .diary-edit-row { display: flex; gap: .5rem; margin-bottom: .4rem; }
+  .diary-edit-row input[type="date"] { flex: none; width: 9.5rem; }
+  .diary-edit-row input[type="text"] { flex: 1; min-width: 0; }
+  .diary-edit-form input, .diary-edit-form textarea {
+    padding: .5rem .6rem; border-radius: 8px; border: 1px solid #d8dade; font-size: .85rem; font-family: inherit;
+  }
+  .diary-edit-form textarea { width: 100%; resize: vertical; margin-bottom: .5rem; }
+  .diary-edit-actions { display: flex; gap: .5rem; }
+  .diary-edit-actions button {
+    flex: 1; padding: .5rem; border-radius: 8px; border: none; background: #16a34a; color: #fff;
+    font-size: .82rem; font-family: inherit; cursor: pointer;
+  }
+  .diary-edit-actions a {
+    flex: 1; text-align: center; padding: .5rem; border-radius: 8px; background: #fdecea; color: #de350b;
+    text-decoration: none; font-size: .82rem;
+  }
+  .confirm-delete-text { background: #fff; border-radius: 10px; padding: .8rem 1rem; margin-bottom: 1rem; font-size: .88rem; }
+  .confirm-actions { display: flex; gap: .6rem; }
+  .confirm-actions button {
+    flex: 1; background: #de350b; color: #fff; border: none; border-radius: 10px; padding: .6rem 1rem;
+    font-size: .88rem; font-family: inherit; cursor: pointer;
+  }
+  .confirm-actions a {
+    flex: 1; text-align: center; padding: .6rem 1rem; border-radius: 10px; background: #fff; color: #40444b;
+    text-decoration: none; font-size: .88rem; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  }
 </style>
 </head>
 <body>
