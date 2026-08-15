@@ -523,7 +523,7 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u === "https://places.googleapis.com/v1/places:searchText") {
     const body = JSON.parse(init.body);
-    const circle = body.locationRestriction?.circle;
+    const circle = body.locationBias?.circle;
     placesSearchCalls.push({
       location: circle ? `${circle.center.latitude},${circle.center.longitude}` : null,
       keyword: body.textQuery,

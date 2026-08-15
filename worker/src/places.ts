@@ -10,9 +10,18 @@
 // takes a fixed enum of place types (includedTypes: ["restaurant", ...]),
 // not arbitrary free text — this bot needs to search whatever Thai keyword
 // the user actually typed ("ร้านกาแฟ", "ที่จอดรถ", ...), which only Text
-// Search's `textQuery` field supports. locationRestriction (a hard circle,
-// not just a bias) keeps the original "within ~1.5km" semantics the older
-// Nearby Search radius parameter had.
+// Search's `textQuery` field supports.
+//
+// Uses locationBias, not locationRestriction, for the "near this point"
+// circle — confirmed against a real production error: Text Search's
+// `locationRestriction` only accepts a `rectangle` shape, not `circle`
+// ("Unknown name \"circle\" at 'location_restriction'"). `locationBias`
+// does accept `circle` and is the field Text Search actually supports for
+// this. The tradeoff is exactly what the name implies: a bias nudges
+// ranking toward the circle but can still return something outside it if
+// it's a much stronger textQuery match, whereas a restriction would have
+// been a hard cutoff — acceptable here since "find X near me" already
+// implies "prefer nearby", not "require it".
 
 const SEARCH_TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
 
@@ -48,7 +57,7 @@ export async function searchNearbyPlaces(
       textQuery: keyword,
       languageCode: "th",
       maxResultCount: 5,
-      locationRestriction: {
+      locationBias: {
         circle: {
           center: { latitude: lat, longitude: lng },
           radius: 1500.0,
