@@ -529,10 +529,12 @@ Search, not the older/legacy Places API — see `places.ts`'s own comment for wh
 keyword search only exists on the newer API's Text Search; the older API's closest equivalent,
 Nearby Search, only takes a fixed enum of place-type categories, not arbitrary Thai keywords).
 
-- `หา<สิ่งที่จะหา>ใกล้ฉัน` (or `...ใกล้ตัว` / `...แถวนี้` / `...ใกล้ๆ`) — e.g. "หาร้านกาแฟใกล้ฉัน".
-  The bot asks you to share your current location (tap the **+** icon next to the message box
-  in LINE → **Location**); once you share it, it searches within ~1.5km and replies with up to
-  5 results (name, rating if available, address, and a Google Maps link each).
+- `หา<สิ่งที่จะหา>ใกล้ฉัน` (or `...ใกล้ตัว` / `...แถวนี้` / `...ใกล้ๆ`) — e.g. "หาร้านกาแฟใกล้ฉัน". Natural
+  phrasing works too ("ร้านกาแฟใกล้ฉัน" with no "หา" at all, "แถวนี้มีร้านอาหารไหม") via the AI interpreter
+  (PLAN.md 17.32) — both paths end up at the same prompt. The bot asks you to share your current
+  location (tap the **+** icon next to the message box in LINE → **Location**); once you share
+  it, it searches within ~1.5km and replies with up to 5 results (name, rating if available,
+  address, and a Google Maps link each).
 - No confirm-before-save step, unlike every write-capable feature in this bot — a place search
   never creates, changes, or sends anything, it only reads back public place data.
 - The location-share message itself carries no text or @mention (LINE's location-sharing UI

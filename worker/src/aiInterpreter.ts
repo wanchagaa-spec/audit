@@ -53,6 +53,7 @@ export type InterpretedIntent =
   | { intent: "task_list" }
   | { intent: "email_check" }
   | { intent: "email_send"; emailTo: string; emailSubject: string; emailBody: string }
+  | { intent: "find_nearby_places"; placeKeyword: string }
   | { intent: "trip_start"; tripName: string }
   | { intent: "trip_end" }
   | { intent: "trip_status" }
@@ -184,6 +185,10 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       if (!isNonEmptyString(r.emailSubject) || !isNonEmptyString(r.emailBody)) return null;
       return { intent: "email_send", emailTo: r.emailTo, emailSubject: r.emailSubject, emailBody: r.emailBody };
     }
+    case "find_nearby_places": {
+      if (!isNonEmptyString(r.placeKeyword)) return null;
+      return { intent: "find_nearby_places", placeKeyword: r.placeKeyword };
+    }
     case "trip_start": {
       if (!isNonEmptyString(r.tripName)) return null;
       return { intent: "trip_start", tripName: r.tripName };
@@ -228,7 +233,7 @@ function buildCategoryList(): string {
 // same way persona.ts's system instruction has its own marker string.
 function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
   return [
-    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/ถามคำถาม)`,
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/หาสถานที่ใกล้ตัว/ถามคำถาม)`,
     `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
     "",
     "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",
@@ -254,6 +259,7 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"task_list"} — ขอดูรายการสิ่งที่ต้องทำทั้งหมดที่ยังไม่เสร็จ',
     '{"intent":"email_check"} — ขอเช็คอีเมลใหม่ที่ยังไม่ได้อ่าน',
     '{"intent":"email_send","emailTo":string,"emailSubject":string,"emailBody":string} — ส่งอีเมลใหม่ ต้องรู้ที่อยู่อีเมลผู้รับ หัวข้อ และเนื้อหาแน่ชัดทั้งหมด (ดูกติกาด้านล่างเรื่องห้ามเดาที่อยู่อีเมล)',
+    '{"intent":"find_nearby_places","placeKeyword":string} — อยากหาสถานที่/ร้าน/บริการใกล้ตัว ไม่ว่าจะพิมพ์แบบไหนก็ตาม เช่น "ร้านกาแฟใกล้ฉัน", "แถวนี้มีร้านอาหารไหม", "หาปั๊มน้ำมันหน่อย" (placeKeyword คือสิ่งที่อยากหา ตัดคำว่า "ใกล้ฉัน/แถวนี้/ใกล้ๆ" ออก) — บอทจะขอตำแหน่ง GPS จริงจากผู้ใช้ต่อเอง ห้ามตอบชื่อร้าน/สถานที่จริงเองเด็ดขาดเพราะไม่มีข้อมูลตำแหน่งผู้ใช้ให้ค้นหาจริง',
     '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
     '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',

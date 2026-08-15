@@ -2392,6 +2392,30 @@ const repliesBeforeUnpromptedLocation = replies.length;
 await sendWebhookEvents([personalLocationEvent(13.75, 100.5, "reply-nearby-3")]);
 check("sharing a location with nothing pending gets no reply at all", replies.length === repliesBeforeUnpromptedLocation);
 
+// Regression test for a real report: typing "ร้านกาแฟใกล้ฉัน" (no "หา" at the
+// start) got hallucinated into an unrelated weather/no-data reply instead of
+// prompting for a location — matchPlacesCommand's regex only recognizes the
+// exact "หา...ใกล้ฉัน" phrasing, and since the AI interpreter runs *before*
+// the deterministic matcher for every fresh message but never knew this
+// feature existed at all (no find_nearby_places intent), it never had a way
+// to route a differently-phrased request here. Fixed by teaching the
+// interpreter the intent and sharing the same promptPlaceSearch the regex
+// matcher already used.
+simulateInterpreterResult = { intent: "find_nearby_places", placeKeyword: "ร้านกาแฟ" };
+const repliesBeforeAiNearbyPrompt = replies.length;
+await sendWebhookEvents([personalTextEvent("ร้านกาแฟใกล้ฉัน", "reply-nearby-ai-1")]);
+check(
+  "an AI-interpreted nearby-place request (no 'หา' prefix) still prompts to share a location",
+  replies.length === repliesBeforeAiNearbyPrompt + 1 && replies.at(-1).includes("ตำแหน่ง")
+);
+
+const repliesBeforeAiNearbyResult = replies.length;
+await sendWebhookEvents([personalLocationEvent(13.75, 100.5, "reply-nearby-ai-2")]);
+check(
+  "sharing the location afterward resolves the AI-interpreted search too",
+  replies.length === repliesBeforeAiNearbyResult + 1 && replies.at(-1).includes("ร้านกาแฟดีใจ")
+);
+
 // A search with no nearby results degrades gracefully, not silently.
 nearbyPlacesResults = [];
 await sendWebhookEvents([personalTextEvent("หาปั๊มน้ำมันใกล้ฉัน", "reply-nearby-4")]);
