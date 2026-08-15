@@ -194,10 +194,13 @@ Add the Official Account as a friend in LINE. First message should prompt you to
 link to connect your Google account. After signing in, you'll see a "เชื่อมบัญชีสำเร็จ"
 page — close it and go back to the chat.
 
-Any greeting ("สวัสดี", "hi", "เริ่ม", ...) gets a short self-introduction covering the 4
-things the bot can do, with a pointer to "วิธีใช้" for the full command reference — see
-`WELCOME_MESSAGE` in `src/index.ts` and the grouped help text in `src/commands.ts`. From
-there, just log things like "ซื้อกาแฟ 60", or ask it questions:
+Any greeting ("สวัสดี", "hi", "เริ่ม", ...) a brand-new account has never sent before gets a
+short self-introduction — just the bare list of things the bot can do, one line each, no
+usage syntax — with a pointer to "วิธีใช้" for the full, detailed command reference (PLAN.md
+17.35: these two texts are deliberately kept at opposite ends of that
+brief-capability-list vs. exhaustive-usage-guide spectrum). See `WELCOME_MESSAGE` in
+`src/index.ts` and `buildHelpText()` in `src/commands.ts`. From there, just log things like
+"ซื้อกาแฟ 60", or ask it questions:
 
 - สรุปวันนี้ / สรุปสัปดาห์นี้ / สรุปเดือนนี้ / สรุปเดือนที่แล้ว
 - เหลือเงินเท่าไหร่ (all-time cumulative balance) / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่
@@ -977,8 +980,11 @@ above) to publish it.
   image messages (see PLAN.md 15.2). No auto-timeout closes a forgotten trip either; use
   `ทริปตอนนี้` to check.
 - Calendar events are single occurrences only — no recurring/repeating events yet
-  (PLAN.md 15.3). Date/time parsing is rule-based and only understands explicit formats
-  ("12/1/2569 13:00", "12 ม.ค. 13.00"), not natural phrases like "พรุ่งนี้บ่ายสอง".
+  (PLAN.md 15.3). Date/time parsing understands both explicit formats ("12/1/2569 13:00",
+  "12 ม.ค. 13.00", used as a fallback when the AI call itself fails) and natural phrases
+  like "พรุ่งนี้บ่ายสอง" (via the AI-interpreter-first pipeline, PLAN.md 17.11/17.35 — this
+  bullet used to claim the natural-phrase case didn't work at all, written before that
+  pipeline shipped and never revisited until PLAN.md 17.35 caught it).
 - Diary entries have no edit/delete command yet, only create + monthly list + search
   (PLAN.md 15.4).
 - Only one confirmation can be pending at a time (trip switch, calendar create/edit/delete,
