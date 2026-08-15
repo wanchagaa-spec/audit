@@ -84,7 +84,7 @@ let simulateInsufficientGmailScope = false;
 let simulateGmailApiDisabled = false;
 
 const placesSearchCalls = []; // records {location, keyword, key} for every Nearby Search call made
-let nearbyPlacesResults = []; // simulates Google Places' `results` array for the next search
+let nearbyPlacesResults = []; // simulates Places API (New)'s `places` array for the next search
 let simulatePlacesApiError = false;
 let simulateGmailScopeErrorAs400 = false; // regression: Gmail can answer a scope problem with a non-401/403 status, unlike Calendar/Tasks
 
@@ -521,17 +521,21 @@ globalThis.fetch = async (url, init = {}) => {
       );
     }
   }
-  if (u.startsWith("https://maps.googleapis.com/maps/api/place/nearbysearch/json")) {
-    const parsed = new URL(u);
+  if (u === "https://places.googleapis.com/v1/places:searchText") {
+    const body = JSON.parse(init.body);
+    const circle = body.locationRestriction?.circle;
     placesSearchCalls.push({
-      location: parsed.searchParams.get("location"),
-      keyword: parsed.searchParams.get("keyword"),
-      key: parsed.searchParams.get("key"),
+      location: circle ? `${circle.center.latitude},${circle.center.longitude}` : null,
+      keyword: body.textQuery,
+      key: init.headers?.["X-Goog-Api-Key"],
+      fieldMask: init.headers?.["X-Goog-FieldMask"],
     });
     if (simulatePlacesApiError) {
-      return new Response(JSON.stringify({ status: "REQUEST_DENIED", error_message: "simulated API failure" }), { status: 200 });
+      return new Response(JSON.stringify({ error: { code: 403, message: "simulated API failure", status: "PERMISSION_DENIED" } }), {
+        status: 403,
+      });
     }
-    return new Response(JSON.stringify({ status: "OK", results: nearbyPlacesResults }), { status: 200 });
+    return new Response(JSON.stringify({ places: nearbyPlacesResults }), { status: 200 });
   }
   if (u.includes("?fields=sheets.properties.title")) {
     diaryTabMetaCalls += 1;
@@ -2358,7 +2362,9 @@ async function sendWebhookEvents(events) {
   );
 }
 
-nearbyPlacesResults = [{ name: "ร้านกาแฟดีใจ", vicinity: "ถนนสุขุมวิท", rating: 4.5, place_id: "place-1" }];
+nearbyPlacesResults = [
+  { displayName: { text: "ร้านกาแฟดีใจ" }, formattedAddress: "ถนนสุขุมวิท", rating: 4.5, googleMapsUri: "https://maps.google.com/?cid=1" },
+];
 
 const repliesBeforeNearbyPrompt = replies.length;
 await sendWebhookEvents([personalTextEvent("หาร้านกาแฟใกล้ฉัน", "reply-nearby-1")]);
@@ -2430,7 +2436,7 @@ env.GOOGLE_MAPS_API_KEY = realMapsKey;
 // events are grouped and processed before location events for the same
 // subject, so the pending state the text just set is what the bundled
 // location event resolves, not left stranded for a message that never comes.
-nearbyPlacesResults = [{ name: "ร้านสะดวกซื้อ", vicinity: "ซอยหลังบ้าน", place_id: "place-3" }];
+nearbyPlacesResults = [{ displayName: { text: "ร้านสะดวกซื้อ" }, formattedAddress: "ซอยหลังบ้าน", googleMapsUri: "https://maps.google.com/?cid=3" }];
 const repliesBeforeBundled = replies.length;
 await sendWebhookEvents([
   personalTextEvent("หาร้านสะดวกซื้อใกล้ฉัน", "reply-nearby-10"),
@@ -3698,7 +3704,9 @@ check(
 // location-sharing UI has none), so "is this meant for the bot" is answered
 // purely by whether a search is pending, unlike every other group feature
 // which is gated by @mention on every single message.
-nearbyPlacesResults = [{ name: "ร้านชานม", vicinity: "ตลาดนัด", rating: 4.0, place_id: "place-group-1" }];
+nearbyPlacesResults = [
+  { displayName: { text: "ร้านชานม" }, formattedAddress: "ตลาดนัด", rating: 4.0, googleMapsUri: "https://maps.google.com/?cid=4" },
+];
 const groupNearbyPromptReply = await handleGroupTextMessage(env, groupId, groupSenderA, "หาร้านชานมใกล้ฉัน", origin);
 check("asking to find something nearby in a group prompts to share a location", groupNearbyPromptReply.includes("ตำแหน่ง"));
 

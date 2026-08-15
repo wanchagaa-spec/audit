@@ -1779,3 +1779,32 @@ location message เป็น event type ใหม่ที่ handleTextMessage
 admin เท่านั้น), ไม่ได้ตั้งค่า API key ไว้, ข้อความคำสั่ง+ตำแหน่งมาในเว็บฮุคเดียวกัน (bundling race), และใน
 โหมดกลุ่ม (พร้อมพิสูจน์ว่าข้อความตำแหน่งที่ไม่มี @mention ก็ยังทำงานถูกต้องเมื่อมีคำค้างไว้ และเงียบเมื่อไม่มี)
 — รวม 367 ผ่าน 0 ล้มเหลว
+
+### 17.31 เปลี่ยนไปใช้ Places API (New) แทนตัวเก่า
+
+ผู้ใช้เห็นหน้า Cloud Console มี "Places API" กับ "Places API (New)" 2 ตัวแยกกัน ถามว่าต่างกันยังไง อธิบายไป
+แล้วผู้ใช้ขอให้ปรับโค้ดไปใช้ตัวใหม่แทน (17.30 เดิมเขียนด้วย legacy Nearby Search endpoint)
+
+**เหตุผลที่ต้องเปลี่ยนวิธีค้นหา ไม่ใช่แค่เปลี่ยน URL**: Nearby Search แบบเก่ารับ `keyword` แบบข้อความอิสระได้
+โดยตรง แต่ Nearby Search (New) ตัดความสามารถนี้ออก เหลือแค่เลือกจาก `includedTypes` (enum คงที่ของหมวดสถาน
+ที่ เช่น "restaurant") เท่านั้น ไม่รองรับคำค้นหาภาษาไทยอิสระที่ผู้ใช้พิมพ์เอง ("ร้านกาแฟ", "ที่จอดรถ" ฯลฯ) จึง
+ต้องเปลี่ยนไปใช้ **Text Search (New)** แทน (`textQuery` + `locationRestriction.circle` แทนที่
+`keyword` + `radius` เดิม) ซึ่งให้ผลลัพธ์เชิงความหมายเดียวกันกับที่ต้องการอยู่แล้ว
+
+**การเปลี่ยนแปลง (`places.ts` เท่านั้น — `placesCommands.ts` ไม่ต้องแก้เลย เพราะ signature ของ
+`searchNearbyPlaces`/`NearbyPlace` ไม่เปลี่ยน)**:
+
+- Endpoint: `GET .../place/nearbysearch/json?...` → `POST https://places.googleapis.com/v1/places:searchText`
+- Auth: query param `key=...` → header `X-Goog-Api-Key`
+- ต้องระบุ `X-Goog-FieldMask` header บอกว่าอยากได้ field ไหนบ้าง (API ใหม่คิดราคาตาม field ที่ขอจริง จึงขอ
+  แค่ที่ใช้จริง: `displayName`/`formattedAddress`/`rating`/`googleMapsUri`)
+- Response shape เปลี่ยนจาก `results[].{name, vicinity, rating, place_id}` เป็น
+  `places[].{displayName.text, formattedAddress, rating, googleMapsUri}` — `googleMapsUri` มาจาก Google
+  ตรงๆ เลย ไม่ต้องประกอบลิงก์เองจาก `place_id` เหมือนเดิมด้วย
+- ไม่มี `status`/`ZERO_RESULTS` field ใน response แล้ว — "ไม่พบผลลัพธ์" กลายเป็นแค่ 200 ที่ `places` ว่าง/ไม่มี
+  ฟิลด์ ไม่ใช่ error พิเศษที่ต้องเช็คแยกเหมือนเดิม ส่วน error จริงใช้ HTTP status ปกติ
+
+**ทดสอบ**: แก้ mock ทั้งหมดใน test-flow.mjs ให้จำลอง Text Search (New) จริง (POST + JSON body + header-based
+key แทน query string) และปรับ fixture ข้อมูลสถานที่จำลองให้ตรง response shape ใหม่ — เทสต์เดิมทั้งหมดที่เขียน
+ไว้ใน 17.30 ยังใช้ได้และผ่านครบ (367/367) โดยไม่ต้องเพิ่มเทสต์ใหม่ เพราะพฤติกรรมที่สังเกตได้จากภายนอกไม่เปลี่ยน
+เลย เปลี่ยนแค่วิธีคุยกับ Google เท่านั้น

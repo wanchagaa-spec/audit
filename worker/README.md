@@ -82,13 +82,17 @@ see PLAN.md 15.10 for why this one feature deliberately breaks from the rest of 
 ### 4.5. Get a Google Maps API key (powers "หา...ใกล้ฉัน")
 
 Unlike every other Google integration in this bot, place search doesn't need OAuth at all —
-it's just a flat API key, the same shape as `GEMINI_API_KEY` above (PLAN.md 17.30).
+it's just a flat API key, the same shape as `GEMINI_API_KEY` above (PLAN.md 17.30/17.31).
 
 1. In the same Google Cloud project as before (or a new one — doesn't need to match), go to
-   **APIs & Services → Library**, search for **Places API**, and click **Enable**.
+   **APIs & Services → Library**, search for **Places API (New)**, and click **Enable**. Note
+   the "(New)" — this bot uses the newer Places API (Text Search), not the older "Places API"
+   (they're two separate entries in the Library and bill/behave differently; see PLAN.md
+   17.31 for why the newer one was chosen: free-text keyword search only exists there,
+   the older API's Nearby Search only takes a fixed list of place-type categories).
 2. Go to **APIs & Services → Credentials → Create Credentials → API key**. Copy the key.
 3. Strongly recommended: click into the new key and under **API restrictions**, restrict it to
-   just **Places API** — an unrestricted key that leaks can be used against your Cloud
+   just **Places API (New)** — an unrestricted key that leaks can be used against your Cloud
    billing for anything, not just this bot's place search.
 4. This is optional, same as `GEMINI_API_KEY` — skip it and every other feature works fine;
    "หา...ใกล้ฉัน" will just reply that the feature isn't set up yet instead of crashing.
@@ -515,12 +519,15 @@ attempted calendar create instead of reaching the task/email handler. Fixed by c
 and Gmail's own fixed, unambiguous command prefixes first — they never overlap with anything
 Calendar's own matcher recognizes, so this can't affect a genuine calendar command.
 
-### Nearby places (PLAN.md 17.30)
+### Nearby places (PLAN.md 17.30/17.31)
 
 Find something nearby using your real GPS location, shared through LINE's own location-sharing
 UI — the sixth Google integration this bot connects to, and the only one that doesn't need
 OAuth at all: place search is public data, not tied to any Google account, so it just uses a
-flat `GOOGLE_MAPS_API_KEY` (see setup step 4.5 above).
+flat `GOOGLE_MAPS_API_KEY` (see setup step 4.5 above). Backed by Places API (New)'s Text
+Search, not the older/legacy Places API — see `places.ts`'s own comment for why (free-text
+keyword search only exists on the newer API's Text Search; the older API's closest equivalent,
+Nearby Search, only takes a fixed enum of place-type categories, not arbitrary Thai keywords).
 
 - `หา<สิ่งที่จะหา>ใกล้ฉัน` (or `...ใกล้ตัว` / `...แถวนี้` / `...ใกล้ๆ`) — e.g. "หาร้านกาแฟใกล้ฉัน".
   The bot asks you to share your current location (tap the **+** icon next to the message box
