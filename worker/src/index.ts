@@ -61,7 +61,7 @@ import {
   type LineVideoMessageEvent,
   type LineWebhookBody,
 } from "./line.ts";
-import { answerNearbySearch, matchPlacesCommand } from "./placesCommands.ts";
+import { answerNearbySearch, matchPlacesCommand, promptPlaceSearch } from "./placesCommands.ts";
 import { canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
 import { signState, verifyState } from "./signedState.ts";
 import {
@@ -463,6 +463,11 @@ async function runInterpretedIntent(
         return await withToken((ctx) =>
           promptEmailSend(ctx, { to: intent.emailTo, subject: intent.emailSubject, body: intent.emailBody })
         );
+      case "find_nearby_places":
+        // No withFreshAccessToken here on purpose, same reasoning as
+        // set_province/matchPlacesCommand below — place search only needs
+        // the flat Maps API key, never a per-user Google access token.
+        return await promptPlaceSearch({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.placeKeyword);
       case "trip_start":
         return await withToken((ctx) => promptOrStartTrip(ctx, intent.tripName));
       case "trip_end":

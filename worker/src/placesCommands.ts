@@ -13,16 +13,26 @@ type Handler = (ctx: { kv: KVNamespace; lineUserId: string }) => Promise<string>
 
 const NEARBY_RE = /^หา(.+?)(?:ใกล้ฉัน|ใกล้ตัว|แถวนี้|ใกล้ๆ)$/;
 
+// Shared by both callers below: the exact-phrase regex matcher (only
+// catches "หา...ใกล้ฉัน" verbatim) and aiInterpreter.ts's find_nearby_places
+// intent (catches any natural phrasing — "ร้านกาแฟใกล้ฉัน" with no "หา" at
+// all, "แถวนี้มีร้านอาหารไหม", etc. — a real gap found in production: typing
+// "ร้านกาแฟใกล้ฉัน" without "หา" didn't match the regex, and since the AI
+// interpreter runs *before* the deterministic matcher for every fresh
+// message but never knew this feature existed, it just hallucinated an
+// unrelated answer instead of falling through to here at all).
+export async function promptPlaceSearch(ctx: { kv: KVNamespace; lineUserId: string }, keyword: string): Promise<string> {
+  await setPendingPlaceSearch(ctx.kv, ctx.lineUserId, { keyword });
+  return `แชร์ตำแหน่งปัจจุบันมาได้เลยนะ (กดไอคอน + ข้างช่องพิมพ์ในไลน์ > ตำแหน่งที่ตั้ง) เดี๋ยวหา "${keyword}" ใกล้ๆ ให้`;
+}
+
 export async function matchPlacesCommand(text: string): Promise<Handler | null> {
   const trimmed = text.trim();
   const m = trimmed.match(NEARBY_RE);
   if (!m) return null;
   const keyword = m[1].trim();
   if (!keyword) return null;
-  return async (ctx) => {
-    await setPendingPlaceSearch(ctx.kv, ctx.lineUserId, { keyword });
-    return `แชร์ตำแหน่งปัจจุบันมาได้เลยนะ (กดไอคอน + ข้างช่องพิมพ์ในไลน์ > ตำแหน่งที่ตั้ง) เดี๋ยวหา "${keyword}" ใกล้ๆ ให้`;
-  };
+  return (ctx) => promptPlaceSearch(ctx, keyword);
 }
 
 /** Called from index.ts when a LINE location message arrives. Returns null
