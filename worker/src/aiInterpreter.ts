@@ -24,7 +24,7 @@
 
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import type { EntryType } from "../../app/src/types.ts";
-import { askGemini, GeminiError } from "./gemini.ts";
+import { askGemini, GeminiError, INTERPRETER_MAX_OUTPUT_TOKENS } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
 import { BOT_NAME } from "./persona.ts";
 import { addDaysToDateKey, bangkokDateKey } from "./thaiDate.ts";
@@ -442,7 +442,11 @@ export async function interpretMessage(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), INTERPRETER_TIMEOUT_MS);
   try {
-    const raw = await askGemini(geminiApiKey, systemInstruction, text, controller.signal, true);
+    const raw = await askGemini(geminiApiKey, systemInstruction, text, {
+      signal: controller.signal,
+      jsonMode: true,
+      maxOutputTokens: INTERPRETER_MAX_OUTPUT_TOKENS,
+    });
     const parsed: unknown = JSON.parse(raw);
     const intent = validateIntent(parsed);
     if (!intent) {

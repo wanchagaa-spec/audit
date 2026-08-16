@@ -12,7 +12,7 @@
 
 import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { askGemini, GeminiError } from "./gemini.ts";
+import { ANSWER_MAX_OUTPUT_TOKENS, askGemini, GeminiError } from "./gemini.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
 import { readAllDiaryEntries, readAllTransactions, readShiftGrid, SHIFT_TYPES, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
@@ -297,7 +297,9 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
   );
 
   try {
-    return await askGemini(ctx.geminiApiKey, systemInstruction, question);
+    return await askGemini(ctx.geminiApiKey, systemInstruction, question, {
+      maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
+    });
   } catch (err) {
     console.error("askGemini failed", err);
     if (err instanceof GeminiError) return FALLBACK_MESSAGE;

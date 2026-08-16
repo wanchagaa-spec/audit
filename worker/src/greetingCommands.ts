@@ -6,7 +6,7 @@
 // says hi.
 
 import { listCalendarEvents } from "./calendar.ts";
-import { askGemini } from "./gemini.ts";
+import { ANSWER_MAX_OUTPUT_TOKENS, askGemini } from "./gemini.ts";
 import { refreshAccessToken } from "./googleAuth.ts";
 import { groupIdFromSubject } from "./groupSubject.ts";
 import { pushToLine } from "./line.ts";
@@ -220,7 +220,9 @@ async function buildYesterdayDiaryLine(
       "เขียนสรุป/ข้อสังเกตสั้นๆ 2-3 ประโยค ให้กำลังใจหรือชวนคิดต่อได้ ห้ามเดาเติมเรื่องที่ไม่ได้เขียนไว้ในบันทึกจริง",
       "ตอบเป็นภาษาไทยล้วนๆ ตอบเนื้อความเลย ไม่ต้องมีหัวข้อหรือคำนำ",
     ].join("\n");
-    const analysis = await askGemini(env.GEMINI_API_KEY, systemInstruction, diaryText);
+    const analysis = await askGemini(env.GEMINI_API_KEY, systemInstruction, diaryText, {
+      maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
+    });
     return `📔 ไดอารี่เมื่อวาน:\n${analysis}`;
   } catch (err) {
     console.error("buildYesterdayDiaryLine failed", err);

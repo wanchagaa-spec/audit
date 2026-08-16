@@ -120,6 +120,8 @@ let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to t
 let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
 let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling call (PLAN.md 17.9) return a recognizably different string instead of echoing, to verify styling actually happened
 let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
+let simulatePersonaDropLink = false; // one-shot: same idea for a URL — the travel/places replies carry no quoted spans at all, so links need their own coverage
+let simulateGeminiTruncation = false; // one-shot: makes the next non-interpreter Gemini call return a *successful* 200 whose text was cut off at the token ceiling (finishReason MAX_TOKENS), the failure that used to be indistinguishable from a complete answer
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
@@ -134,6 +136,7 @@ const INTERPRETER_MARKER = "ระบบตีความข้อความ�
 // exercising that same deterministic path unless it explicitly opts in here.
 let simulateInterpreterResult = null;
 let simulateInterpreterFailure = false; // one-shot: fails the next AI-interpreter call specifically (a real network/API error, not just an unusable response), to exercise interpretMessage's own catch-and-fall-back path distinctly from a malformed-JSON response
+let simulateInterpreterTruncation = false; // one-shot: same as simulateGeminiTruncation but for the interpreter call, which is answered before that flag is ever consulted
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
 let simulateFinanceNewsFetchFailure = false; // makes the next CNBC RSS request fail, to exercise graceful degradation
@@ -670,7 +673,21 @@ globalThis.fetch = async (url, init = {}) => {
     // own comment above for why the no-mock-configured default is
     // deliberately non-JSON.
     if (systemInstruction.includes(INTERPRETER_MARKER)) {
-      geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
+      geminiRequests.push({
+        systemInstruction,
+        question,
+        apiKey: init.headers?.["x-goog-api-key"],
+        maxOutputTokens: body.generationConfig?.maxOutputTokens,
+      });
+      if (simulateInterpreterTruncation) {
+        simulateInterpreterTruncation = false;
+        return new Response(
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: '{"intent":"chitch' }] }, finishReason: "MAX_TOKENS" }],
+          }),
+          { status: 200 }
+        );
+      }
       if (simulateInterpreterFailure) {
         simulateInterpreterFailure = false;
         return new Response(JSON.stringify({ error: { message: "simulated interpreter failure" } }), { status: 500 });
@@ -693,7 +710,27 @@ globalThis.fetch = async (url, init = {}) => {
       simulateGeminiFailure = false;
       return new Response(JSON.stringify({ error: { message: "simulated Gemini failure" } }), { status: 500 });
     }
-    geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
+    geminiRequests.push({
+      systemInstruction,
+      question,
+      apiKey: init.headers?.["x-goog-api-key"],
+      maxOutputTokens: body.generationConfig?.maxOutputTokens,
+    });
+
+    // A 200 carrying real-looking but incomplete text — exactly what the
+    // API returns when it hits maxOutputTokens. The first half of the input
+    // is echoed back so the truncation is visible in an assertion.
+    if (simulateGeminiTruncation) {
+      simulateGeminiTruncation = false;
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            { content: { parts: [{ text: question.slice(0, Math.floor(question.length / 2)) }] }, finishReason: "MAX_TOKENS" },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
 
     // Persona-styling calls (PLAN.md 17.9, persona.ts) are identified by a
     // marker phrase unique to that system instruction. By default they echo
@@ -710,6 +747,15 @@ globalThis.fetch = async (url, init = {}) => {
         // "styles" a quoted instruction like '"ใช่"' into something that no
         // longer contains it verbatim, e.g. dropping the quotes entirely.
         const mangled = question.replace(/"([^"]+)"/g, "$1");
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: mangled }] } }] }), { status: 200 });
+      }
+      if (simulatePersonaDropLink) {
+        simulatePersonaDropLink = false;
+        // The travel/places failure mode: the reply keeps its shape and
+        // reads fine, but a booking link came back cut short — which, for a
+        // feature whose links are the entire product, is worse than not
+        // restyling at all.
+        const mangled = question.replace(/(https?:\/\/\S{12})\S+/g, "$1…");
         return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: mangled }] } }] }), { status: 200 });
       }
       if (simulatePersonaRewrite) {
@@ -1845,6 +1891,69 @@ await handleWebhook(
 check(
   "a persona call that drops a quoted confirmation instruction falls back to the original reply, keeping the exact \"ใช่\" instruction intact",
   replies.length === repliesBeforeQuoteDrop + 1 && replies.at(-1).includes('"ใช่"')
+);
+
+// Same guard, the case the quoted-span check could never see: travel and
+// nearby-place replies contain no quoted spans at all, but their whole
+// point is the booking/maps links. A restyling that shortens a URL leaves a
+// reply that still reads perfectly and is completely useless.
+simulatePersonaDropLink = true;
+const flightWebhookBody = JSON.stringify({
+  events: [personalTextEvent("หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", "reply-persona-4")],
+});
+const flightWebhookSignature = await signLineBody(flightWebhookBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeLinkDrop = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": flightWebhookSignature }, body: flightWebhookBody }),
+  env
+);
+check(
+  "a persona call that shortens a booking link falls back to the original reply, with every link intact",
+  replies.length === repliesBeforeLinkDrop + 1 &&
+    replies.at(-1).includes("https://www.skyscanner.co.th/transport/flights/bkk/cnx/261220/") &&
+    replies.at(-1).includes("https://www.google.com/travel/flights?q=") &&
+    !replies.at(-1).includes("…")
+);
+
+// Regression tests for a real bug found in review: a response cut off at
+// the token ceiling comes back as an ordinary 200 with text in it, and
+// askGemini used to read only `parts` — so a half-finished answer was
+// indistinguishable from a complete one and went straight out to the user.
+// finishReason is now checked, which turns each of these into the ordinary
+// failed-call path every caller already handles.
+// The interpreter was already covered by accident — truncated JSON fails
+// JSON.parse, which interpretMessage catches into the same fallback — so
+// this one passes with or without the finishReason check and proves
+// nothing about it. Kept as a behaviour lock (the fallback must stay
+// deterministic no matter which error shape gets it there); the check
+// itself is what the AI-answer case below actually exercises.
+simulateInterpreterTruncation = true;
+const interpreterTruncatedReply = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "a truncated interpreter response falls back to the deterministic matcher chain, not a half-parsed intent",
+  interpreterTruncatedReply === directPersonaReply
+);
+
+simulateGeminiTruncation = true;
+const answerTruncatedReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+check(
+  "a truncated AI answer shows the honest fallback message instead of a sentence that stops mid-thought",
+  answerTruncatedReply.includes("ระบบ AI ขัดข้อง")
+);
+
+// The ceilings differ per caller now (gemini.ts) — one shared number had to
+// suit a small JSON intent and a full reply restyling at once.
+const lastRequestWhere = (predicate) => [...geminiRequests].reverse().find(predicate);
+const lastInterpreterRequest = lastRequestWhere((r) => r.systemInstruction.includes(INTERPRETER_MARKER));
+const lastPersonaRequest = lastRequestWhere((r) => r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข"));
+const lastAnswerRequest = lastRequestWhere(
+  (r) => !r.systemInstruction.includes(INTERPRETER_MARKER) && !r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข")
+);
+check(
+  "each Gemini caller sends its own output ceiling rather than one shared value",
+  lastInterpreterRequest?.maxOutputTokens === 800 &&
+    lastPersonaRequest?.maxOutputTokens === 2000 &&
+    lastAnswerRequest?.maxOutputTokens === 1200
 );
 // Clean up the dangling pendingConfirmation this created directly (rather
 // than through a chat message, which would have side effects of its own),

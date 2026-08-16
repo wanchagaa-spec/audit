@@ -12,7 +12,7 @@
 // falls back to the original text untouched — a persona hiccup must never
 // turn into a broken, missing, or numerically wrong reply.
 
-import { askGemini } from "./gemini.ts";
+import { askGemini, PERSONA_MAX_OUTPUT_TOKENS } from "./gemini.ts";
 
 // The bot's name (requested directly) — shared with aiInterpreter.ts (so
 // chitchat replies it composes are self-aware) and index.ts's group-mode
@@ -91,7 +91,10 @@ export async function applyPersona(text: string, geminiApiKey: string): Promise<
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PERSONA_TIMEOUT_MS);
   try {
-    const styled = await askGemini(geminiApiKey, PERSONA_SYSTEM_INSTRUCTION, text, controller.signal);
+    const styled = await askGemini(geminiApiKey, PERSONA_SYSTEM_INSTRUCTION, text, {
+      signal: controller.signal,
+      maxOutputTokens: PERSONA_MAX_OUTPUT_TOKENS,
+    });
     const missingQuote = quotedSpans(text).some((q) => !styled.includes(q));
     if (missingQuote) {
       console.error("applyPersona dropped or reworded a quoted instruction, sending the original reply unstyled");
