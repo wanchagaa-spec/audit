@@ -4,3 +4,8 @@ GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 STATE_SIGNING_SECRET=
 GEMINI_API_KEY=
+# Optional (see wrangler.toml for what each one powers) — leaving these blank
+# is a supported setup, not a broken one: place search and travel search both
+# degrade to a "ยังไม่ได้ตั้งค่า" reply / links-without-prices instead of failing.
+GOOGLE_MAPS_API_KEY=
+TRAVELPAYOUTS_TOKEN=

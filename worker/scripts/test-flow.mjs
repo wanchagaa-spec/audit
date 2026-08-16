@@ -3479,6 +3479,47 @@ const tamperedToken = viewToken.slice(0, -2) + "xx";
 const viewTamperedResponse = await worker.fetch(new Request(`${origin}/view?token=${tamperedToken}`), env, new FakeExecutionContext());
 check("a tampered view token is rejected", viewTamperedResponse.status === 400);
 
+// Regression test for a real bug caught in code review: a *tampered* token
+// (above) still decodes as base64 and so failed the signature check
+// cleanly, but a token that isn't valid base64 at all — a hand-edited or
+// truncated link, an easy thing for a user to produce — made `atob` throw
+// inside verifyPayload. Nothing caught it, so instead of the friendly
+// "ลิงก์หมดอายุหรือไม่ถูกต้อง" page this exact path already renders for every
+// other bad token, the whole request died as a bare 500. Every one of these
+// must come back as an ordinary rejection.
+for (const malformed of ["abc.!!!!", "abc.AAAAA", "%25%25.%25%25", "a.b", "."]) {
+  const malformedResponse = await worker.fetch(
+    new Request(`${origin}/view?token=${malformed}`),
+    env,
+    new FakeExecutionContext()
+  );
+  check(
+    `a malformed view token (${malformed}) is rejected with the friendly page, not a 500`,
+    malformedResponse.status === 400 && (await malformedResponse.text()).includes("ลิงก์หมดอายุหรือไม่ถูกต้อง")
+  );
+}
+
+// Same fix, the other caller of the same helper: /oauth/callback verifies
+// its `state` through verifyState, which shared verifyPayload's crash.
+const malformedStateResponse = await worker.fetch(
+  new Request(`${origin}/oauth/callback?code=abc&state=abc.!!!!`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "a malformed OAuth state is rejected with the friendly page, not a 500",
+  malformedStateResponse.status === 400 && (await malformedStateResponse.text()).includes("ลิงก์หมดอายุหรือไม่ถูกต้อง")
+);
+
+// The token these pages authenticate with lives in the URL itself, so the
+// rendered page must not be cacheable and must not leak that URL onward as
+// a Referer.
+check(
+  "/view pages are served no-store with no referrer, so the tokenised URL doesn't travel",
+  viewPageResponse.headers.get("cache-control") === "no-store" &&
+    viewPageResponse.headers.get("referrer-policy") === "no-referrer"
+);
+
 const unlinkedViewToken = await signViewToken("Uneverlinkeduser", env.STATE_SIGNING_SECRET);
 const viewUnlinkedResponse = await worker.fetch(new Request(`${origin}/view?token=${unlinkedViewToken}`), env, new FakeExecutionContext());
 check(
@@ -4691,6 +4732,72 @@ check(
   driveUploads.length === driveUploadsBeforeLegacyDrain + 1 &&
     pushes.length === pushesBeforeLegacyDrain + 1 &&
     pushes.at(-1).to === lineUserId
+);
+
+// Regression test for a real bug caught in code review: when the account
+// link is gone by the time the queue drains (unlinked while the file was
+// waiting), drainUploadQueue skipped the upload but still counted the file
+// as succeeded — and the `finally` dropped the queue entry regardless. The
+// user was told "✅ อัปโหลดเพิ่ม 1 ไฟล์แล้ว" for a photo that was never
+// uploaded and no longer existed anywhere to retry from. It has to be
+// reported as a failure instead, in the same wording every other failed
+// upload uses.
+const orphanJob = {
+  lineUserId: "Unolongerlinked",
+  pushTarget: "Unolongerlinked",
+  kind: "image",
+  messageId: "orphan-msg-1",
+  timestampMs: Date.now(),
+  tripFolderId,
+  tripName: "ทริปที่บัญชีหลุด",
+};
+await env.ACCOUNTS.put(`upload-queue:orphan-msg-1`, JSON.stringify(orphanJob), {
+  metadata: { lineUserId: orphanJob.lineUserId },
+});
+const pushesBeforeOrphanDrain = pushes.length;
+const driveUploadsBeforeOrphanDrain = driveUploads.length;
+await drainUploadQueue(env);
+const orphanPush = pushes.at(-1);
+check(
+  "a queued file whose account is no longer linked is reported as failed, never as uploaded",
+  driveUploads.length === driveUploadsBeforeOrphanDrain &&
+    pushes.length === pushesBeforeOrphanDrain + 1 &&
+    orphanPush.text.includes("อัปโหลดเพิ่ม 0 ไฟล์") &&
+    orphanPush.text.includes("อีก 1 ไฟล์อัปโหลดไม่สำเร็จ")
+);
+check("the unuploadable entry is still cleared from the queue, not left to retry forever",
+  (await countQueuedForUser(kv, orphanJob.lineUserId)) === 0);
+
+// Regression test for a real bug caught in code review: LINE redelivers a
+// webhook it didn't get a timely "ok" for, and each queue entry used to get
+// a random UUID key — so a redelivery enqueued the same photo a second time
+// and the drain uploaded a duplicate into the trip folder. Keying by
+// messageId makes a redelivery overwrite its own entry instead.
+await handleTextMessage(env, lineUserId, "เริ่มทริป ทริปส่งซ้ำ", origin);
+const redeliveredBody = JSON.stringify({
+  events: [
+    {
+      type: "message",
+      message: { type: "image", id: "redelivered-img-1" },
+      source: { type: "user", userId: lineUserId },
+      replyToken: "reply-redelivered-1",
+      timestamp: Date.now(),
+    },
+  ],
+});
+const redeliveredRequest = () =>
+  signLineBody(redeliveredBody, env.LINE_CHANNEL_SECRET).then(
+    (sig) => new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": sig }, body: redeliveredBody })
+  );
+await handleWebhook(await redeliveredRequest(), env);
+await handleWebhook(await redeliveredRequest(), env); // LINE delivers the very same event again
+check("a redelivered webhook queues the same photo only once", (await countQueuedForUser(kv, lineUserId)) === 1);
+const driveUploadsBeforeRedeliveryDrain = driveUploads.length;
+await drainUploadQueue(env);
+check(
+  "so the drain uploads it once, with no duplicate copy in the trip folder",
+  driveUploads.length === driveUploadsBeforeRedeliveryDrain + 1 &&
+    driveUploads.filter((u) => u.name.includes("redelivered-img-1")).length === 1
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

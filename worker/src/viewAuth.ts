@@ -17,8 +17,26 @@ import { getAccountLink } from "./state.ts";
 // (every other file that needs Env from index.ts only imports it as a type,
 // which TypeScript erases and so never creates a real runtime cycle — this
 // one-line helper is cheap enough to just duplicate instead).
+//
+// Every page rendered through here carries the session token in its own URL
+// (see resolveViewSession) and shows one account's private data, so both
+// extra headers are about that token and that data not travelling further
+// than the tab they were opened in:
+//   no-store       — keeps the rendered page (and the tokenised URL in it)
+//                    out of any cache along the way, shared or local.
+//   Referrer-Policy — a Referer header on anything the page reaches out to
+//                    would carry ?token=... to that destination verbatim.
+//                    Nothing on these pages links off-origin today; this is
+//                    what keeps that true the first time something does.
 export function html(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    },
+  });
 }
 
 /** decodeURIComponent throws on malformed percent-encoding (e.g. a lone

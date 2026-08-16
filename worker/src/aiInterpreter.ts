@@ -27,7 +27,7 @@ import type { EntryType } from "../../app/src/types.ts";
 import { askGemini, GeminiError } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
 import { BOT_NAME } from "./persona.ts";
-import { bangkokDateKey } from "./thaiDate.ts";
+import { addDaysToDateKey, bangkokDateKey } from "./thaiDate.ts";
 
 export interface InterpretedTransaction {
   amount: number;
@@ -254,11 +254,25 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     case "hotel_search": {
       if (!isNonEmptyString(r.hotelCityName)) return null;
       if (!isValidDateKey(r.hotelCheckInDateKey) || !isValidDateKey(r.hotelCheckOutDateKey)) return null;
+      // Two individually valid dates can still be a nonsense *stay*: the
+      // model computing "พัก 1 คืน" or "ศุกร์นี้ถึงอาทิตย์" wrong produces a
+      // checkout on or before the checkin, which Hotellook returns nothing
+      // for and — worse, since the links are what this feature actually
+      // promises — bakes an unusable date range into the Agoda/Booking
+      // links too. Corrected to a one-night stay rather than rejected
+      // outright: that's the same default the deterministic "หาที่พัก"
+      // command already applies when no checkout is given at all
+      // (travelCommands.ts), and it keeps a searchable reply instead of
+      // dropping through to a "ไม่พบวันที่" dead end.
+      const hotelCheckOutDateKey =
+        r.hotelCheckOutDateKey > r.hotelCheckInDateKey
+          ? r.hotelCheckOutDateKey
+          : addDaysToDateKey(r.hotelCheckInDateKey, 1);
       return {
         intent: "hotel_search",
         hotelCityName: r.hotelCityName,
         hotelCheckInDateKey: r.hotelCheckInDateKey,
-        hotelCheckOutDateKey: r.hotelCheckOutDateKey,
+        hotelCheckOutDateKey,
       };
     }
     case "ground_ticket_search": {

@@ -53,17 +53,37 @@ const PERSONA_SYSTEM_INSTRUCTION = [
 // never turn into the reason a reply misses its token.
 const PERSONA_TIMEOUT_MS = 2500;
 
-// Any "..." span in the original text is always one of this codebase's
-// instructional command words (e.g. `(พิมพ์ "ใช่" เพื่อยืนยัน)`) — never
-// arbitrary user data (transaction notes/diary text never get quoted this
-// way in a reply). The system instruction above tells the model not to
-// touch these, but an instruction is not a guarantee — found in review:
-// verify it actually didn't, rather than just trusting it did, and fall
-// back to the unstyled original if even one quoted word went missing.
-// isAffirmative's own exact-match check is exactly what a dropped/reworded
-// "ใช่" here would silently break.
+// A "..." span in the original text is usually one of this codebase's
+// instructional command words (e.g. `(พิมพ์ "ใช่" เพื่อยืนยัน)`), and those
+// are the ones that actually matter here — isAffirmative's own exact-match
+// check is precisely what a dropped or reworded "ใช่" would silently break.
+// Some spans are user/AI data rather than an instruction (an email subject
+// in gmailCommands.ts, a place keyword in placesCommands.ts, a province
+// name in greetingCommands.ts); those don't need protecting, but they cost
+// nothing to include and telling the two apart reliably isn't worth the
+// machinery. The system instruction above tells the model not to touch any
+// of this, but an instruction is not a guarantee — verify, don't trust.
 function quotedSpans(text: string): string[] {
   return text.match(/"[^"]+"/g) ?? [];
+}
+
+// Links get the same verify-don't-trust treatment as quoted spans above,
+// and for a sharper reason: travel search (PLAN.md 17.37) and nearby-place
+// search (17.30) build replies whose *entire point* is the URLs — travel's
+// own header comment puts it as "the links are the product, the prices are
+// decoration". Those replies contain no quoted spans at all, so the check
+// above gave them zero coverage, while they're also the longest replies the
+// bot sends (a five-offer flight reply runs ~600 characters of mostly Thai
+// text plus two long URLs, close enough to gemini.ts's maxOutputTokens that
+// a truncated restyling is a live possibility, quite apart from the model
+// simply rewriting a link). Either way the result is a reply that looks
+// fine and whose links are broken — the one failure this feature cannot
+// degrade to. A URL that didn't survive verbatim means fall back.
+//
+// Matches greedily to whitespace, exactly how these URLs are laid out in
+// the replies that build them (one per line, or after "• Google Flights: ").
+function urlSpans(text: string): string[] {
+  return text.match(/https?:\/\/\S+/g) ?? [];
 }
 
 export async function applyPersona(text: string, geminiApiKey: string): Promise<string> {
@@ -75,6 +95,11 @@ export async function applyPersona(text: string, geminiApiKey: string): Promise<
     const missingQuote = quotedSpans(text).some((q) => !styled.includes(q));
     if (missingQuote) {
       console.error("applyPersona dropped or reworded a quoted instruction, sending the original reply unstyled");
+      return text;
+    }
+    const missingUrl = urlSpans(text).some((u) => !styled.includes(u));
+    if (missingUrl) {
+      console.error("applyPersona dropped or altered a link, sending the original reply unstyled");
       return text;
     }
     return styled;

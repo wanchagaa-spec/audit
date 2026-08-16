@@ -19,6 +19,16 @@
 // Each queued item gets its own KV key rather than living in one shared array, so
 // concurrent enqueues (e.g. two people using the bot around the same time) can
 // never race each other on a read-modify-write of a single value.
+//
+// That key is the LINE messageId, not a random UUID: LINE redelivers a webhook
+// it didn't get a timely "ok" for, and with a random key each redelivery
+// enqueued the same photo again, uploading a duplicate into the trip folder.
+// A messageId is globally unique and identifies exactly one media file, so a
+// redelivery now overwrites its own entry instead of adding a second one —
+// idempotent by construction, with no extra bookkeeping and no risk of the
+// opposite failure (a dedup marker outliving a failed upload and suppressing
+// the retry that would have saved the file). Each item still owns its own key,
+// so the no-read-modify-write property above is unchanged.
 
 const QUEUE_PREFIX = "upload-queue:";
 
@@ -45,7 +55,7 @@ export interface QueuedUpload {
 export async function enqueueUploads(kv: KVNamespace, jobs: QueuedUpload[]): Promise<void> {
   await Promise.all(
     jobs.map((job) =>
-      kv.put(`${QUEUE_PREFIX}${crypto.randomUUID()}`, JSON.stringify(job), {
+      kv.put(`${QUEUE_PREFIX}${job.messageId}`, JSON.stringify(job), {
         metadata: { lineUserId: job.lineUserId },
       })
     )

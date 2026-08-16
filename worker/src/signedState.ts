@@ -43,6 +43,15 @@ async function signPayload(payload: { u: string; t: number; k: string }, secret:
   return `${payloadB64}.${toBase64Url(signature)}`;
 }
 
+// Everything here runs on a token that came straight off a URL, so every
+// step has to treat it as arbitrary text rather than something this code
+// produced. `atob` (inside fromBase64Url) *throws* on a character outside
+// the base64 alphabet, and on a length that can't be padded to a multiple
+// of 4 — an easy thing to hit by hand-editing or truncating a link. That
+// exception used to escape all the way out of the fetch handler, so a
+// mangled link produced a bare 500 instead of the friendly "ลิงก์หมดอายุหรือ
+// ไม่ถูกต้อง" page every caller here already knows how to render for a null
+// return. A malformed token is simply an invalid token: return null.
 async function verifyPayload(
   token: string,
   secret: string
@@ -50,16 +59,16 @@ async function verifyPayload(
   const [payloadB64, signatureB64] = token.split(".");
   if (!payloadB64 || !signatureB64) return null;
 
-  const key = await hmacKey(secret);
-  const valid = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    fromBase64Url(signatureB64),
-    new TextEncoder().encode(payloadB64)
-  );
-  if (!valid) return null;
-
   try {
+    const key = await hmacKey(secret);
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      fromBase64Url(signatureB64),
+      new TextEncoder().encode(payloadB64)
+    );
+    if (!valid) return null;
+
     return JSON.parse(new TextDecoder().decode(fromBase64Url(payloadB64))) as { u: string; t: number; k: string };
   } catch {
     return null;
