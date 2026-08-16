@@ -1,4 +1,6 @@
-import type { Category } from "../types";
+// Explicit .ts extension — shared with the Cloudflare Worker, see the note
+// at the top of lib/chatEngine.ts.
+import type { Category } from "../types.ts";
 
 export const DEFAULT_EXPENSE_CATEGORIES: Category[] = [
   {
