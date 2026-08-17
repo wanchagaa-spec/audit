@@ -18,11 +18,22 @@
 export const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 
 // The one exception (PLAN.md 17.41). Grounded search runs on the full Flash
-// model because Lite appears not to serve the google_search tool at all: the
-// grounded call started failing in production the moment it shipped, while
-// every other call — same key, same endpoint, no tools — kept working. Only
-// this one call pays the difference; everything above stays on Lite, which
-// is cheaper, faster, and was never the problem.
+// model rather than Lite.
+//
+// Read the reasoning with care, because the original version of it was
+// wrong. This was switched on the theory that Lite doesn't serve the
+// google_search tool — the grounded call failed in production from the
+// moment it shipped while every other call, same key and endpoint but no
+// tools, kept working. Surfacing the real error showed a 429
+// RESOURCE_EXHAUSTED instead: a quota problem, not a capability one. Gemini
+// meters per model and per feature, so ordinary calls succeeding tells you
+// nothing about the grounding budget, and that inference was simply too
+// broad.
+//
+// Whether Lite would serve the tool given quota is still unknown — no clean
+// signal was ever collected. Left on full Flash for now because flipping
+// models again without data would only add noise; only this one call pays
+// the difference either way. Revisit once the quota question is settled.
 export const SEARCH_MODEL = "gemini-3.5-flash";
 
 function endpointFor(model: string): string {
