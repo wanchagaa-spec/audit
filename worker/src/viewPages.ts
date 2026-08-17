@@ -10,11 +10,7 @@ import { readTransactionsForMonth, type TransactionRow } from "./sheets.ts";
 import { bangkokMonthKey, formatThaiDateLabel, bangkokDateKey } from "./thaiDate.ts";
 import { DATA_FETCH_FAILED_MESSAGE, html, escapeHtml, pageShell, renderErrorPage, resolveViewSession } from "./viewAuth.ts";
 
-// Five, matching the "รายการล่าสุด" chat command exactly (PLAN.md 17.48).
-// It was 20 here, which made the same words mean two different things
-// depending on where you read them, and buried the month's totals above it
-// under a wall of rows on a phone.
-const RECENT_TRANSACTIONS_LIMIT = 5;
+
 
 function totals(rows: TransactionRow[]): { income: number; expense: number } {
   return {
@@ -50,7 +46,13 @@ function renderAccountsSummaryPage(token: string, monthLabel: string, monthTx: T
 
   const { income, expense } = totals(monthTx);
   const top = topCategories(monthTx);
-  const recent = monthTx.slice(-RECENT_TRANSACTIONS_LIMIT).reverse();
+  // The whole month, newest first — no cap (PLAN.md 17.49). It was 20, then
+  // briefly 5 to match the chat command, which was the wrong lesson: the two
+  // are answering different questions. Chat is a glance at what you just
+  // spent and has a 5,000-character ceiling to respect; the web page is
+  // where you go to actually look through the month, and truncating it there
+  // leaves no way to see the rest at all.
+  const recent = [...monthTx].reverse();
 
   const totalsHtml = `<div class="card">
     <div class="totals">
@@ -79,7 +81,7 @@ function renderAccountsSummaryPage(token: string, monthLabel: string, monthTx: T
   </div>`;
 
   const recentHtml = `<div class="card">
-    <h2>รายการล่าสุด</h2>
+    <h2>รายการเดือนนี้</h2>
     <div class="table-scroll"><table class="data-table">
       <thead><tr><th>วันที่</th><th>หมวด</th><th>รายการ</th><th class="num">จำนวนเงิน</th></tr></thead>
       <tbody>

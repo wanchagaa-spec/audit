@@ -237,6 +237,7 @@ brief-capability-list vs. exhaustive-usage-guide spectrum). See `WELCOME_MESSAGE
 - เหลือเงินเท่าไหร่ (all-time cumulative balance) / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่
 - วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด (by count) / เฉลี่ยใช้เงินต่อวันเท่าไหร่
 - งบเหลือเท่าไหร่ / ตั้งงบ &lt;หมวด&gt; &lt;จำนวน&gt; / ลบงบ &lt;หมวด&gt; — also settable at `/view/budgets`
+- รายการล่าสุด — the five most recent, always. The AI interpreter has a `report` intent whose only job is handing the message back to this matcher, so a report keeps its deterministic wording and row count however it was phrased (`/view` shows the full month instead — different question, no 5,000-character ceiling).
 - ทำอะไรได้บ้าง — a nine-line summary of what the bot does. Distinct from วิธีใช้, which links to the full guide at `/view/help`.
 - ค้นหา &lt;คำ&gt; / รายการล่าสุด
 - ลบรายการล่าสุด (or ยกเลิกรายการล่าสุด) — undoes the most recent transaction, with a confirm

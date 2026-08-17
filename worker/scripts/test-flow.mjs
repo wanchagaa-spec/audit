@@ -5866,6 +5866,53 @@ check(
   (await punctuatedHandler?.("fake-access-token", "fake-sheet-id", kv))?.includes("ฉันช่วยได้ประมาณนี้") === true
 );
 
+// ---- "รายการล่าสุด" must stay deterministic (PLAN.md 17.49) ---------------
+// Reported from production with a screenshot: asking for it in chat came
+// back with a dozen entries grouped by date, not five. The deterministic
+// handler has always returned five — it just never ran, because the AI
+// interpreter is consulted before the matcher chain and had no intent for
+// "this is one of the canned reports", so it classified the phrase as a
+// question and answerQuestion wrote its own answer from the whole month.
+
+sheetRows.length = 0;
+for (let i = 1; i <= 9; i++) {
+  sheetRows.push(txRow(bangkokDateKey(), "expense", i * 10, "food", `รายการที่ ${i}`));
+}
+
+simulateInterpreterResult = { intent: "report" };
+const reportIntentReply = await handleTextMessage(env, lineUserId, "ขอดูรายการล่าสุดหน่อย", origin);
+check(
+  "the report intent routes back to the deterministic handler, five rows and no more",
+  reportIntentReply.startsWith("5 รายการล่าสุด:") &&
+    reportIntentReply.split("\n").length === 6 &&
+    !reportIntentReply.includes("รายการที่ 4")
+);
+
+// Typed exactly, with the interpreter failing so the matcher chain runs:
+// same answer either way, which is the point of routing rather than
+// answering inside the intent.
+const typedRecentReply = await handleTextMessage(env, lineUserId, "รายการล่าสุด", origin);
+check("and the typed command gives the identical answer", typedRecentReply === reportIntentReply);
+
+// The model can be right that something is a report and still be looking at
+// a phrasing commands.ts has no test for. Answering beats saying nothing.
+simulateInterpreterResult = { intent: "report" };
+const unmatchedReportReply = await handleTextMessage(env, lineUserId, "สรุปการเงินให้หน่อยสิ", origin);
+check("a report phrasing the matcher doesn't know still gets answered", unmatchedReportReply.length > 0);
+
+// ---- The web page shows the whole month (PLAN.md 17.49) -------------------
+// Deliberately not five. Chat is a glance with a 5,000-character ceiling;
+// the page is where you go to look through the month, and a cap there leaves
+// no way to reach the rest.
+const monthPageResponse = await worker.fetch(new Request(`${origin}/view?token=${viewToken}`), env, new FakeExecutionContext());
+const monthPageHtml = await monthPageResponse.text();
+check(
+  "/view lists every row of the month, not just the most recent few",
+  monthPageResponse.status === 200 &&
+    [1, 2, 3, 4, 5, 6, 7, 8, 9].every((i) => monthPageHtml.includes(`รายการที่ ${i}`))
+);
+check("and titles that section as the month rather than 'latest'", monthPageHtml.includes("รายการเดือนนี้"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);

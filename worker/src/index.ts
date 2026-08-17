@@ -558,6 +558,28 @@ async function runInterpretedIntent(
         return await withToken((ctx) => tripStatus(ctx));
       case "set_province":
         return await setProvinceByName(env.ACCOUNTS, subjectId, intent.provinceName);
+      // Straight back to the deterministic matcher (PLAN.md 17.49). The
+      // model recognised "this is one of the canned money reports"; the
+      // report itself is computed and formatted by the same code the typed
+      // command has always used, so "รายการล่าสุด" gives the same five rows
+      // however it was phrased.
+      //
+      // Falls through to a free-form answer if the matcher doesn't
+      // recognise the wording after all — the model can be right that this
+      // is a report request and still be looking at a phrasing commands.ts
+      // has no test for, and answering is better than saying nothing.
+      case "report": {
+        const reportHandler = await matchCommand(rawText, origin);
+        if (reportHandler) {
+          return await withFreshAccessToken(
+            env,
+            link.refreshToken,
+            (accessToken) => reportHandler(accessToken, link.spreadsheetId, env.ACCOUNTS),
+            tokenCache
+          );
+        }
+        return await withToken((ctx) => answerQuestion(ctx, rawText));
+      }
       case "question":
         return await withToken((ctx) => answerQuestion(ctx, intent.question));
       case "help":

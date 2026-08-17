@@ -86,6 +86,7 @@ export type InterpretedIntent =
   | { intent: "question"; question: string }
   | { intent: "help" }
   | { intent: "capabilities" }
+  | { intent: "report" }
   | { intent: "view_link" }
   | { intent: "chitchat"; reply: string }
   | { intent: "unclear"; reply: string };
@@ -332,6 +333,8 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       return { intent: "help" };
     case "capabilities":
       return { intent: "capabilities" };
+    case "report":
+      return { intent: "report" };
     case "view_link":
       return { intent: "view_link" };
     case "chitchat": {
@@ -406,6 +409,18 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     // the answer. Both beat chitchat inventing one. So this description
     // deliberately does *not* promise a search tool — the interpreter's only
     // job is recognising "this is a question" at all.
+    // Added after a real report (PLAN.md 17.49): "รายการล่าสุด" was landing
+    // on `question`, so answerQuestion composed a free-form answer from the
+    // whole month's rows and listed a dozen entries — the deterministic
+    // handler for that exact phrase returns exactly five, and never ran,
+    // because the interpreter is consulted before the matcher chain.
+    //
+    // This intent doesn't answer anything itself. It routes the message
+    // straight back to commands.ts's matcher, the same shape the `help`
+    // intent already uses: the model's job is recognising *what kind of
+    // thing this is*, and the deterministic code stays the one that decides
+    // what the numbers are and how many rows to show.
+    '{"intent":"report"} — ขอรายงานเงินสำเร็จรูปที่ระบบมีอยู่แล้ว: สรุปวันนี้/สัปดาห์นี้/เดือนนี้/เดือนที่แล้ว, เหลือเงินเท่าไหร่, รายรับ-รายจ่ายเดือนนี้, วันไหน/หมวดไหนใช้เยอะสุด, ซื้ออะไรบ่อยสุด, เฉลี่ยต่อวัน, งบเหลือเท่าไหร่, รายการล่าสุด, ค้นหา <คำ> — ใช้ intent นี้แทน question เมื่อผู้ใช้ขอรายงานพวกนี้ ระบบมีสูตรคำนวณและรูปแบบของตัวเองอยู่แล้ว',
     '{"intent":"question","question":string} — คำถามอะไรก็ได้ที่ต้องการคำตอบจริงจัง ทั้งคำถามเกี่ยวกับข้อมูลส่วนตัวของผู้ใช้ (เงิน/นัดหมาย/ไดอารี่/เวร/สภาพอากาศ/ข่าว) และคำถามความรู้ทั่วไป ข่าวสาร ราคา หรือเรื่องที่ต้องหาข้อมูลจากภายนอก (เช่น "ประธานาธิบดีสหรัฐคนปัจจุบันคือใคร", "วิธีทำต้มยำกุ้ง", "รถไฟฟ้าสายสีส้มเปิดยัง") — ให้ใช้ intent นี้เสมอ ห้ามเดาคำตอบเองใน chitchat (ระบบจะไปหาคำตอบต่อเอง หรือบอกตรงๆ ว่าไม่มีข้อมูล) (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
     '{"intent":"help"} — ขอดู**วิธีใช้/คำสั่ง** ว่าต้องพิมพ์ยังไง',
     // Split out from "help" (PLAN.md 17.48). Both are "tell me about
