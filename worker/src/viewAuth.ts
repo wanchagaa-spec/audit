@@ -61,7 +61,7 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-export type ViewNavKey = "accounts" | "budgets" | "calendar" | "diary" | "trips" | "shifts" | "tasks";
+export type ViewNavKey = "accounts" | "budgets" | "calendar" | "diary" | "trips" | "shifts" | "tasks" | "settings";
 
 const NAV_ITEMS: Array<{ key: ViewNavKey; path: string; label: string }> = [
   { key: "accounts", path: "/view", label: "บัญชี" },
@@ -71,6 +71,7 @@ const NAV_ITEMS: Array<{ key: ViewNavKey; path: string; label: string }> = [
   { key: "trips", path: "/view/trips", label: "รูปทริป" },
   { key: "shifts", path: "/view/shifts", label: "ตารางเวร" },
   { key: "tasks", path: "/view/tasks", label: "สิ่งที่ต้องทำ" },
+  { key: "settings", path: "/view/settings", label: "ตั้งค่า" },
 ];
 
 function renderNav(token: string, active: ViewNavKey): string {
@@ -203,6 +204,32 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
   .help-list { margin: 0; padding-left: 1.1rem; }
   .help-list li { margin-bottom: .5rem; font-size: .85rem; line-height: 1.55; }
   .help-list li:last-child { margin-bottom: 0; }
+  .field { display: block; margin-bottom: .9rem; }
+  .field:last-child { margin-bottom: 0; }
+  .field > span { display: block; font-size: .8rem; color: #40444b; font-weight: 600; margin-bottom: .3rem; }
+  .field input[type="text"], .field textarea {
+    width: 100%; padding: .55rem .7rem; border-radius: 10px; border: 1px solid #d8dade;
+    font-size: .9rem; font-family: inherit; resize: vertical;
+  }
+  .field small { display: block; color: #6b6f76; font-size: .72rem; margin-top: .3rem; line-height: 1.45; }
+  .danger-card { border: 1px solid #f6c9c0; }
+  .danger-card h2 { color: #de350b; }
+  .danger-text { font-size: .82rem; color: #40444b; line-height: 1.55; margin: 0 0 .8rem; }
+  .danger-notice { text-align: center; color: #de350b; font-size: .85rem; margin: 0 0 1rem; }
+  .danger-button {
+    display: block; width: 100%; padding: .6rem 1rem; border-radius: 10px; border: none;
+    background: #de350b; color: #fff; font-size: .88rem; font-family: inherit; font-weight: 600; cursor: pointer;
+  }
+  .danger-form { display: flex; flex-direction: column; gap: .5rem; }
+  .danger-form input[type="text"] {
+    width: 100%; padding: .55rem .7rem; border-radius: 10px; border: 1px solid #d8dade;
+    font-size: 1.1rem; font-family: inherit; text-align: center; letter-spacing: .35em;
+  }
+  .danger-cancel button {
+    width: 100%; margin-top: .5rem; padding: .5rem; border-radius: 10px; border: none;
+    background: #fff; color: #40444b; font-size: .82rem; font-family: inherit; cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+  }
 </style>
 </head>
 <body>

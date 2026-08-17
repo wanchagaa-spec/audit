@@ -26,7 +26,7 @@ import { DEFAULT_CATEGORIES } from "./categories.ts";
 import type { EntryType } from "./categories.ts";
 import { askGemini, GeminiError, INTERPRETER_MAX_OUTPUT_TOKENS } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
-import { BOT_NAME } from "./persona.ts";
+import { DEFAULT_SETTINGS, type BotSettings } from "./settings.ts";
 import { addDaysToDateKey, bangkokDateKey } from "./thaiDate.ts";
 
 export interface InterpretedTransaction {
@@ -85,6 +85,7 @@ export type InterpretedIntent =
   | { intent: "set_province"; provinceName: string }
   | { intent: "question"; question: string }
   | { intent: "help" }
+  | { intent: "capabilities" }
   | { intent: "view_link" }
   | { intent: "chitchat"; reply: string }
   | { intent: "unclear"; reply: string };
@@ -329,6 +330,8 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     }
     case "help":
       return { intent: "help" };
+    case "capabilities":
+      return { intent: "capabilities" };
     case "view_link":
       return { intent: "view_link" };
     case "chitchat": {
@@ -353,9 +356,9 @@ function buildCategoryList(): string {
 // Unique phrase used by the test harness (test-flow.mjs) to tell an
 // interpreter call apart from a persona-styling call or an AI Q&A call, the
 // same way persona.ts's system instruction has its own marker string.
-function buildSystemInstruction(today: string, history: ConversationTurn[]): string {
+function buildSystemInstruction(today: string, history: ConversationTurn[], settings: BotSettings): string {
   return [
-    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${BOT_NAME}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/ผู้ติดต่อ/หาสถานที่ใกล้ตัว/หาตั๋วเดินทาง-ที่พัก/ถามคำถาม)`,
+    `คุณคือระบบตีความข้อความแชทสำหรับผู้ช่วยส่วนตัวชื่อ "${settings.botName}" (จดเงิน/นัดหมาย/ไดอารี่/ทริปเก็บรูป/ตารางเวร/สิ่งที่ต้องทำ/อีเมล/ผู้ติดต่อ/หาสถานที่ใกล้ตัว/หาตั๋วเดินทาง-ที่พัก/ถามคำถาม)`,
     `วันนี้คือ ${today} (รูปแบบ YYYY-MM-DD ปี ค.ศ.) ใช้วันที่นี้เป็นฐานเวลาคำนวณ "วันนี้"/"พรุ่งนี้"/"ศุกร์หน้า" ฯลฯ ห้ามเดาเอง`,
     "",
     "ประวัติการคุยล่าสุด (เรียงเก่าไปใหม่ ใช้แก้ความกำกวมของข้อความล่าสุด เช่น คำถามต่อเนื่อง หรือ 'เพิ่มอีก 20'):",
@@ -404,7 +407,12 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     // deliberately does *not* promise a search tool — the interpreter's only
     // job is recognising "this is a question" at all.
     '{"intent":"question","question":string} — คำถามอะไรก็ได้ที่ต้องการคำตอบจริงจัง ทั้งคำถามเกี่ยวกับข้อมูลส่วนตัวของผู้ใช้ (เงิน/นัดหมาย/ไดอารี่/เวร/สภาพอากาศ/ข่าว) และคำถามความรู้ทั่วไป ข่าวสาร ราคา หรือเรื่องที่ต้องหาข้อมูลจากภายนอก (เช่น "ประธานาธิบดีสหรัฐคนปัจจุบันคือใคร", "วิธีทำต้มยำกุ้ง", "รถไฟฟ้าสายสีส้มเปิดยัง") — ให้ใช้ intent นี้เสมอ ห้ามเดาคำตอบเองใน chitchat (ระบบจะไปหาคำตอบต่อเอง หรือบอกตรงๆ ว่าไม่มีข้อมูล) (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
-    '{"intent":"help"} — ขอดูวิธีใช้/คำสั่งทั้งหมด',
+    '{"intent":"help"} — ขอดู**วิธีใช้/คำสั่ง** ว่าต้องพิมพ์ยังไง',
+    // Split out from "help" (PLAN.md 17.48). Both are "tell me about
+    // yourself" questions, but they want opposite lengths of answer, and
+    // lumping them together meant "ทำอะไรได้บ้าง" got a link to a guide long
+    // enough to need its own web page.
+    '{"intent":"capabilities"} — ถามว่า**ทำอะไรได้บ้าง**/ช่วยอะไรได้บ้าง อยากรู้ความสามารถคร่าวๆ ไม่ได้ถามวิธีพิมพ์',
     '{"intent":"view_link"} — ขอลิงก์เปิดดูข้อมูล/บัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บเบราว์เซอร์ (เช่น "เปิดเว็บ", "ขอลิงก์เว็บ", "ดูเว็บไซต์หน่อย", "เปิดดูเว็บข้อมูล") — มีฟีเจอร์นี้จริง อย่าตอบว่าทำไม่ได้',
     '{"intent":"chitchat","reply":string} — พูดคุยทั่วไปที่ไม่ใช่คำสั่งอะไร (ทักทาย ชม คุยเล่น) ให้ตอบกลับตามธรรมชาติสั้นๆใน reply',
     '{"intent":"unclear","reply":string} — ข้อมูลสำคัญไม่ครบจะตัดสินใจ (เช่น มีจำนวนเงินแต่ไม่รู้ว่าซื้ออะไร, บอกจะนัดแต่ไม่มีวันที่/เวลา) ให้ reply เป็นคำถามกลับไปถามข้อมูลที่ขาดเท่านั้น',
@@ -464,7 +472,11 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     // sometimes drifted the character's voice to male pronouns (ผม/ครับ)
     // when restyling a reply generated here — giving it the right voice from
     // the start reduces how much that second pass needs to change.
-    `- เวลาแต่งข้อความเองใน reply (chitchat/unclear) ให้ใช้น้ำเสียงคาแรคเตอร์ "${BOT_NAME}" ผู้หญิงน่ารัก สรรพนาม "ฉัน" ลงท้ายด้วย "ค่ะ"/"นะคะ" เท่านั้น ห้ามใช้ "ผม"/"ครับ" หรือสรรพนามผู้ชายเด็ดขาด และต้องเป็นประโยคภาษาไทยที่ถูกต้อง อ่านเข้าใจง่าย ห้ามแต่งคำที่ไม่มีความหมาย`,
+    // Same relaxation as persona.ts's pronoun rule, for the same reason: the
+    // character is the user's to choose now, so the instruction points at it
+    // instead of naming one gender's pronouns. The default character
+    // (settings.ts) still spells out "ฉัน"/"ค่ะ" itself.
+    `- เวลาแต่งข้อความเองใน reply (chitchat/unclear) ให้ใช้น้ำเสียงคาแรคเตอร์ "${settings.botName}" ${settings.botCharacter} ใช้สรรพนามและคำลงท้ายให้ตรงกับคาแรคเตอร์นั้นอย่างคงเส้นคงวา และต้องเป็นประโยคภาษาไทยที่ถูกต้อง อ่านเข้าใจง่าย ห้ามแต่งคำที่ไม่มีความหมาย`,
     "- ตอบเป็น JSON ล้วนๆ เท่านั้น ไม่มีข้อความอื่นใดๆ ก่อนหรือหลัง JSON",
   ].join("\n");
 }
@@ -472,9 +484,10 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
 export async function interpretMessage(
   geminiApiKey: string,
   text: string,
-  history: ConversationTurn[]
+  history: ConversationTurn[],
+  settings: BotSettings = DEFAULT_SETTINGS
 ): Promise<InterpretedIntent | null> {
-  const systemInstruction = buildSystemInstruction(bangkokDateKey(), history);
+  const systemInstruction = buildSystemInstruction(bangkokDateKey(), history, settings);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), INTERPRETER_TIMEOUT_MS);
   try {

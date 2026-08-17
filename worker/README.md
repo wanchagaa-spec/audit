@@ -237,6 +237,7 @@ brief-capability-list vs. exhaustive-usage-guide spectrum). See `WELCOME_MESSAGE
 - เหลือเงินเท่าไหร่ (all-time cumulative balance) / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่
 - วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด (by count) / เฉลี่ยใช้เงินต่อวันเท่าไหร่
 - งบเหลือเท่าไหร่ / ตั้งงบ &lt;หมวด&gt; &lt;จำนวน&gt; / ลบงบ &lt;หมวด&gt; — also settable at `/view/budgets`
+- ทำอะไรได้บ้าง — a nine-line summary of what the bot does. Distinct from วิธีใช้, which links to the full guide at `/view/help`.
 - ค้นหา &lt;คำ&gt; / รายการล่าสุด
 - ลบรายการล่าสุด (or ยกเลิกรายการล่าสุด) — undoes the most recent transaction, with a confirm
   step first (`src/transactionCommands.ts`). Checked ahead of the report commands above so
@@ -1041,6 +1042,26 @@ after changing `src/index.ts`, `commands.ts`, or `state.ts` to catch regressions
 specifically checks that the signed `state` param on the generated Google auth link
 decodes back to the same LINE user id the webhook event carried, which is the exact bug
 class the LIFF removal above fixed.
+
+### Settings (`/view/settings`)
+
+The bot's name, its character, what it calls you, and your weather province
+are per-account, stored in KV by `src/settings.ts` and edited on
+`/view/settings`. The defaults are exactly the values that used to be
+hard-coded, so an account that never opens the page behaves identically. The
+name matters beyond cosmetics: in a group, typing it in a message is how you
+address the bot without a formal @mention.
+
+The same page can wipe all income and expense rows to start over. That needs
+a 6-digit code emailed to the Google account that owns the spreadsheet —
+answering "are you the person whose money this is", which matters because a
+`/view` link shared into a group chat can be opened by any member. The
+address is read from Gmail's own profile endpoint (already covered by
+`gmail.readonly`) rather than by adding the `userinfo.email` scope, which
+would force every linked account to re-consent. The code lasts 15 minutes and
+is destroyed after five wrong tries. The wipe clears the Transactions tab
+only — diary, budgets, calendar, tasks and trip photos are untouched, which
+the page states and a test enforces.
 
 ### How much of the sheet a command reads
 

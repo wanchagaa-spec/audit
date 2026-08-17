@@ -274,6 +274,34 @@ async function readTransactionsFromMonth(
 }
 
 /** Rows dated on or after the first of `month`. */
+/**
+ * Empties the Transactions tab, keeping the header row (PLAN.md 17.48).
+ *
+ * `values:clear` rather than deleting rows: it is one request whatever the
+ * size of the book, and it cannot half-succeed the way a batch of
+ * deleteDimension requests could. It leaves the rows physically present but
+ * blank, which every reader here already copes with — parseTransactionRows
+ * drops rows with no id, and deleteMostRecentTransaction indexes off the raw
+ * response precisely so blanks don't shift anything.
+ *
+ * Also forgets the remembered month-start rows for this book: they would
+ * point past the end of an emptied sheet, and while the boundary check would
+ * catch that on the next read, a wipe is exactly the moment not to rely on
+ * self-healing for money.
+ */
+export async function clearAllTransactions(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace
+): Promise<void> {
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/${TRANSACTIONS_RANGE}:clear`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  const stale = await kv.list({ prefix: `tx-month-start:${spreadsheetId}:` });
+  await Promise.all(stale.keys.map((k) => kv.delete(k.name)));
+}
+
 export async function readTransactionsFrom(
   accessToken: string,
   spreadsheetId: string,

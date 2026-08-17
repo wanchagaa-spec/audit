@@ -150,6 +150,27 @@ function buildRawMessage(to: string, subject: string, body: string): string {
   return base64UrlFromBytes(new TextEncoder().encode(lines.join("\r\n")));
 }
 
+/** The signed-in account's own Gmail address (PLAN.md 17.48).
+ *
+ * Needed to email a confirmation code to the person about to wipe their own
+ * transactions, and read through Gmail's profile endpoint rather than by
+ * adding the `userinfo.email` OAuth scope — that scope would force every
+ * already-linked account to re-consent before anything worked again, and
+ * `gmail.readonly` (which this endpoint accepts) has been granted since
+ * PLAN.md 17.28.
+ *
+ * Throws the same InsufficientGmailScopeError as everything else here for an
+ * account linked before those scopes existed, so the caller can reuse the
+ * established re-link prompt instead of inventing a new dead end. */
+export async function getOwnEmailAddress(accessToken: string): Promise<string> {
+  const profile = await gmailFetch(accessToken, "/profile");
+  const address = profile?.emailAddress;
+  if (typeof address !== "string" || !EMAIL_RE.test(address)) {
+    throw new Error(`Gmail profile returned no usable address: ${JSON.stringify(profile)}`);
+  }
+  return address;
+}
+
 export async function sendEmail(accessToken: string, to: string, subject: string, body: string): Promise<string> {
   const sent = await gmailFetch(accessToken, "/messages/send", {
     method: "POST",
