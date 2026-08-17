@@ -106,7 +106,7 @@ export function buildHelpText(): string {
     "• ในกลุ่ม: ทุกคนส่งรูปเข้าทริปเดียวกันได้เลย ไม่ต้องแท็กบอท",
     "",
     "📅 ปฏิทิน (เตือนผ่าน Google Calendar)",
-    "• นัด <เรื่อง> <วันที่> <เวลา> เช่น \"นัด ประชุมทีม 12/1/2569 13:00\" ต้องมีทั้งวันที่และเวลา พิมพ์วันที่แบบภาษาพูดก็ได้ เช่น \"นัดพรุ่งนี้บ่ายสองประชุมทีม\" AI จะแปลงวันที่ให้เอง",
+    "• นัด <เรื่อง> <วันที่> <เวลา> เช่น \"นัด ประชุมทีม 12/1/2569 13:00\" ต้องมีทั้งวันที่และเวลา พิมพ์แบบภาษาพูดก็ได้ เช่น \"นัดพรุ่งนี้บ่ายสองประชุมทีม\" AI แปลงให้เอง",
     "• มีนัดอะไรวันนี้ (หรือพรุ่งนี้/สัปดาห์นี้) / ลบนัด <คำค้น> / แก้นัด <คำค้น> เป็น <วันเวลาใหม่> — สร้าง/ลบ/แก้ ถามยืนยันก่อนเสมอ",
     "",
     "📔 ไดอารี่",
@@ -134,7 +134,7 @@ export function buildHelpText(): string {
     // on purpose: read (inbox summaries only, no full body) + send only, no
     // reply/archive/delete/mark-as-read — see gmail.ts's own comment.
     "• เช็คอีเมล — ดูอีเมลใหม่ที่ยังไม่ได้อ่านสูงสุด 5 ฉบับ (ผู้ส่ง/หัวข้อ/ตัวอย่างเนื้อหา)",
-    "• ส่งอีเมล ถึง <ผู้รับ> เรื่อง <หัวข้อ> ข้อความ <เนื้อหา> — ผู้รับพิมพ์เป็นชื่อผู้ติดต่อแทนอีเมลเต็มๆ ก็ได้ (ต้องมีอยู่ในสมุดผู้ติดต่อ Google อยู่แล้ว) เจอชื่อซ้ำจะถามให้เจาะจงก่อน",
+    "• ส่งอีเมล ถึง <ผู้รับ> เรื่อง <หัวข้อ> ข้อความ <เนื้อหา> — ผู้รับพิมพ์เป็นชื่อผู้ติดต่อแทนอีเมลก็ได้ (ต้องมีในสมุดผู้ติดต่อ Google) เจอชื่อซ้ำจะถามให้เจาะจงก่อน",
     "• อีเมลของ<ชื่อผู้ติดต่อ> — ค้นหาอีเมลผู้ติดต่อเฉยๆ ไม่ต้องส่งก็ได้",
     "• ก่อนส่งจะถามยืนยันเสมอ พร้อมโชว์ที่อยู่อีเมลจริงที่จะส่งไป (แม้พิมพ์เป็นชื่อมา) เพราะส่งแล้วเรียกคืนไม่ได้",
     "",
@@ -155,6 +155,10 @@ export function buildHelpText(): string {
     "",
     "🤖 ถามคำถาม/วิเคราะห์ (AI)",
     "• ถาม <คำถาม> เช่น \"ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด\" — ถามอะไรก็ได้เกี่ยวกับเงิน/นัดหมาย/ไดอารี่/เวรที่บันทึกไว้ / ถาม สภาพอากาศวันนี้เป็นไง (ต้องตั้งจังหวัดก่อน)",
+    // PLAN.md 17.38. Listed right after the personal-data line above because
+    // that's the actual distinction: the bot decides per question which of
+    // the two it is, and the user never has to say which one they want.
+    "• ถามเรื่องนอกข้อมูลของคุณก็ได้ เช่น \"ถาม รถไฟฟ้าสายสีส้มเปิดยัง\" — บอทไปค้น Google มาตอบให้เอง คำตอบสั้นๆ ตอบในแชทเลย ถ้ายาวจะส่งลิงก์หน้าเว็บที่มีคำตอบเต็มพร้อมแหล่งอ้างอิงให้แทน",
     "• ถาม ข่าวหุ้น (หรือบิตคอยน์/ทอง/การเงินสหรัฐ) — สรุปข่าวการเงินพร้อมราคาจริง / ถาม ข่าววันนี้ — สรุปข่าวในประเทศไทย",
     "• วิเคราะห์ (พิมพ์เฉยๆ ก็ได้) — สรุปพฤติกรรมการใช้จ่าย+ไดอารี่เดือนนี้แบบเจาะลึกให้",
     "",
@@ -171,7 +175,7 @@ export function buildHelpText(): string {
     // help text is shared between personal and group mode (PLAN.md 17.7),
     // and a group's reply posts straight into the shared chat, so the link
     // is visible to whoever's in the group, not just whoever asked for it.
-    "• เปิดเว็บดูข้อมูล — ขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวร/สิ่งที่ต้องทำผ่านเว็บ ในหน้าเดียว (ลิงก์ใช้ได้ 1 ชั่วโมง หมดอายุแล้วพิมพ์คำสั่งนี้ใหม่ได้เลย) — กลุ่มขอลิงก์ของสมุดกลุ่มเองได้เหมือนกัน",
+    "• เปิดเว็บดูข้อมูล — ขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวร/สิ่งที่ต้องทำ ในหน้าเดียว (ใช้ได้ 1 ชั่วโมง หมดอายุแล้วพิมพ์ใหม่ได้เลย) — กลุ่มขอลิงก์ของสมุดกลุ่มเองได้เหมือนกัน",
     "• แท็บ \"ไดอารี่\" แก้ไข/ลบบันทึกเก่าได้ตรงนั้นเลย เป็นหน้าเดียว (นอกจาก \"ตารางเวร\") ที่แก้ไขข้อมูลได้จริง ไม่ใช่แค่ดูอย่างเดียว",
   ];
   return ["ฉันช่วยได้ 13 เรื่อง — พิมพ์คำสั่งด้านล่าง หรือแตะเมนูใต้ช่องพิมพ์ก็ได้:", "", ...sections].join("\n");
@@ -342,9 +346,28 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
 ];
 
-export async function matchCommand(text: string): Promise<Handler | null> {
+/**
+ * The chat reply for "วิธีใช้" — a link, not the guide itself (PLAN.md
+ * 17.39). buildHelpText above is still the single source of the content; it
+ * is just rendered by /view/help now instead of being pushed through a chat
+ * message that LINE silently truncates at 5,000 characters. That ceiling had
+ * started dictating what the guide was allowed to say, which is the wrong
+ * way round.
+ *
+ * No token in the URL, unlike every other /view link this bot hands out:
+ * the guide is identical for everyone and holds no account data, so the link
+ * needs no authorising and never expires (viewHelpPage.ts).
+ */
+export function buildHelpReply(origin: string): string {
+  return [
+    "📖 วิธีใช้ทั้งหมดอยู่ในหน้านี้เลย กดอ่านได้ (เปิดได้ตลอด ไม่มีวันหมดอายุ เก็บลิงก์ไว้ได้):",
+    `${origin}/view/help`,
+  ].join("\n");
+}
+
+export async function matchCommand(text: string, origin: string): Promise<Handler | null> {
   if (HELP_TEST(text)) {
-    return async () => buildHelpText();
+    return async () => buildHelpReply(origin);
   }
 
   const searchTerm = searchMatch(text);

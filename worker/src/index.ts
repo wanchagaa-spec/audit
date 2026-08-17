@@ -14,7 +14,7 @@ import {
   promptCalendarDeleteByKeyword,
   promptCalendarEditByKeyword,
 } from "./calendarCommands.ts";
-import { buildHelpText, matchCommand } from "./commands.ts";
+import { buildHelpReply, matchCommand } from "./commands.ts";
 import { appendConversationTurn, getConversationHistory } from "./conversationHistory.ts";
 import { resolveConfirmation } from "./confirmations.ts";
 import {
@@ -92,6 +92,8 @@ import { renderErrorPage } from "./viewAuth.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
+import { handleViewHelpRequest } from "./viewHelpPage.ts";
+import { handleViewSearchRequest } from "./viewSearchPage.ts";
 import { handleViewShiftsRequest } from "./viewShiftsPage.ts";
 import { handleViewAccountsRequest } from "./viewPages.ts";
 import { handleViewTasksRequest } from "./viewTasksPage.ts";
@@ -138,7 +140,7 @@ const WELCOME_MESSAGE = [
   "📧 เช็ค/ส่งอีเมล พร้อมค้นหาอีเมลผู้ติดต่อให้",
   "📍 หาร้าน/สถานที่ใกล้ตัวจากตำแหน่งจริง",
   "🎫 หาตั๋วเครื่องบิน/รถทัวร์/รถไฟ และที่พัก เทียบราคาพร้อมลิงก์กดจองเอง",
-  "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI",
+  "🤖 ถามคำถาม/วิเคราะห์การใช้จ่ายด้วย AI และค้นหา Google ให้ได้ด้วย",
   "☀️ สรุปวันที่/อากาศ/ข่าวให้ทุกเช้าอัตโนมัติ",
   "🌐 ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวร/สิ่งที่ต้องทำผ่านเว็บ",
   "",
@@ -367,13 +369,15 @@ const CONTACTS_API_DISABLED_MESSAGE =
 // out once so resolvePendingConfirmation, dispatchLegacyCommands, and
 // runInterpretedIntent (the AI interpreter's own routing table) all build it
 // identically.
-function makeActionCtxFactory(env: Env, subjectId: string, link: AccountLink) {
+function makeActionCtxFactory(env: Env, subjectId: string, link: AccountLink, origin: string) {
   return (accessToken: string): ActionCtx => ({
     accessToken,
     kv: env.ACCOUNTS,
     lineUserId: subjectId,
     spreadsheetId: link.spreadsheetId,
     geminiApiKey: env.GEMINI_API_KEY,
+    origin,
+    stateSigningSecret: env.STATE_SIGNING_SECRET,
   });
 }
 
@@ -393,7 +397,7 @@ async function resolvePendingConfirmation(
   origin: string,
   tokenCache: TokenCache | undefined
 ): Promise<string | null> {
-  const actionCtx = makeActionCtxFactory(env, subjectId, link);
+  const actionCtx = makeActionCtxFactory(env, subjectId, link, origin);
   try {
     const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, subjectId);
     if (!pendingConfirmation) return null;
@@ -440,7 +444,7 @@ async function runInterpretedIntent(
   tokenCache: TokenCache | undefined,
   getAttribution: () => Promise<TransactionAttribution>
 ): Promise<string> {
-  const actionCtx = makeActionCtxFactory(env, subjectId, link);
+  const actionCtx = makeActionCtxFactory(env, subjectId, link, origin);
   const withToken = <T>(fn: (ctx: ActionCtx) => Promise<T>): Promise<T> =>
     withFreshAccessToken(env, link.refreshToken, (accessToken) => fn(actionCtx(accessToken)), tokenCache);
 
@@ -537,7 +541,7 @@ async function runInterpretedIntent(
       case "question":
         return await withToken((ctx) => answerQuestion(ctx, intent.question));
       case "help":
-        return buildHelpText();
+        return buildHelpReply(origin);
       case "view_link":
         return await buildViewLinkReply(env, subjectId, origin);
       case "chitchat":
@@ -591,7 +595,7 @@ async function dispatchLegacyCommands(
   origin: string,
   tokenCache: TokenCache | undefined
 ): Promise<string | null> {
-  const actionCtx = makeActionCtxFactory(env, subjectId, link);
+  const actionCtx = makeActionCtxFactory(env, subjectId, link, origin);
 
   try {
     // Checked before every other matcher below, not just matchCommand's
@@ -769,7 +773,7 @@ async function dispatchLegacyCommands(
     throw err;
   }
 
-  const reportHandler = await matchCommand(text);
+  const reportHandler = await matchCommand(text, origin);
   if (reportHandler) {
     return withFreshAccessToken(
       env,
@@ -1689,6 +1693,10 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (url.pathname === "/view") return handleViewAccountsRequest(request, env);
   if (url.pathname === "/view/calendar") return handleViewCalendarRequest(request, env);
   if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
+  // No token, no env — the guide is the same for everyone and holds no
+  // account data (see viewHelpPage.ts).
+  if (url.pathname === "/view/help") return handleViewHelpRequest();
+  if (url.pathname === "/view/search") return handleViewSearchRequest(request, env);
   if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);
   if (url.pathname === "/view/tasks") return handleViewTasksRequest(request, env);
   if (url.pathname === "/view/trips" || url.pathname.startsWith("/view/trips/")) {

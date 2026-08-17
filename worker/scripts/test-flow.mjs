@@ -17,6 +17,10 @@ class FakeKV {
       simulateQueuePutFailureOnce = false;
       throw new Error("simulated KV put failure");
     }
+    if (simulateSearchResultPutFailureOnce && key.startsWith("search-result:")) {
+      simulateSearchResultPutFailureOnce = false;
+      throw new Error("simulated KV put failure");
+    }
     this.store.set(key, value);
     if (options.metadata) this.metadataStore.set(key, options.metadata);
     else this.metadataStore.delete(key);
@@ -122,6 +126,9 @@ let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling 
 let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
 let simulatePersonaDropLink = false; // one-shot: same idea for a URL — the travel/places replies carry no quoted spans at all, so links need their own coverage
 let simulateGeminiTruncation = false; // one-shot: makes the next non-interpreter Gemini call return a *successful* 200 whose text was cut off at the token ceiling (finishReason MAX_TOKENS), the failure that used to be indistinguishable from a complete answer
+let simulateGroundedAnswer = false; // one-shot: next AI Q&A call comes back grounded (the model searched the web, PLAN.md 17.38) with a LONG answer — long enough that it belongs on /view/search rather than in the chat
+let simulateShortGroundedAnswer = false; // one-shot: same, but with a short answer — the common case, which goes straight into the chat with no page and nothing stored
+let simulateSearchResultPutFailureOnce = false; // one-shot: fails the KV write that stores a grounded answer, leaving a real answer with nowhere permitted to display it
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
@@ -678,6 +685,7 @@ globalThis.fetch = async (url, init = {}) => {
         question,
         apiKey: init.headers?.["x-goog-api-key"],
         maxOutputTokens: body.generationConfig?.maxOutputTokens,
+        hasGoogleSearchTool: Boolean(body.tools?.some((t) => "google_search" in t)),
       });
       if (simulateInterpreterTruncation) {
         simulateInterpreterTruncation = false;
@@ -715,6 +723,7 @@ globalThis.fetch = async (url, init = {}) => {
       question,
       apiKey: init.headers?.["x-goog-api-key"],
       maxOutputTokens: body.generationConfig?.maxOutputTokens,
+      hasGoogleSearchTool: Boolean(body.tools?.some((t) => "google_search" in t)),
     });
 
     // A 200 carrying real-looking but incomplete text — exactly what the
@@ -766,6 +775,44 @@ globalThis.fetch = async (url, init = {}) => {
         );
       }
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: question }] } }] }), { status: 200 });
+    }
+
+    // A grounded answer (PLAN.md 17.38) — the model chose to run a search,
+    // so the response carries groundingMetadata: the sources it used and
+    // Google's Search Suggestions widget, which is HTML that has to be
+    // rendered rather than escaped. Deliberately long and multi-paragraph so
+    // tests can tell the chat preview apart from the full page text.
+    if (simulateGroundedAnswer || simulateShortGroundedAnswer) {
+      const short = simulateShortGroundedAnswer;
+      simulateGroundedAnswer = false;
+      simulateShortGroundedAnswer = false;
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: short
+                      ? "นายกรัฐมนตรีคนปัจจุบันคืออนุทินค่ะ"
+                      : `นายกรัฐมนตรีคนปัจจุบันตอบจากผลค้นหาจริงนะคะ\n\nรายละเอียดเพิ่มเติมย่อหน้าที่สอง ${"ก".repeat(900)}`,
+                  },
+                ],
+              },
+              finishReason: "STOP",
+              groundingMetadata: {
+                searchEntryPoint: { renderedContent: '<style>.gsc{color:red}</style><div class="gsc">ค้นหาต่อ</div>' },
+                groundingChunks: [
+                  { web: { uri: "https://example.com/a", title: "แหล่งข่าว ก" } },
+                  { web: { uri: "https://example.com/b", title: "แหล่งข่าว <ข>" } },
+                ],
+                webSearchQueries: ["นายกรัฐมนตรีไทยคนปัจจุบัน"],
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
     }
 
     // A canned (not truly AI-generated) answer that echoes the question back,
@@ -897,6 +944,7 @@ const { bangkokDateKey, bangkokMonthKey, addDaysToDateKey, formatThaiDateLabel, 
 const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting, broadcastMorningBriefings } = await import("../src/greetingCommands.ts");
+const { buildHelpText } = await import("../src/commands.ts");
 const { getConversationHistory } = await import("../src/conversationHistory.ts");
 
 async function signLineBody(rawBody, secret) {
@@ -1159,21 +1207,37 @@ check(
   multilineReply.includes("3 รายการ") && multilineReply.includes("170")
 );
 
+// "วิธีใช้" answers with a link now, not the guide itself (PLAN.md 17.39).
+// LINE silently truncates a text message past 5,000 characters, and the
+// guide is the one reply that grows with every feature — it hit the cap for
+// real twice (17.35 trimmed a 5,998-character draft; 17.38 tripped the guard
+// that replaced it). A page has no such ceiling, so the transport stops
+// dictating what the guide is allowed to say.
 const helpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
 check(
-  "help lists commands grouped by feature area",
-  helpReply.includes("💰 จดเงิน") &&
-    helpReply.includes("📸 อัลบั้มรูปทริป") &&
-    helpReply.includes("📅 ปฏิทิน") &&
-    helpReply.includes("📔 ไดอารี่") &&
-    helpReply.includes("🤖 ถามคำถาม/วิเคราะห์")
+  "\"วิธีใช้\" replies with a link to the guide rather than the guide itself",
+  helpReply.includes(`${origin}/view/help`) && !helpReply.includes("💰 จดเงิน") && helpReply.length < 300
 );
-// LINE truncates any text message over 5000 chars *silently* (line.ts
-// slices, the API would reject) — the help text is the one reply that
-// keeps growing with every feature, and it already brushed this cap once
-// (PLAN.md 17.35: a draft hit 5,998 and had to be trimmed). This check
-// fails the build before a silent mid-sentence cutoff ever ships.
-check("the full help text stays under LINE's 5000-character message cap", helpReply.length <= 5000);
+
+const helpPageResponse = await worker.fetch(new Request(`${origin}/view/help`), env, new FakeExecutionContext());
+const helpPageHtml = await helpPageResponse.text();
+check(
+  "the guide page lists commands grouped by feature area",
+  helpPageResponse.status === 200 &&
+    helpPageHtml.includes("💰 จดเงิน") &&
+    helpPageHtml.includes("📸 อัลบั้มรูปทริป") &&
+    helpPageHtml.includes("📅 ปฏิทิน") &&
+    helpPageHtml.includes("📔 ไดอารี่") &&
+    helpPageHtml.includes("🤖 ถามคำถาม/วิเคราะห์")
+);
+check(
+  "every bullet in the guide survives onto the page",
+  helpPageHtml.match(/<li>/g)?.length === buildHelpText().split("\n").filter((l) => l.startsWith("• ")).length
+);
+// No token in the URL, unlike every other /view page: the guide is the same
+// for everyone and holds no account data, so it opens for anyone — including
+// someone who hasn't linked an account yet.
+check("the guide page needs no token at all", !helpPageHtml.includes("ลิงก์หมดอายุ"));
 
 const weekReply = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
 check("week summary doesn't error", weekReply.includes("รายรับ"));
@@ -1946,14 +2010,23 @@ check(
 const lastRequestWhere = (predicate) => [...geminiRequests].reverse().find(predicate);
 const lastInterpreterRequest = lastRequestWhere((r) => r.systemInstruction.includes(INTERPRETER_MARKER));
 const lastPersonaRequest = lastRequestWhere((r) => r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข"));
-const lastAnswerRequest = lastRequestWhere(
-  (r) => !r.systemInstruction.includes(INTERPRETER_MARKER) && !r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข")
-);
+// The AI Q&A call carries the Google Search tool (PLAN.md 17.38) and so
+// gets its own, larger ceiling than the plain prose callers (news, the diary
+// reflection) that share ANSWER_MAX_OUTPUT_TOKENS.
+const lastQuestionRequest = lastRequestWhere((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน"));
+const lastNewsRequest = lastRequestWhere((r) => r.systemInstruction.includes("ช่วยสรุปข่าว"));
 check(
   "each Gemini caller sends its own output ceiling rather than one shared value",
   lastInterpreterRequest?.maxOutputTokens === 800 &&
     lastPersonaRequest?.maxOutputTokens === 2000 &&
-    lastAnswerRequest?.maxOutputTokens === 1200
+    lastQuestionRequest?.maxOutputTokens === 2000 &&
+    lastNewsRequest?.maxOutputTokens === 1200
+);
+check(
+  "only the AI Q&A call offers the Google Search tool — the interpreter and persona never do",
+  lastQuestionRequest?.hasGoogleSearchTool === true &&
+    lastInterpreterRequest?.hasGoogleSearchTool === false &&
+    lastPersonaRequest?.hasGoogleSearchTool === false
 );
 // Clean up the dangling pendingConfirmation this created directly (rather
 // than through a chat message, which would have side effects of its own),
@@ -3235,7 +3308,7 @@ check(
 
 simulateInterpreterResult = { intent: "help" };
 const interpHelpReply = await handleTextMessage(env, lineUserId, "ทำอะไรได้บ้างอะ", origin);
-check("a help intent returns the same detailed help text buildHelpText() produces", interpHelpReply.includes("เปิดเว็บดูข้อมูล"));
+check("a help intent returns the same guide link the deterministic path does", interpHelpReply.includes(`${origin}/view/help`));
 
 // Regression test for a real report: "พรุ่งนี้เค้ามีเวรมั้ย"/"พรุ่งนี้ได้ขึ้นเวรมั้ย"
 // got misclassified as calendar_query and answered from Google Calendar
@@ -3634,6 +3707,110 @@ const viewUnlinkedResponse = await worker.fetch(new Request(`${origin}/view?toke
 check(
   "a view token for an account that never linked shows a friendly prompt to link first",
   viewUnlinkedResponse.status === 400 && (await viewUnlinkedResponse.text()).includes("ยังไม่ได้เชื่อมบัญชี")
+);
+
+// ---- Web search (PLAN.md 17.38) -------------------------------------------
+// A question the model answers by searching can't be delivered as one chat
+// message: Google requires the Search Suggestions that come back with a
+// grounded answer be displayed alongside it, and they're HTML. So the chat
+// gets a short preview plus a link, and /view/search carries the rest.
+
+simulateGroundedAnswer = true;
+const groundedReply = await handleTextMessage(env, lineUserId, "ถาม นายกรัฐมนตรีไทยคนปัจจุบันคือใคร", origin);
+const searchPageMatch = groundedReply.match(/https?:\/\/\S+\/view\/search\?token=\S+/);
+check("a long grounded answer replies with a link to /view/search", searchPageMatch !== null);
+check(
+  "the chat gets a lead paragraph, not the whole long answer",
+  groundedReply.includes("ตอบจากผลค้นหาจริง") &&
+    !groundedReply.includes("รายละเอียดเพิ่มเติมย่อหน้าที่สอง") &&
+    groundedReply.length < 700
+);
+
+// The common case, and the reason length decides rather than the mere fact
+// of a search: most questions want a fact, and making someone tap a link to
+// read one line would be a worse product than simply answering.
+simulateShortGroundedAnswer = true;
+const shortGroundedReply = await handleTextMessage(env, lineUserId, "ถาม นายกรัฐมนตรีคนปัจจุบันคือใคร", origin);
+check(
+  "a short grounded answer is just the answer, in the chat, with no link at all",
+  shortGroundedReply.includes("อนุทิน") && !shortGroundedReply.includes("/view/search")
+);
+check(
+  "nothing was stored for it either — there is no page for anyone to open",
+  [...kv.store.keys()].filter((k) => k.startsWith("search-result:")).length === 1
+);
+
+const searchPageResponse = await worker.fetch(new Request(searchPageMatch[0]), env, new FakeExecutionContext());
+const searchPageHtml = await searchPageResponse.text();
+check("the /view/search page opens", searchPageResponse.status === 200);
+check(
+  "it shows the question and the full answer, both paragraphs",
+  searchPageHtml.includes("นายกรัฐมนตรีไทยคนปัจจุบันคือใคร") &&
+    searchPageHtml.includes("ตอบจากผลค้นหาจริง") &&
+    searchPageHtml.includes("รายละเอียดเพิ่มเติมย่อหน้าที่สอง")
+);
+check(
+  "it lists every source the answer drew on, as real links",
+  searchPageHtml.includes('href="https://example.com/a"') && searchPageHtml.includes('href="https://example.com/b"')
+);
+// The compliance requirement this whole two-surface design exists for:
+// Google's Search Suggestions widget arrives as HTML+CSS and has to be
+// rendered as markup, not printed as text.
+check(
+  "Google's Search Suggestions widget is rendered as live markup, not escaped into text",
+  searchPageHtml.includes('<div class="gsc">ค้นหาต่อ</div>') && !searchPageHtml.includes("&lt;div class=&quot;gsc&quot;")
+);
+// ...while everything the model produced is still escaped, including a
+// source title containing angle brackets.
+check(
+  "a source title containing markup is still escaped",
+  searchPageHtml.includes("แหล่งข่าว &lt;ข&gt;") && !searchPageHtml.includes("แหล่งข่าว <ข>")
+);
+
+// A stored result belongs to the account that produced it: the id is only
+// meaningful when paired with that account's own token.
+const otherSubjectToken = await signViewToken("Usomeoneelse", env.STATE_SIGNING_SECRET);
+const storedId = new URL(searchPageMatch[0]).searchParams.get("id");
+const foreignSearchResponse = await worker.fetch(
+  new Request(`${origin}/view/search?token=${otherSubjectToken}&id=${storedId}`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "another account's token cannot read this search result, even with the exact id",
+  foreignSearchResponse.status === 404
+);
+
+const missingSearchResponse = await worker.fetch(
+  new Request(`${origin}/view/search?token=${viewToken}&id=does-not-exist`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "an expired or unknown result id shows a friendly page explaining it, not a crash",
+  missingSearchResponse.status === 404 && (await missingSearchResponse.text()).includes("หมดอายุ")
+);
+
+// When a long answer can't be stored there is no page to link to, so it
+// goes to the chat in full — the same place a short answer would have gone
+// anyway. Losing an answer over a KV hiccup would be the worse outcome.
+simulateGroundedAnswer = true;
+simulateSearchResultPutFailureOnce = true;
+const unstorableReply = await handleTextMessage(env, lineUserId, "ถาม นายกรัฐมนตรีไทยคนปัจจุบันคือใคร", origin);
+check(
+  "if a long answer can't be stored, it is sent inline rather than lost",
+  unstorableReply.includes("ตอบจากผลค้นหาจริง") &&
+    unstorableReply.includes("รายละเอียดเพิ่มเติมย่อหน้าที่สอง") &&
+    !unstorableReply.includes("/view/search")
+);
+
+// The ordinary case must be untouched: a question the model answers from the
+// account's own rows never searched, so there is nothing Google requires be
+// displayed and no reason to make the user tap through to a page.
+const ungroundedReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+check(
+  "a question answered from the user's own data still replies in full in the chat, with no link",
+  ungroundedReply.includes("[mock AI answer]") && !ungroundedReply.includes("/view/search")
 );
 
 // Regression test for the exact hijack scenario signedState.ts's top
@@ -4250,10 +4427,14 @@ check(
 // now that it actually works in both (PLAN.md 17.7 second pass) — a fix
 // to a real bug an earlier version of this help text had (see the group
 // view-link regression test block further below for the full story).
+// The guide itself moved to /view/help (PLAN.md 17.39), so what both modes
+// must now produce is that link — and the guide behind it still advertises
+// the web viewer, which is the thing this pair was written to protect.
 const personalHelpReply = await handleTextMessage(env, lineUserId, "วิธีใช้", origin);
-check("personal mode's help text advertises the web viewer", personalHelpReply.includes("เปิดเว็บดูข้อมูล"));
+check("personal mode's help command hands over the guide link", personalHelpReply.includes(`${origin}/view/help`));
 const groupHelpReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิธีใช้", origin);
-check("group mode's help text advertises the web viewer too, since it now actually works there", groupHelpReply.includes("เปิดเว็บดูข้อมูล"));
+check("group mode's help command hands over the same guide link", groupHelpReply.includes(`${origin}/view/help`));
+check("the guide it links to still advertises the web viewer, which works in both modes", buildHelpText().includes("เปิดเว็บดูข้อมูล"));
 
 // "เปิดเว็บดูข้อมูล" (PLAN.md 17.7 second pass) works in group mode now,
 // after a user asked for it once they noticed calendar/diary/trip/province

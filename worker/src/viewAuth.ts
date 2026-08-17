@@ -182,6 +182,20 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
     flex: 1; text-align: center; padding: .6rem 1rem; border-radius: 10px; background: #fff; color: #40444b;
     text-decoration: none; font-size: .88rem; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
   }
+  .search-answer p { margin: 0 0 .7rem; font-size: .92rem; line-height: 1.6; }
+  .search-answer p:last-child { margin-bottom: 0; }
+  .source-list { margin: 0; padding-left: 1.1rem; }
+  .source-list li { margin-bottom: .45rem; font-size: .85rem; line-height: 1.45; }
+  .source-list li:last-child { margin-bottom: 0; }
+  .source-list a { color: #16a34a; word-break: break-word; }
+  /* Google's Search Suggestions widget brings its own styling (see
+     viewSearchPage.ts); this only gives it room and keeps it from forcing
+     the page to scroll sideways on a phone. */
+  .search-suggestions { overflow-x: auto; }
+  .help-lead { font-size: .88rem; color: #40444b; margin: 0 0 1rem; line-height: 1.5; }
+  .help-list { margin: 0; padding-left: 1.1rem; }
+  .help-list li { margin-bottom: .5rem; font-size: .85rem; line-height: 1.55; }
+  .help-list li:last-child { margin-bottom: 0; }
 </style>
 </head>
 <body>

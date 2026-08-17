@@ -367,7 +367,15 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
     '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',
     '{"intent":"set_province","provinceName":string} — ตั้งจังหวัด/เมืองสำหรับพยากรณ์อากาศ',
-    '{"intent":"question","question":string} — คำถามเกี่ยวกับเงิน/นัดหมาย/ไดอารี่/เวร/สภาพอากาศ/ข่าวของผู้ใช้ (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
+    // Widened for web search (PLAN.md 17.38). This intent used to cover only
+    // questions about the user's own data, which left general-knowledge and
+    // current-events questions with nowhere sensible to land — they fell to
+    // chitchat, and got answered from the model's own memory as if that were
+    // a source. They belong here now: answerQuestion (aiCommands.ts) holds
+    // the Google Search tool and decides per question whether the user's own
+    // data already answers it or the web has to be consulted, so this
+    // interpreter's only job is recognising "this is a question" at all.
+    '{"intent":"question","question":string} — คำถามอะไรก็ได้ที่ต้องการคำตอบจริงจัง ทั้งคำถามเกี่ยวกับข้อมูลส่วนตัวของผู้ใช้ (เงิน/นัดหมาย/ไดอารี่/เวร/สภาพอากาศ/ข่าว) และคำถามความรู้ทั่วไป ข่าวสาร ราคา หรือเรื่องที่ต้องหาข้อมูลจากอินเทอร์เน็ต (เช่น "ประธานาธิบดีสหรัฐคนปัจจุบันคือใคร", "วิธีทำต้มยำกุ้ง", "รถไฟฟ้าสายสีส้มเปิดยัง") — ระบบมีเครื่องมือค้นหา Google ให้อยู่แล้ว ห้ามตอบเองว่าไม่รู้หรือทำไม่ได้ (เขียน question ให้เป็นประโยคคำถามที่สมบูรณ์ในตัวเอง ไม่ต้องพึ่งประวัติการคุยอีก)',
     '{"intent":"help"} — ขอดูวิธีใช้/คำสั่งทั้งหมด',
     '{"intent":"view_link"} — ขอลิงก์เปิดดูข้อมูล/บัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บเบราว์เซอร์ (เช่น "เปิดเว็บ", "ขอลิงก์เว็บ", "ดูเว็บไซต์หน่อย", "เปิดดูเว็บข้อมูล") — มีฟีเจอร์นี้จริง อย่าตอบว่าทำไม่ได้',
     '{"intent":"chitchat","reply":string} — พูดคุยทั่วไปที่ไม่ใช่คำสั่งอะไร (ทักทาย ชม คุยเล่น) ให้ตอบกลับตามธรรมชาติสั้นๆใน reply',
