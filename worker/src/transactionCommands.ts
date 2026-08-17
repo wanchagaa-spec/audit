@@ -6,7 +6,7 @@
 // instead and just showed a list, doing nothing. Checked ahead of that
 // report handler in index.ts so this always wins for these exact phrases.
 
-import type { TransactionDraft } from "../../app/src/lib/chatEngine.ts";
+import type { TransactionDraft } from "./chatEngine.ts";
 import { buildBudgetStatusLines } from "./budgetCommands.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { appendTransaction, deleteMostRecentTransaction, readAllTransactions } from "./sheets.ts";
@@ -27,6 +27,11 @@ export async function matchTransactionCommand(text: string): Promise<Handler | n
 
   if (DELETE_LAST_PHRASES.includes(trimmed)) {
     return async (ctx) => {
+      // Whole tab on purpose (PLAN.md 17.47): the most recent row overall,
+      // which on the 1st of a month is still last month's. It also has to
+      // agree with deleteMostRecentTransaction, which reads the whole tab
+      // too — a prompt naming a different row than the one deleted would be
+      // the worst possible bug here.
       const all = await readAllTransactions(ctx.accessToken, ctx.spreadsheetId);
       if (all.length === 0) return "ยังไม่มีรายการเลยนะ ไม่มีอะไรให้ลบ";
       const mostRecent = [...all].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
@@ -80,34 +85,47 @@ export async function applyTransactionCreate(
   // diaryCommands.ts already did this correctly; the money path, of all
   // things, was the one still on UTC.
   const dateKey = bangkokDateKey(new Date(now));
-  await Promise.all(
-    pending.drafts.map((draft) =>
-      appendTransaction(ctx.accessToken, ctx.spreadsheetId, {
-        id: crypto.randomUUID(),
-        date: dateKey,
-        type: draft.type,
-        amount: draft.amount,
-        categoryId: draft.categoryId,
-        note: draft.note,
-        rawText: pending.rawText,
-        addedBy: pending.attribution.addedBy,
-        addedByName: pending.attribution.addedByName,
-        createdAt: now,
-      })
-    )
-  );
+  // Ids are minted up front rather than inline in the append, because the
+  // budget lookup below needs to know which rows this save is writing.
+  const rows = pending.drafts.map((draft) => ({
+    id: crypto.randomUUID(),
+    date: dateKey,
+    type: draft.type,
+    amount: draft.amount,
+    categoryId: draft.categoryId,
+    note: draft.note,
+    rawText: pending.rawText,
+    addedBy: pending.attribution.addedBy,
+    addedByName: pending.attribution.addedByName,
+    createdAt: now,
+  }));
+  const saved = Promise.all(rows.map((row) => appendTransaction(ctx.accessToken, ctx.spreadsheetId, row)));
 
   // Where this leaves the budget, if there is one for the category just
-  // spent in (PLAN.md 17.44). Best-effort on purpose: the money is already
-  // saved by this point, and a Sheets hiccup while looking up a limit must
-  // never turn a successful save into an error the user has to interpret.
-  const budgetLines = await buildBudgetStatusLines(
+  // spent in (PLAN.md 17.44). Started here, in parallel with the appends
+  // above, instead of awaiting them first: it's a Sheets round trip of its
+  // own, and running it after the save made logging an expense visibly
+  // slower for the people who use budgets — the exact feature it exists to
+  // serve. buildBudgetStatusLines takes the rows being written so it can
+  // reconcile whichever side of the appends the read lands on (PLAN.md
+  // 17.45).
+  //
+  // Best-effort on purpose: the money is saved either way, and a Sheets
+  // hiccup while looking up a limit must never turn a successful save into
+  // an error the user has to interpret.
+  const budgetLinesPromise = buildBudgetStatusLines(
     ctx,
-    pending.drafts.filter((d) => d.type === "expense").map((d) => d.categoryId)
+    rows.filter((r) => r.type === "expense")
   ).catch((err) => {
     console.error("applyTransactionCreate: budget status lookup failed, saved anyway", err);
     return [] as string[];
   });
+
+  // Awaited first, and separately: a failed append must still throw, so
+  // resolveConfirmation keeps the pending draft alive for a retry rather
+  // than reporting a save that never happened.
+  await saved;
+  const budgetLines = await budgetLinesPromise;
   const withBudget = (text: string) => (budgetLines.length > 0 ? [text, ...budgetLines].join("\n") : text);
 
   if (pending.drafts.length === 1) {

@@ -1,12 +1,12 @@
 // Accounts summary page (PLAN.md 16.2) — the first /view page built, and
-// still the simplest: readAllTransactions already existed, nothing new to
+// still the simplest: the sheet reader already existed, nothing new to
 // fetch. See viewAuth.ts for the shared token/session/page-shell plumbing
 // every /view/* page uses, and viewCalendarPage.ts/viewDiaryPage.ts/
 // viewTripsPage.ts for the rest.
 
 import { categoryLabel, formatBaht } from "./commands.ts";
 import type { Env } from "./index.ts";
-import { readAllTransactions, type TransactionRow } from "./sheets.ts";
+import { readTransactionsForMonth, type TransactionRow } from "./sheets.ts";
 import { bangkokMonthKey, formatThaiDateLabel, bangkokDateKey } from "./thaiDate.ts";
 import { DATA_FETCH_FAILED_MESSAGE, html, escapeHtml, pageShell, renderErrorPage, resolveViewSession } from "./viewAuth.ts";
 
@@ -107,9 +107,8 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
   if (session instanceof Response) return session;
 
   try {
-    const allTx = await readAllTransactions(session.accessToken, session.spreadsheetId);
     const month = bangkokMonthKey();
-    const monthTx = allTx.filter((r) => r.date?.startsWith(month));
+    const monthTx = await readTransactionsForMonth(session.accessToken, session.spreadsheetId, env.ACCOUNTS, month);
     const monthLabel = `เดือน ${month} · ข้อมูลล่าสุด ณ ${formatThaiDateLabel(bangkokDateKey())}`;
     return html(renderAccountsSummaryPage(session.token, monthLabel, monthTx));
   } catch (err) {

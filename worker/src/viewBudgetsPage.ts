@@ -13,9 +13,9 @@
 // seeing what's already set next to what's been spent.
 
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import { DEFAULT_CATEGORIES } from "./categories.ts";
 import type { Env } from "./index.ts";
-import { deleteBudget, readAllTransactions, readBudgets, upsertBudget } from "./sheets.ts";
+import { deleteBudget, readMonthTransactionsAndBudgets, upsertBudget } from "./sheets.ts";
 import { bangkokMonthKey } from "./thaiDate.ts";
 import {
   DATA_FETCH_FAILED_MESSAGE,
@@ -102,15 +102,15 @@ function parseSubmittedLimit(raw: unknown): number | null {
 async function loadRows(
   accessToken: string,
   spreadsheetId: string,
+  kv: KVNamespace,
   month: string
 ): Promise<BudgetRowView[]> {
-  const [budgets, transactions] = await Promise.all([
-    readBudgets(accessToken, spreadsheetId),
-    readAllTransactions(accessToken, spreadsheetId),
-  ]);
+  // One request for both tabs (PLAN.md 17.45), and only this month's rows of
+  // the big one (PLAN.md 17.47).
+  const { transactions, budgets } = await readMonthTransactionsAndBudgets(accessToken, spreadsheetId, kv, month);
   const spentByCategory = new Map<string, number>();
   for (const row of transactions) {
-    if (row.type !== "expense" || !row.date?.startsWith(month)) continue;
+    if (row.type !== "expense") continue;
     spentByCategory.set(row.categoryId, (spentByCategory.get(row.categoryId) ?? 0) + row.amount);
   }
   return buildRows(budgets, spentByCategory, month);
@@ -144,7 +144,7 @@ export async function handleViewBudgetsRequest(request: Request, env: Env): Prom
           });
         }
       }
-      const rows = await loadRows(session.accessToken, session.spreadsheetId, month);
+      const rows = await loadRows(session.accessToken, session.spreadsheetId, env.ACCOUNTS, month);
       return html(renderBudgetsPage(session.token, month, rows, true));
     } catch (err) {
       console.error("handleViewBudgetsRequest: saving budgets failed", err);
@@ -153,7 +153,7 @@ export async function handleViewBudgetsRequest(request: Request, env: Env): Prom
   }
 
   try {
-    const rows = await loadRows(session.accessToken, session.spreadsheetId, month);
+    const rows = await loadRows(session.accessToken, session.spreadsheetId, env.ACCOUNTS, month);
     return html(renderBudgetsPage(session.token, month, rows, false));
   } catch (err) {
     console.error("handleViewBudgetsRequest: loading budgets failed", err);

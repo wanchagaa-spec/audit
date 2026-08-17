@@ -1,6 +1,22 @@
-// Explicit .ts extension — shared with the Cloudflare Worker, see the note
-// at the top of lib/chatEngine.ts.
-import type { Category } from "../types.ts";
+// The category list the whole bot classifies money against, and the two
+// types that describe it.
+//
+// Lived in the React PWA (app/src/data/defaultCategories.ts) until the PWA
+// was removed (PLAN.md 17.46) — the Worker had always imported it across the
+// repo, so it moved here rather than being deleted with the rest. Category
+// and EntryType came along from app/src/types.ts, where they sat among a
+// dozen React-only interfaces; these two are the only ones the bot ever used.
+
+export type EntryType = "income" | "expense";
+
+export interface Category {
+  id: string;
+  name: string;
+  icon: string;
+  type: EntryType;
+  keywords: string[];
+  isCustom: boolean;
+}
 
 export const DEFAULT_EXPENSE_CATEGORIES: Category[] = [
   {

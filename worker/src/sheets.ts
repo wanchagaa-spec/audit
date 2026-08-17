@@ -1,5 +1,8 @@
-// Mirrors app/src/lib/sheetsService.ts column layout so a spreadsheet can
-// be written to from both the web app and the LINE bot interchangeably.
+// The column layout below was originally shared with the React PWA's
+// sheetsService.ts, so a book could be written to from either side. The PWA
+// is gone (PLAN.md 17.46) and this is now the only writer — but the layout
+// stays exactly as it was, because books created by the old app are still
+// real spreadsheets holding real money, and the bot has to keep reading them.
 
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const TRANSACTION_HEADERS = [
@@ -19,6 +22,41 @@ async function sheetsFetch(accessToken: string, path: string, init: RequestInit 
     throw new Error(`Google Sheets API error (${res.status}): ${await res.text()}`);
   }
   return res.json();
+}
+
+// ---- Reading several ranges at once (PLAN.md 17.45) -----------------------
+// Every read in this file asks Google for a whole tab, because the Sheets
+// values API has no "where date >= this month" — you get a rectangle or you
+// get nothing. So the lever that actually exists isn't fetching fewer rows,
+// it's fetching them fewer *times*, and several handlers here were doing the
+// opposite: one HTTP request per tab, fired together and all waited on.
+// "งบเหลือเท่าไหร่" made two, /view/budgets two, and the AI Q&A four.
+//
+// values:batchGet returns any number of ranges from the same spreadsheet in
+// a single request, which collapses all of those to one. Rows still grow
+// without bound — that part is inherent to the sheet being the database, and
+// is a separate problem for the day a book gets big enough to feel it — but
+// nothing pays for the same tab twice in one message anymore.
+
+const TRANSACTIONS_RANGE = "Transactions!A2:J";
+const BUDGETS_RANGE = "Budgets!A2:D";
+const DIARY_RANGE = "Diary!A2:E";
+
+/** Fetches several ranges in one HTTP request. Results come back positionally
+ * — `valueRanges[i]` is `ranges[i]` — which is the documented correspondence
+ * and the only usable one: the `range` string Google echoes back is
+ * normalised (tab names get quoted, open-ended bounds get expanded to the
+ * grid size), so it never matches what was asked for. A range with no data
+ * comes back as an entry with no `values`, not as a missing entry. */
+async function sheetsBatchGet(
+  accessToken: string,
+  spreadsheetId: string,
+  ranges: string[]
+): Promise<string[][][]> {
+  const query = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join("&");
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values:batchGet?${query}`);
+  const valueRanges = (data.valueRanges ?? []) as Array<{ values?: string[][] }>;
+  return ranges.map((_, i) => valueRanges[i]?.values ?? []);
 }
 
 export async function createBookSpreadsheet(accessToken: string, bookName: string): Promise<string> {
@@ -85,36 +123,208 @@ export async function appendTransaction(
   });
 }
 
+function toTransactionRow(r: string[]): TransactionRow {
+  return {
+    id: r[0],
+    date: r[1],
+    type: r[2] as "income" | "expense",
+    amount: Number(r[3]),
+    categoryId: r[4],
+    note: r[5] ?? "",
+    rawText: r[6] ?? "",
+    addedBy: r[7] ?? "",
+    addedByName: r[8] ?? "",
+    createdAt: r[9] ?? "",
+  };
+}
+
+/** Drops rows whose id cell is blank — a row someone cleared by hand in
+ * Google Sheets still comes back from the values API, as an empty entry. */
+function parseTransactionRows(raw: string[][]): TransactionRow[] {
+  return raw.filter((r) => r[0]).map(toTransactionRow);
+}
+
 export async function readAllTransactions(
   accessToken: string,
   spreadsheetId: string
 ): Promise<TransactionRow[]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Transactions!A2:J100000`);
-  const rows: string[][] = data.values ?? [];
-  return rows
-    .filter((r) => r[0])
-    .map((r) => ({
-      id: r[0],
-      date: r[1],
-      type: r[2] as "income" | "expense",
-      amount: Number(r[3]),
-      categoryId: r[4],
-      note: r[5] ?? "",
-      rawText: r[6] ?? "",
-      addedBy: r[7] ?? "",
-      addedByName: r[8] ?? "",
-      createdAt: r[9] ?? "",
-    }));
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${TRANSACTIONS_RANGE}`);
+  return parseTransactionRows(data.values ?? []);
 }
 
+// ---- Reading from a month onward, not from the beginning (PLAN.md 17.47) --
+// 17.45 stopped the same tab being fetched twice in one message, but every
+// one of those fetches still pulled the entire history, and that grows
+// forever. Almost everything the bot answers is about the current month.
+//
+// The plan considered first was splitting Transactions into one tab per
+// month with a precomputed summary tab. That was turned down: the summary
+// would be a cache living inside the user's own spreadsheet, and this is a
+// spreadsheet its owner edits by hand — delete a row and the summary keeps
+// reporting the old total, confidently and silently. A wrong money figure is
+// worse than a slow one. It would also need every live book migrated with an
+// API that has no transactions, and it would break the five commands that
+// genuinely span months ("เหลือเงินเท่าไหร่", "ค้นหา", "รายการล่าสุด",
+// "ลบรายการล่าสุด", and "สรุปสัปดาห์นี้" for the ~4 days a week straddles
+// two months).
+//
+// What's here instead: remember which sheet row a month starts on. Rows are
+// appended in chronological order, so a month is a contiguous run, and
+// `Transactions!A<start>:J` is one request whose size is bounded by how much
+// has happened since that month began rather than by the whole history. The
+// tab layout, the columns and every existing book are untouched, and nothing
+// is derived and stored that could disagree with the rows themselves.
+//
+// The remembered row is a hint, never trusted blindly — see checkMonthWindow.
+
+/** Remembered per book and per month. TTL only so keys for long-past months
+ * don't accumulate; expiry costs one full read and is otherwise invisible. */
+const MONTH_START_TTL_SECONDS = 90 * 24 * 60 * 60;
+
+function monthStartKey(spreadsheetId: string, month: string): string {
+  return `tx-month-start:${spreadsheetId}:${month}`;
+}
+
+/** The 1-based sheet row where `month` begins. When the month has no rows
+ * yet this is the row its first one will land on, which is what makes the
+ * hint usable from the very start of a month rather than only after the
+ * first save. Indices come from the raw response, blanks included, for the
+ * same reason deleteSheetRow's do. */
+function findMonthStartRow(rawRows: string[][], month: string): number {
+  const index = rawRows.findIndex((r) => r[0] && String(r[1] ?? "").startsWith(month));
+  return index === -1 ? rawRows.length + 2 : index + 2;
+}
+
+/**
+ * Is the remembered start row still a real month boundary? Answered from the
+ * single row directly above the window, fetched in the same batchGet, so the
+ * check costs nothing extra.
+ *
+ * It must exist and belong to an earlier month. Blank means rows above were
+ * cleared or deleted; a date in `month` or later means the index has drifted
+ * down and rows of this month are now sitting above the window — the one
+ * failure that would silently under-report money. Either way the hint is
+ * discarded and rebuilt from a full read.
+ *
+ * Drift the other way (the row points too far *up*, into an earlier month)
+ * needs no detection: the window simply starts early, and callers filter by
+ * date regardless, so the answer stays correct and only the request is
+ * bigger than it had to be.
+ *
+ * Row 2 has nothing above it but the header, so there is nothing to check
+ * and nothing that can have drifted.
+ */
+function checkMonthWindow(startRow: number, boundaryRaw: string[][], month: string): boolean {
+  if (startRow <= 2) return true;
+  const boundary = boundaryRaw[0];
+  if (!boundary || !boundary[0]) return false;
+  const boundaryMonth = String(boundary[1] ?? "").slice(0, 7);
+  return boundaryMonth !== "" && boundaryMonth < month;
+}
+
+/**
+ * Every transaction from the start of `month` to the end of the sheet, plus
+ * whatever other ranges the caller wants, in one HTTP request.
+ *
+ * Open-ended on purpose: a window that runs to the end of the sheet is what
+ * lets "สรุปสัปดาห์นี้" cross a month boundary and "สรุปเดือนที่แล้ว" work,
+ * both from a single read. Callers filter down to the dates they want.
+ */
+async function readTransactionsFromMonth(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string,
+  extraRanges: string[] = []
+): Promise<{ transactions: TransactionRow[]; extras: string[][][] }> {
+  // Applied to both paths, not just the full read. A window can legitimately
+  // open earlier than the month it was asked for — a hint that drifted *up*
+  // is deliberately not detected, since starting early costs a bigger request
+  // but never a wrong answer — and without this the two paths would return
+  // different row sets for the same call. Every caller filters by date on top
+  // of this anyway, which is exactly why the difference could sit here
+  // unnoticed; the function's own promise is what's being kept.
+  const fromFirstOfMonth = (rows: TransactionRow[]) => rows.filter((r) => r.date >= `${month}-01`);
+
+  const cached = Number(await kv.get(monthStartKey(spreadsheetId, month)));
+  if (Number.isInteger(cached) && cached >= 2) {
+    // The boundary row needs only its id and date, so it asks for A:B.
+    const boundaryRanges = cached > 2 ? [`Transactions!A${cached - 1}:B${cached - 1}`] : [];
+    const raw = await sheetsBatchGet(accessToken, spreadsheetId, [
+      ...boundaryRanges,
+      `Transactions!A${cached}:J`,
+      ...extraRanges,
+    ]);
+    const boundaryRaw = boundaryRanges.length > 0 ? raw[0] : [];
+    if (checkMonthWindow(cached, boundaryRaw, month)) {
+      return {
+        transactions: fromFirstOfMonth(parseTransactionRows(raw[boundaryRanges.length])),
+        extras: raw.slice(boundaryRanges.length + 1),
+      };
+    }
+    // Hint no good — fall through and rebuild it from the whole tab.
+  }
+
+  const raw = await sheetsBatchGet(accessToken, spreadsheetId, [TRANSACTIONS_RANGE, ...extraRanges]);
+  const allRaw = raw[0];
+  await kv.put(monthStartKey(spreadsheetId, month), String(findMonthStartRow(allRaw, month)), {
+    expirationTtl: MONTH_START_TTL_SECONDS,
+  });
+  return { transactions: fromFirstOfMonth(parseTransactionRows(allRaw)), extras: raw.slice(1) };
+}
+
+/** Rows dated on or after the first of `month`. */
+export async function readTransactionsFrom(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string
+): Promise<TransactionRow[]> {
+  const { transactions } = await readTransactionsFromMonth(accessToken, spreadsheetId, kv, month);
+  return transactions;
+}
+
+/** Just the one month. */
 export async function readTransactionsForMonth(
   accessToken: string,
   spreadsheetId: string,
+  kv: KVNamespace,
   month: string
 ): Promise<TransactionRow[]> {
-  const all = await readAllTransactions(accessToken, spreadsheetId);
-  return all.filter((r) => r.date?.startsWith(month));
+  const rows = await readTransactionsFrom(accessToken, spreadsheetId, kv, month);
+  return rows.filter((r) => r.date?.startsWith(month));
 }
+
+/** One month's spending and this month's limits, in one HTTP request — for
+ * "งบเหลือเท่าไหร่", /view/budgets, and the after-a-save budget line. */
+export async function readMonthTransactionsAndBudgets(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string
+): Promise<{ transactions: TransactionRow[]; budgets: BudgetRow[] }> {
+  const { transactions, extras } = await readTransactionsFromMonth(
+    accessToken,
+    spreadsheetId,
+    kv,
+    month,
+    [BUDGETS_RANGE]
+  );
+  return {
+    transactions: transactions.filter((r) => r.date?.startsWith(month)),
+    budgets: parseBudgetRows(extras[0]),
+  };
+}
+
+// Nothing invalidates these hints, and nothing needs to. An append lands
+// below every window, so a row that was a boundary stays one. A delete can
+// shift rows out from under a hint, but only ever in the direction
+// checkMonthWindow detects: removing a row above the window pulls this
+// month's first row up into the boundary slot, which fails the check and
+// triggers a rebuild. Removing one at or below the start row leaves the rows
+// above it — and therefore the boundary — exactly where they were. The same
+// check is what covers edits made by hand in Google Sheets, which no
+// invalidation hook could ever see.
 
 /** Shared by deleteMostRecentTransaction and deleteDiaryEntry — resolves
  * the tab's sheetId and deletes one data row. `dataRowIndex` is 0-based
@@ -165,7 +375,7 @@ export async function deleteMostRecentTransaction(
   accessToken: string,
   spreadsheetId: string
 ): Promise<TransactionRow | null> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Transactions!A2:J100000`);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${TRANSACTIONS_RANGE}`);
   const rawRows: string[][] = data.values ?? [];
 
   // Most recent by createdAt (column index 9); ties keep the earliest row,
@@ -178,19 +388,7 @@ export async function deleteMostRecentTransaction(
   }
   if (rawIndex === -1) return null;
 
-  const r = rawRows[rawIndex];
-  const mostRecent: TransactionRow = {
-    id: r[0],
-    date: r[1],
-    type: r[2] as "income" | "expense",
-    amount: Number(r[3]),
-    categoryId: r[4],
-    note: r[5] ?? "",
-    rawText: r[6] ?? "",
-    addedBy: r[7] ?? "",
-    addedByName: r[8] ?? "",
-    createdAt: r[9] ?? "",
-  };
+  const mostRecent = toTransactionRow(rawRows[rawIndex]);
 
   await deleteSheetRow(accessToken, spreadsheetId, "Transactions", rawIndex);
   return mostRecent;
@@ -203,10 +401,8 @@ export interface BudgetRow {
   limitAmount: number;
 }
 
-export async function readBudgets(accessToken: string, spreadsheetId: string): Promise<BudgetRow[]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A2:D10000`);
-  const rows: string[][] = data.values ?? [];
-  return rows
+function parseBudgetRows(raw: string[][]): BudgetRow[] {
+  return raw
     .filter((r) => r[0])
     .map((r) => ({
       id: r[0],
@@ -216,6 +412,11 @@ export async function readBudgets(accessToken: string, spreadsheetId: string): P
     }));
 }
 
+export async function readBudgets(accessToken: string, spreadsheetId: string): Promise<BudgetRow[]> {
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${BUDGETS_RANGE}`);
+  return parseBudgetRows(data.values ?? []);
+}
+
 // ---- Budget writes (PLAN.md 17.43) ---------------------------------------
 // readBudgets above has been here since the beginning; nothing could ever
 // write one. Budgets were set in the separate React PWA, which signs into
@@ -223,8 +424,10 @@ export async function readBudgets(accessToken: string, spreadsheetId: string): P
 // LINE user's budgets often lived in a different book from the one the bot
 // reads, and "งบเหลือเท่าไหร่" answered "ยังไม่ได้ตั้งงบไว้เลย" forever.
 //
-// The layout matches app/src/lib/sheetsService.ts exactly (same header, same
-// column order), so a book written by either side stays readable by both.
+// The layout matched the React PWA's sheetsService.ts exactly (same header,
+// same column order) so a book written by either side stayed readable by
+// both. The PWA is gone now (PLAN.md 17.46); the layout stays for the books
+// it left behind.
 
 const BUDGET_HEADERS = ["id", "categoryId", "month", "limitAmount"];
 
@@ -259,7 +462,7 @@ async function ensureBudgetsTab(accessToken: string, spreadsheetId: string, kv: 
 }
 
 async function readBudgetRawRows(accessToken: string, spreadsheetId: string): Promise<string[][]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A2:D10000`);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${BUDGETS_RANGE}`);
   return data.values ?? [];
 }
 
@@ -365,15 +568,8 @@ export async function appendDiaryEntry(
   });
 }
 
-export async function readAllDiaryEntries(
-  accessToken: string,
-  spreadsheetId: string,
-  kv: KVNamespace
-): Promise<DiaryRow[]> {
-  await ensureDiaryTab(accessToken, spreadsheetId, kv);
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A2:E100000`);
-  const rows: string[][] = data.values ?? [];
-  return rows
+function parseDiaryRows(raw: string[][]): DiaryRow[] {
+  return raw
     .filter((r) => r[0])
     .map((r) => ({
       id: r[0],
@@ -382,6 +578,16 @@ export async function readAllDiaryEntries(
       text: r[3] ?? "",
       createdAt: r[4] ?? "",
     }));
+}
+
+export async function readAllDiaryEntries(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace
+): Promise<DiaryRow[]> {
+  await ensureDiaryTab(accessToken, spreadsheetId, kv);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${DIARY_RANGE}`);
+  return parseDiaryRows(data.values ?? []);
 }
 
 // PLAN.md 17.36: edit/delete now live on /view/diary (viewDiaryPage.ts)
@@ -407,7 +613,7 @@ export async function readAllDiaryEntries(
 // single-user personal tool — noted honestly rather than pretended away.
 
 async function readDiaryRawRows(accessToken: string, spreadsheetId: string): Promise<string[][]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A2:E100000`);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${DIARY_RANGE}`);
   return data.values ?? [];
 }
 
@@ -533,17 +739,8 @@ async function ensureShiftsTab(
   await kv.put(cacheKey, "1");
 }
 
-export async function readShiftGrid(
-  accessToken: string,
-  spreadsheetId: string,
-  kv: KVNamespace,
-  monthKey: string
-): Promise<ShiftGrid> {
-  await ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey);
+function parseShiftGrid(monthKey: string, rows: string[][]): ShiftGrid {
   const days = daysInMonth(monthKey);
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${shiftsDataRange(monthKey)}`);
-  const rows: string[][] = data.values ?? [];
-
   const checked = Object.fromEntries(SHIFT_TYPES.map((t) => [t, [] as number[]])) as Record<ShiftType, number[]>;
   for (const row of rows) {
     const type = row[0];
@@ -554,6 +751,64 @@ export async function readShiftGrid(
     }
   }
   return { monthKey, days, checked };
+}
+
+export async function readShiftGrid(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  monthKey: string
+): Promise<ShiftGrid> {
+  await ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${shiftsDataRange(monthKey)}`);
+  return parseShiftGrid(monthKey, data.values ?? []);
+}
+
+// ---- Everything the AI Q&A needs, in one request (PLAN.md 17.45) ---------
+// answerQuestion builds the model's prompt out of four tabs at once, and was
+// fetching each with its own HTTP request — a Promise.all of four, so four
+// round trips deep into the 15-second budget of a question the user is
+// sitting and waiting on. They're all ranges of the same spreadsheet, which
+// is exactly what values:batchGet is for.
+//
+// The two ensure* calls stay separate and go first: a batchGet naming a tab
+// that doesn't exist yet fails the whole request, not just that range. Both
+// are KV-cached after the first time (see ensureDiaryTab), so on the normal
+// path they cost nothing and this really is one request.
+
+export interface AccountSnapshot {
+  transactions: TransactionRow[];
+  diary: DiaryRow[];
+  budgets: BudgetRow[];
+  shifts: ShiftGrid;
+}
+
+export async function readAccountSnapshot(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  monthKey: string
+): Promise<AccountSnapshot> {
+  await Promise.all([
+    ensureDiaryTab(accessToken, spreadsheetId, kv),
+    ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey),
+  ]);
+  // Transactions come windowed to the month (PLAN.md 17.47) — answerQuestion
+  // filtered them to `monthKey` immediately anyway, so nothing downstream
+  // changes. Diary is still read whole; it's a handful of rows a day of text
+  // and has never been the expensive one.
+  const { transactions, extras } = await readTransactionsFromMonth(accessToken, spreadsheetId, kv, monthKey, [
+    DIARY_RANGE,
+    BUDGETS_RANGE,
+    shiftsDataRange(monthKey),
+  ]);
+  const [diaryRaw, budgetRaw, shiftRaw] = extras;
+  return {
+    transactions,
+    diary: parseDiaryRows(diaryRaw),
+    budgets: parseBudgetRows(budgetRaw),
+    shifts: parseShiftGrid(monthKey, shiftRaw),
+  };
 }
 
 /** Overwrites a whole month's grid with exactly the given checked cells —
