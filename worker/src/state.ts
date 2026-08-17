@@ -132,6 +132,11 @@ export interface ActionCtx {
   // rather than threaded through the ones that don't need it.
   origin: string;
   stateSigningSecret: string;
+  // Whether the Google Search tool may be offered on the AI Q&A call
+  // (PLAN.md 17.42). Off by default — grounding needs a billing-enabled
+  // Gemini project, and offering it on a free-tier key only buys a
+  // guaranteed 429 and the latency of failing it. See isWebSearchEnabled.
+  webSearchEnabled: boolean;
 }
 
 // The morning briefing (PLAN.md 15.11) needs to know which calendar day a

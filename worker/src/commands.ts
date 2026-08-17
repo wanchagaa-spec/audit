@@ -88,7 +88,12 @@ function searchMatch(text: string): string | null {
 
 const HELP_TEST = (t: string) => includesAny(t, ["วิธีใช้", "คำสั่ง", "help", "ช่วยเหลือ"]);
 
-export function buildHelpText(): string {
+// `webSearchEnabled` gates exactly one bullet (PLAN.md 17.42). The guide is
+// the bot's own promise about what it can do, so a feature that's switched
+// off must not appear in it — a user who reads "บอทค้น Google ให้" and then
+// gets told the question is outside its data has been misled by this file,
+// not by the model.
+export function buildHelpText(webSearchEnabled: boolean): string {
   const sections = [
     "💰 จดเงิน",
     "• พิมพ์รายการธรรมชาติได้เลย เช่น \"ซื้อกาแฟ 60\", \"เงินเดือนเข้า 25000\" หลายรายการในข้อความเดียวก็ได้ เช่น \"ค่ากาแฟ 60 ค่าข้าว 120\" ข้อมูลไม่ครบจะถามกลับก่อนเสมอ",
@@ -158,7 +163,9 @@ export function buildHelpText(): string {
     // PLAN.md 17.38. Listed right after the personal-data line above because
     // that's the actual distinction: the bot decides per question which of
     // the two it is, and the user never has to say which one they want.
-    "• ถามเรื่องนอกข้อมูลของคุณก็ได้ เช่น \"ถาม รถไฟฟ้าสายสีส้มเปิดยัง\" — บอทไปค้น Google มาตอบให้เอง คำตอบสั้นๆ ตอบในแชทเลย ถ้ายาวจะส่งลิงก์หน้าเว็บที่มีคำตอบเต็มพร้อมแหล่งอ้างอิงให้แทน",
+    ...(webSearchEnabled
+      ? ["• ถามเรื่องนอกข้อมูลของคุณก็ได้ เช่น \"ถาม รถไฟฟ้าสายสีส้มเปิดยัง\" — บอทไปค้น Google มาตอบให้เอง คำตอบสั้นๆ ตอบในแชทเลย ถ้ายาวจะส่งลิงก์หน้าเว็บที่มีคำตอบเต็มพร้อมแหล่งอ้างอิงให้แทน"]
+      : []),
     "• ถาม ข่าวหุ้น (หรือบิตคอยน์/ทอง/การเงินสหรัฐ) — สรุปข่าวการเงินพร้อมราคาจริง / ถาม ข่าววันนี้ — สรุปข่าวในประเทศไทย",
     "• วิเคราะห์ (พิมพ์เฉยๆ ก็ได้) — สรุปพฤติกรรมการใช้จ่าย+ไดอารี่เดือนนี้แบบเจาะลึกให้",
     "",

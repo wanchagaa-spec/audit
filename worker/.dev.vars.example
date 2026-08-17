@@ -9,3 +9,5 @@ GEMINI_API_KEY=
 # degrade to a "ยังไม่ได้ตั้งค่า" reply / links-without-prices instead of failing.
 GOOGLE_MAPS_API_KEY=
 TRAVELPAYOUTS_TOKEN=
+# Web search master switch — see wrangler.toml. Off unless set to "true".
+ENABLE_WEB_SEARCH=
