@@ -15,7 +15,7 @@
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import type { Env } from "./index.ts";
-import { deleteBudget, readAllTransactions, readBudgets, upsertBudget } from "./sheets.ts";
+import { deleteBudget, readTransactionsAndBudgets, upsertBudget } from "./sheets.ts";
 import { bangkokMonthKey } from "./thaiDate.ts";
 import {
   DATA_FETCH_FAILED_MESSAGE,
@@ -104,10 +104,8 @@ async function loadRows(
   spreadsheetId: string,
   month: string
 ): Promise<BudgetRowView[]> {
-  const [budgets, transactions] = await Promise.all([
-    readBudgets(accessToken, spreadsheetId),
-    readAllTransactions(accessToken, spreadsheetId),
-  ]);
+  // One request for both tabs, not two in parallel (PLAN.md 17.45).
+  const { transactions, budgets } = await readTransactionsAndBudgets(accessToken, spreadsheetId);
   const spentByCategory = new Map<string, number>();
   for (const row of transactions) {
     if (row.type !== "expense" || !row.date?.startsWith(month)) continue;

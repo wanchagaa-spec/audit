@@ -1,5 +1,5 @@
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
-import { readAllTransactions, readBudgets, type TransactionRow } from "./sheets.ts";
+import { readAllTransactions, readTransactionsAndBudgets, type TransactionRow } from "./sheets.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokWeekdayIndex } from "./thaiDate.ts";
 
 export function formatBaht(n: number): string {
@@ -325,10 +325,8 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
     test: (t) => includesAny(t, ["งบเหลือเท่าไหร่", "งบที่ตั้งไว้เหลือเท่าไหร่", "ใช้งบไปเท่าไหร่แล้ว"]),
     handle: async (accessToken, spreadsheetId) => {
       const month = currentMonthKey();
-      const [all, budgets] = await Promise.all([
-        readAllTransactions(accessToken, spreadsheetId),
-        readBudgets(accessToken, spreadsheetId),
-      ]);
+      // One request for both tabs, not two in parallel (PLAN.md 17.45).
+      const { transactions: all, budgets } = await readTransactionsAndBudgets(accessToken, spreadsheetId);
       const monthBudgets = budgets.filter((b) => b.month === month);
       if (monthBudgets.length === 0) {
         return 'ยังไม่ได้ตั้งงบไว้เลยนะ ตั้งได้เลยเช่น "ตั้งงบ อาหาร 5000" หรือตั้งหลายหมวดพร้อมกันที่แท็บ "งบ" ในเว็บ';

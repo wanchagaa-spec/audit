@@ -14,7 +14,7 @@
 
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { deleteBudget, readAllTransactions, readBudgets, upsertBudget } from "./sheets.ts";
+import { deleteBudget, readBudgets, readTransactionsAndBudgets, upsertBudget } from "./sheets.ts";
 import { setPendingConfirmation, type ActionCtx } from "./state.ts";
 import { bangkokMonthKey } from "./thaiDate.ts";
 
@@ -121,26 +121,54 @@ export async function applyBudgetDelete(
 // from. So every expense in a budgeted category now reports where it leaves
 // you, right in the save confirmation.
 //
-// Cost is kept off people who don't use budgets: readBudgets comes first
-// (the Budgets tab holds a handful of rows), and the full transaction read —
-// which is the expensive one — only happens when one of the categories just
-// saved actually has a budget this month.
+// This costs one Sheets request, and it is deliberately issued *alongside*
+// the appends that save the money rather than after them (see
+// applyTransactionCreate), so it adds no waiting to a save at all. That
+// overlap is why it takes the rows being saved as an argument: the read can
+// legitimately come back from either side of those appends, so the totals
+// are reconciled by id below rather than assumed.
+//
+// It reads both tabs in one request now instead of checking Budgets first
+// and only then paying for Transactions. That gives up a small saving for
+// books with no budgets — they now fetch transactions they won't use — in
+// exchange for one round trip instead of two for books that do. Since the
+// whole thing overlaps the save either way, one request is the right trade.
 
-export async function buildBudgetStatusLines(ctx: ActionCtx, categoryIds: string[]): Promise<string[]> {
-  const unique = [...new Set(categoryIds)];
-  if (unique.length === 0) return [];
+/** A row applyTransactionCreate is in the middle of writing. */
+export interface SavedExpense {
+  id: string;
+  categoryId: string;
+  amount: number;
+  date: string;
+}
+
+export async function buildBudgetStatusLines(ctx: ActionCtx, justSaved: SavedExpense[]): Promise<string[]> {
+  if (justSaved.length === 0) return [];
+  const categoryIds = new Set(justSaved.map((e) => e.categoryId));
 
   const month = bangkokMonthKey();
-  const budgets = (await readBudgets(ctx.accessToken, ctx.spreadsheetId)).filter(
-    (b) => b.month === month && unique.includes(b.categoryId)
+  const { transactions, budgets: allBudgets } = await readTransactionsAndBudgets(
+    ctx.accessToken,
+    ctx.spreadsheetId
   );
+  const budgets = allBudgets.filter((b) => b.month === month && categoryIds.has(b.categoryId));
   if (budgets.length === 0) return [];
 
-  const transactions = await readAllTransactions(ctx.accessToken, ctx.spreadsheetId);
   const spentByCategory = new Map<string, number>();
+  const alreadyCounted = new Set<string>();
   for (const row of transactions) {
     if (row.type !== "expense" || !row.date?.startsWith(month)) continue;
+    alreadyCounted.add(row.id);
     spentByCategory.set(row.categoryId, (spentByCategory.get(row.categoryId) ?? 0) + row.amount);
+  }
+  // Add the rows being saved right now, but only the ones the read didn't
+  // already see. Racing the appends means either outcome is possible and
+  // neither is an error — what would be an error is guessing: counting
+  // blindly double-charges the budget, skipping entirely under-reports it.
+  // Matching on the id we generated for each row settles it exactly.
+  for (const expense of justSaved) {
+    if (alreadyCounted.has(expense.id) || !expense.date.startsWith(month)) continue;
+    spentByCategory.set(expense.categoryId, (spentByCategory.get(expense.categoryId) ?? 0) + expense.amount);
   }
 
   return budgets.map((budget) => {

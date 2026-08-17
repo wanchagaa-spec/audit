@@ -22,7 +22,7 @@ import {
 import { signViewToken } from "./signedState.ts";
 import { buildSearchChatReply, isAnswerShortEnoughForChat, saveSearchResult } from "./webSearch.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
-import { readAllDiaryEntries, readAllTransactions, readBudgets, readShiftGrid, SHIFT_TYPES, type BudgetRow, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
+import { readAccountSnapshot, SHIFT_TYPES, type BudgetRow, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokStartOfDayIso, formatThaiDateLabel } from "./thaiDate.ts";
 import { fetchWeatherSummary } from "./weather.ts";
@@ -310,12 +310,14 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
     addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS - 1)
   )}`;
 
-  const [allTx, allDiary, shiftGrid, budgets] = await Promise.all([
-    readAllTransactions(ctx.accessToken, ctx.spreadsheetId),
-    readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv),
-    readShiftGrid(ctx.accessToken, ctx.spreadsheetId, ctx.kv, month),
-    readBudgets(ctx.accessToken, ctx.spreadsheetId),
-  ]);
+  // Four tabs, one Sheets request (PLAN.md 17.45) — this used to be four
+  // parallel round trips at the front of a question the user is waiting on.
+  const {
+    transactions: allTx,
+    diary: allDiary,
+    shifts: shiftGrid,
+    budgets,
+  } = await readAccountSnapshot(ctx.accessToken, ctx.spreadsheetId, ctx.kv, month);
   // Calendar access needs its own OAuth scope some already-linked accounts
   // never granted, and can fail for other transient reasons too — fetched
   // separately (not in the Promise.all above) and caught locally so a

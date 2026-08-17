@@ -131,6 +131,12 @@ let simulateShortGroundedAnswer = false; // one-shot: same, but with a short ans
 let simulateSearchResultPutFailureOnce = false; // one-shot: fails the KV write that stores a grounded answer, leaving a real answer with nowhere permitted to display it
 let simulateGroundingRejected = false; // one-shot: Gemini refuses any request carrying the google_search tool with a 400 — the real production failure, where a model that doesn't serve the tool took the whole Q&A feature down with it
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
+// One-shot: makes the next Transactions append land *after* the budget read
+// that now runs alongside it (PLAN.md 17.45). Without this the mock applies
+// appends synchronously, so the read always sees the new rows and only one
+// side of that race ever gets tested — the side where the id-matching in
+// buildBudgetStatusLines has nothing to do.
+let simulateSlowTransactionAppendOnce = false;
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
 // AI-interpreter call (PLAN.md 17.11) the same way persona.ts's calls are
@@ -157,6 +163,24 @@ let driveUploadRequestCount = 0; // counts requests to the media-upload mock, to
 let activeDriveUploadRequests = 0; // in-flight count, to verify webhook concurrency stays bounded
 let maxConcurrentDriveUploadRequests = 0;
 let simulateSpreadsheetAccessDeniedOnce = false; // makes the next canAccessSpreadsheet check (group OAuth relink) fail, to simulate a different Google account than the one that owns the group's spreadsheet
+
+// Counts HTTP requests that read cell ranges — a single-range GET or one
+// values:batchGet, each counting once no matter how many ranges it carries.
+// Lets a test assert that batching (PLAN.md 17.45) actually collapsed round
+// trips, which is the whole point of the change and is otherwise invisible
+// from the reply text.
+let sheetsValueReadRequests = 0;
+
+/** Which mock store a range refers to. Shared by the single-range and
+ * batchGet paths so both answer from the same data. */
+function sheetValuesForRange(range) {
+  if (range.startsWith("Transactions!A2:")) return sheetRows;
+  if (range.startsWith("Budgets!A2:")) return budgetRows;
+  if (range.startsWith("Diary!A2:")) return diaryRows;
+  const shiftTab = range.match(/^'(Shifts-\d{4}-\d{2})'!A2:/)?.[1];
+  if (shiftTab) return shiftGridStore[shiftTab] ?? [];
+  throw new Error(`test mock: unhandled sheet range "${range}"`);
+}
 
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
@@ -218,6 +242,19 @@ globalThis.fetch = async (url, init = {}) => {
     }
     return new Response(JSON.stringify({}), { status: 200 });
   }
+  // values:batchGet (PLAN.md 17.45) — several ranges of the same spreadsheet
+  // in one request. Mirrors the real API in the two ways the code depends on:
+  // valueRanges comes back positionally, and a range with no data has no
+  // `values` key at all rather than an empty array.
+  if (u.includes("/values:batchGet?")) {
+    sheetsValueReadRequests++;
+    const ranges = new URL(u).searchParams.getAll("ranges");
+    const valueRanges = ranges.map((range) => {
+      const values = sheetValuesForRange(range);
+      return values.length > 0 ? { range, values } : { range };
+    });
+    return new Response(JSON.stringify({ valueRanges }), { status: 200 });
+  }
   // updateDiaryEntry (PLAN.md 17.36): overwrites one specific row in place,
   // unlike the append-only Diary!A1:append path below.
   const diaryRowUpdateMatch = u.match(/Diary!A(\d+):E\1\?valueInputOption=RAW/);
@@ -250,14 +287,20 @@ globalThis.fetch = async (url, init = {}) => {
       simulateTransactionAppendFailureOnce = false;
       return new Response(JSON.stringify({ error: { message: "simulated transient Sheets append failure" } }), { status: 500 });
     }
+    if (simulateSlowTransactionAppendOnce) {
+      simulateSlowTransactionAppendOnce = false;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     const body = JSON.parse(init.body);
     sheetRows.push(...body.values);
     return new Response(JSON.stringify({}), { status: 200 });
   }
-  if (u.includes("Transactions!A2:J100000")) {
+  if (u.includes("Transactions!A2:J")) {
+    sheetsValueReadRequests++;
     return new Response(JSON.stringify({ values: sheetRows }), { status: 200 });
   }
-  if (u.includes("Budgets!A2:D10000")) {
+  if (u.includes("Budgets!A2:D")) {
+    sheetsValueReadRequests++;
     return new Response(JSON.stringify({ values: budgetRows }), { status: 200 });
   }
   if (u.includes("api.line.me/v2/bot/message/reply")) {
@@ -662,7 +705,8 @@ globalThis.fetch = async (url, init = {}) => {
     diaryRows.push(...body.values);
     return new Response(JSON.stringify({}), { status: 200 });
   }
-  if (u.includes("Diary!A2:E100000")) {
+  if (u.includes("Diary!A2:E")) {
+    sheetsValueReadRequests++;
     return new Response(JSON.stringify({ values: diaryRows }), { status: 200 });
   }
   if (u.includes("Shifts-") && u.includes("!A1?valueInputOption=RAW")) {
@@ -682,6 +726,7 @@ globalThis.fetch = async (url, init = {}) => {
       shiftGridStore[tabName] = body.values;
       return new Response(JSON.stringify({}), { status: 200 });
     }
+    sheetsValueReadRequests++;
     return new Response(JSON.stringify({ values: shiftGridStore[tabName] ?? [] }), { status: 200 });
   }
   if (u.includes("generativelanguage.googleapis.com")) {
@@ -4608,6 +4653,7 @@ check("and still keeps one row, with the id preserved across the overwrite",
   budgetRows.length === 1 && budgetRows[0][0] === keptBudgetId && Number(budgetRows[0][3]) === 7000);
 
 // The web page — the second write-capable /view page after ตารางเวร.
+sheetsValueReadRequests = 0;
 const budgetsPageResponse = await worker.fetch(new Request(`${origin}/view/budgets?token=${viewToken}`), env, new FakeExecutionContext());
 const budgetsPageHtml = await budgetsPageResponse.text();
 check(
@@ -4615,6 +4661,7 @@ check(
   budgetsPageResponse.status === 200 && budgetsPageHtml.includes('name="budget-food"') && budgetsPageHtml.includes('value="7000"')
 );
 check("it shows spending next to each limit, so the number isn't picked blind", budgetsPageHtml.includes("ใช้ไปแล้ว"));
+check("and gets both tabs it needs in one range read (PLAN.md 17.45)", sheetsValueReadRequests === 1);
 
 const budgetSaveBody = new URLSearchParams({ "budget-food": "4500", "budget-transport": "1200" });
 const budgetSaveResponse = await worker.fetch(
@@ -4668,6 +4715,41 @@ check(
   overBudgetSave.includes("⚠️") && overspend > 0 && overBudgetSave.includes(`เกินแล้ว ${baht(overspend)} บาท`)
 );
 
+// The budget lookup is fired alongside the appends now instead of after them
+// (PLAN.md 17.45), so the read can come back from either side of the save.
+// Above, the mock applies appends synchronously and the read sees the new
+// rows; here the append is held back so the read misses them. The reported
+// figure has to be identical either way — counting blindly would double the
+// new expense, skipping entirely would ignore it.
+const spentBeforeRaced = shoppingSpent();
+simulateSlowTransactionAppendOnce = true;
+await handleTextMessage(env, lineUserId, "เสื้อผ้า 300", origin);
+const racedSave = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "the after-save budget line is right even when the read beats the append",
+  racedSave.includes(`เกินแล้ว ${baht(spentBeforeRaced + 300 - 5000)} บาท`) && shoppingSpent() === spentBeforeRaced + 300
+);
+
+// The whole point of the change: both money tabs now arrive in one HTTP
+// request instead of one each. Counted rather than inferred, because a
+// regression here changes nothing a reply would show.
+budgetRows.length = 0;
+budgetRows.push([crypto.randomUUID(), "shopping", budgetMonth, 5000]);
+sheetsValueReadRequests = 0;
+const budgetReportReply = await handleTextMessage(env, lineUserId, "งบเหลือเท่าไหร่", origin);
+check(
+  '"งบเหลือเท่าไหร่" reads Transactions and Budgets in a single request',
+  budgetReportReply.includes("ช้อปปิ้ง") && sheetsValueReadRequests === 1
+);
+
+sheetsValueReadRequests = 0;
+await handleTextMessage(env, lineUserId, "กระเป๋า 200", origin);
+const countedSave = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "saving an expense costs one range read for the budget line, not two",
+  countedSave.includes("ช้อปปิ้ง") && countedSave.includes("จากงบ") && sheetsValueReadRequests === 1
+);
+
 // Every expense logged here must land in the current Bangkok month, or it
 // would silently miss the budget it was meant to count against — the money
 // path was the last place still stamping rows with a UTC date.
@@ -4696,6 +4778,17 @@ check(
   "the AI Q&A prompt now carries the budgets, with remaining precomputed",
   budgetAwarePrompt?.systemInstruction.includes("งบประมาณเดือนนี้ที่ผู้ใช้ตั้งไว้") &&
     budgetAwarePrompt.systemInstruction.includes("ห้ามคำนวณเอง")
+);
+
+// A question needs four tabs — Transactions, Diary, Budgets and this month's
+// shift grid — and used to fetch each with its own request, four round trips
+// deep into a 15-second budget the user is sitting and watching (PLAN.md
+// 17.45). They're all ranges of one spreadsheet, so they arrive together now.
+sheetsValueReadRequests = 0;
+const budgetAwareAnswer = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
+check(
+  "the AI Q&A gathers all four tabs in a single range read",
+  budgetAwareAnswer.length > 0 && sheetsValueReadRequests === 1
 );
 
 budgetRows.length = 0;

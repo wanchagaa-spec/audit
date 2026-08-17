@@ -21,6 +21,41 @@ async function sheetsFetch(accessToken: string, path: string, init: RequestInit 
   return res.json();
 }
 
+// ---- Reading several ranges at once (PLAN.md 17.45) -----------------------
+// Every read in this file asks Google for a whole tab, because the Sheets
+// values API has no "where date >= this month" — you get a rectangle or you
+// get nothing. So the lever that actually exists isn't fetching fewer rows,
+// it's fetching them fewer *times*, and several handlers here were doing the
+// opposite: one HTTP request per tab, fired together and all waited on.
+// "งบเหลือเท่าไหร่" made two, /view/budgets two, and the AI Q&A four.
+//
+// values:batchGet returns any number of ranges from the same spreadsheet in
+// a single request, which collapses all of those to one. Rows still grow
+// without bound — that part is inherent to the sheet being the database, and
+// is a separate problem for the day a book gets big enough to feel it — but
+// nothing pays for the same tab twice in one message anymore.
+
+const TRANSACTIONS_RANGE = "Transactions!A2:J";
+const BUDGETS_RANGE = "Budgets!A2:D";
+const DIARY_RANGE = "Diary!A2:E";
+
+/** Fetches several ranges in one HTTP request. Results come back positionally
+ * — `valueRanges[i]` is `ranges[i]` — which is the documented correspondence
+ * and the only usable one: the `range` string Google echoes back is
+ * normalised (tab names get quoted, open-ended bounds get expanded to the
+ * grid size), so it never matches what was asked for. A range with no data
+ * comes back as an entry with no `values`, not as a missing entry. */
+async function sheetsBatchGet(
+  accessToken: string,
+  spreadsheetId: string,
+  ranges: string[]
+): Promise<string[][][]> {
+  const query = ranges.map((r) => `ranges=${encodeURIComponent(r)}`).join("&");
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values:batchGet?${query}`);
+  const valueRanges = (data.valueRanges ?? []) as Array<{ values?: string[][] }>;
+  return ranges.map((_, i) => valueRanges[i]?.values ?? []);
+}
+
 export async function createBookSpreadsheet(accessToken: string, bookName: string): Promise<string> {
   const created = await sheetsFetch(accessToken, "", {
     method: "POST",
@@ -85,26 +120,47 @@ export async function appendTransaction(
   });
 }
 
+function toTransactionRow(r: string[]): TransactionRow {
+  return {
+    id: r[0],
+    date: r[1],
+    type: r[2] as "income" | "expense",
+    amount: Number(r[3]),
+    categoryId: r[4],
+    note: r[5] ?? "",
+    rawText: r[6] ?? "",
+    addedBy: r[7] ?? "",
+    addedByName: r[8] ?? "",
+    createdAt: r[9] ?? "",
+  };
+}
+
+/** Drops rows whose id cell is blank — a row someone cleared by hand in
+ * Google Sheets still comes back from the values API, as an empty entry. */
+function parseTransactionRows(raw: string[][]): TransactionRow[] {
+  return raw.filter((r) => r[0]).map(toTransactionRow);
+}
+
 export async function readAllTransactions(
   accessToken: string,
   spreadsheetId: string
 ): Promise<TransactionRow[]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Transactions!A2:J100000`);
-  const rows: string[][] = data.values ?? [];
-  return rows
-    .filter((r) => r[0])
-    .map((r) => ({
-      id: r[0],
-      date: r[1],
-      type: r[2] as "income" | "expense",
-      amount: Number(r[3]),
-      categoryId: r[4],
-      note: r[5] ?? "",
-      rawText: r[6] ?? "",
-      addedBy: r[7] ?? "",
-      addedByName: r[8] ?? "",
-      createdAt: r[9] ?? "",
-    }));
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${TRANSACTIONS_RANGE}`);
+  return parseTransactionRows(data.values ?? []);
+}
+
+/** Both money tabs in one HTTP request, for the handlers that need spending
+ * and limits together — "งบเหลือเท่าไหร่", /view/budgets, and the
+ * after-a-save budget line. Each of those used to fire two requests. */
+export async function readTransactionsAndBudgets(
+  accessToken: string,
+  spreadsheetId: string
+): Promise<{ transactions: TransactionRow[]; budgets: BudgetRow[] }> {
+  const [txRaw, budgetRaw] = await sheetsBatchGet(accessToken, spreadsheetId, [
+    TRANSACTIONS_RANGE,
+    BUDGETS_RANGE,
+  ]);
+  return { transactions: parseTransactionRows(txRaw), budgets: parseBudgetRows(budgetRaw) };
 }
 
 export async function readTransactionsForMonth(
@@ -165,7 +221,7 @@ export async function deleteMostRecentTransaction(
   accessToken: string,
   spreadsheetId: string
 ): Promise<TransactionRow | null> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Transactions!A2:J100000`);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${TRANSACTIONS_RANGE}`);
   const rawRows: string[][] = data.values ?? [];
 
   // Most recent by createdAt (column index 9); ties keep the earliest row,
@@ -178,19 +234,7 @@ export async function deleteMostRecentTransaction(
   }
   if (rawIndex === -1) return null;
 
-  const r = rawRows[rawIndex];
-  const mostRecent: TransactionRow = {
-    id: r[0],
-    date: r[1],
-    type: r[2] as "income" | "expense",
-    amount: Number(r[3]),
-    categoryId: r[4],
-    note: r[5] ?? "",
-    rawText: r[6] ?? "",
-    addedBy: r[7] ?? "",
-    addedByName: r[8] ?? "",
-    createdAt: r[9] ?? "",
-  };
+  const mostRecent = toTransactionRow(rawRows[rawIndex]);
 
   await deleteSheetRow(accessToken, spreadsheetId, "Transactions", rawIndex);
   return mostRecent;
@@ -203,10 +247,8 @@ export interface BudgetRow {
   limitAmount: number;
 }
 
-export async function readBudgets(accessToken: string, spreadsheetId: string): Promise<BudgetRow[]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A2:D10000`);
-  const rows: string[][] = data.values ?? [];
-  return rows
+function parseBudgetRows(raw: string[][]): BudgetRow[] {
+  return raw
     .filter((r) => r[0])
     .map((r) => ({
       id: r[0],
@@ -214,6 +256,11 @@ export async function readBudgets(accessToken: string, spreadsheetId: string): P
       month: r[2],
       limitAmount: Number(r[3]),
     }));
+}
+
+export async function readBudgets(accessToken: string, spreadsheetId: string): Promise<BudgetRow[]> {
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${BUDGETS_RANGE}`);
+  return parseBudgetRows(data.values ?? []);
 }
 
 // ---- Budget writes (PLAN.md 17.43) ---------------------------------------
@@ -259,7 +306,7 @@ async function ensureBudgetsTab(accessToken: string, spreadsheetId: string, kv: 
 }
 
 async function readBudgetRawRows(accessToken: string, spreadsheetId: string): Promise<string[][]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A2:D10000`);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${BUDGETS_RANGE}`);
   return data.values ?? [];
 }
 
@@ -365,15 +412,8 @@ export async function appendDiaryEntry(
   });
 }
 
-export async function readAllDiaryEntries(
-  accessToken: string,
-  spreadsheetId: string,
-  kv: KVNamespace
-): Promise<DiaryRow[]> {
-  await ensureDiaryTab(accessToken, spreadsheetId, kv);
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A2:E100000`);
-  const rows: string[][] = data.values ?? [];
-  return rows
+function parseDiaryRows(raw: string[][]): DiaryRow[] {
+  return raw
     .filter((r) => r[0])
     .map((r) => ({
       id: r[0],
@@ -382,6 +422,16 @@ export async function readAllDiaryEntries(
       text: r[3] ?? "",
       createdAt: r[4] ?? "",
     }));
+}
+
+export async function readAllDiaryEntries(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace
+): Promise<DiaryRow[]> {
+  await ensureDiaryTab(accessToken, spreadsheetId, kv);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${DIARY_RANGE}`);
+  return parseDiaryRows(data.values ?? []);
 }
 
 // PLAN.md 17.36: edit/delete now live on /view/diary (viewDiaryPage.ts)
@@ -407,7 +457,7 @@ export async function readAllDiaryEntries(
 // single-user personal tool — noted honestly rather than pretended away.
 
 async function readDiaryRawRows(accessToken: string, spreadsheetId: string): Promise<string[][]> {
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Diary!A2:E100000`);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${DIARY_RANGE}`);
   return data.values ?? [];
 }
 
@@ -533,17 +583,8 @@ async function ensureShiftsTab(
   await kv.put(cacheKey, "1");
 }
 
-export async function readShiftGrid(
-  accessToken: string,
-  spreadsheetId: string,
-  kv: KVNamespace,
-  monthKey: string
-): Promise<ShiftGrid> {
-  await ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey);
+function parseShiftGrid(monthKey: string, rows: string[][]): ShiftGrid {
   const days = daysInMonth(monthKey);
-  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${shiftsDataRange(monthKey)}`);
-  const rows: string[][] = data.values ?? [];
-
   const checked = Object.fromEntries(SHIFT_TYPES.map((t) => [t, [] as number[]])) as Record<ShiftType, number[]>;
   for (const row of rows) {
     const type = row[0];
@@ -554,6 +595,60 @@ export async function readShiftGrid(
     }
   }
   return { monthKey, days, checked };
+}
+
+export async function readShiftGrid(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  monthKey: string
+): Promise<ShiftGrid> {
+  await ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey);
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${shiftsDataRange(monthKey)}`);
+  return parseShiftGrid(monthKey, data.values ?? []);
+}
+
+// ---- Everything the AI Q&A needs, in one request (PLAN.md 17.45) ---------
+// answerQuestion builds the model's prompt out of four tabs at once, and was
+// fetching each with its own HTTP request — a Promise.all of four, so four
+// round trips deep into the 15-second budget of a question the user is
+// sitting and waiting on. They're all ranges of the same spreadsheet, which
+// is exactly what values:batchGet is for.
+//
+// The two ensure* calls stay separate and go first: a batchGet naming a tab
+// that doesn't exist yet fails the whole request, not just that range. Both
+// are KV-cached after the first time (see ensureDiaryTab), so on the normal
+// path they cost nothing and this really is one request.
+
+export interface AccountSnapshot {
+  transactions: TransactionRow[];
+  diary: DiaryRow[];
+  budgets: BudgetRow[];
+  shifts: ShiftGrid;
+}
+
+export async function readAccountSnapshot(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  monthKey: string
+): Promise<AccountSnapshot> {
+  await Promise.all([
+    ensureDiaryTab(accessToken, spreadsheetId, kv),
+    ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey),
+  ]);
+  const [txRaw, diaryRaw, budgetRaw, shiftRaw] = await sheetsBatchGet(accessToken, spreadsheetId, [
+    TRANSACTIONS_RANGE,
+    DIARY_RANGE,
+    BUDGETS_RANGE,
+    shiftsDataRange(monthKey),
+  ]);
+  return {
+    transactions: parseTransactionRows(txRaw),
+    diary: parseDiaryRows(diaryRaw),
+    budgets: parseBudgetRows(budgetRaw),
+    shifts: parseShiftGrid(monthKey, shiftRaw),
+  };
 }
 
 /** Overwrites a whole month's grid with exactly the given checked cells —
