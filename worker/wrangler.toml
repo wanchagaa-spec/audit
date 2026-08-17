@@ -3,6 +3,27 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Keeps the logs this Worker already writes. Every console.error in src/ (a
+# failed Drive upload, a refresh token that stopped working, a Places API
+# error, a persona call that fell back) was being emitted and then discarded,
+# because nothing was configured to retain it — which meant the only way to
+# find out something had broken was for someone to notice and complain.
+#
+# Costs nothing at runtime: those console calls run either way, and ingestion
+# happens on Cloudflare's side, not inside this Worker's CPU budget. Volume is
+# dominated by the once-a-minute cron above (~1,440 invocations a day, each one
+# an invocation log even when it does nothing and logs nothing), with actual
+# messages and /view page loads adding a few hundred more — comfortably inside
+# the free plan's daily allowance, which was 200k events/day with 3-day
+# retention when this was set up. Check the dashboard rather than trusting that
+# number; plan terms move. If volume ever does become a problem, add
+# `head_sampling_rate = 0.1` below to keep a tenth of invocations.
+#
+# Note the 3-day window on the free plan: this is for catching a problem while
+# it's fresh, not a long-term audit trail.
+[observability]
+enabled = true
+
 # Drains the trip-photo upload queue once a minute (see uploadQueue.ts and the
 # `scheduled` handler in src/index.ts). Every media file, any batch size, goes
 # through this queue+drain path now (see DRAIN_BATCH_SIZE's comment in
