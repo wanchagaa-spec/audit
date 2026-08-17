@@ -4633,6 +4633,74 @@ check(
     budgetRows.some((r) => r[1] === "food" && Number(r[3]) === 4500)
 );
 
+// Regression test for what a real user hit within minutes of budgets
+// shipping: they set a 5,000 shopping budget, logged 4,500 and then 800
+// against it, and the bot said nothing either time. A limit that only speaks
+// when asked isn't doing the job a limit exists for (PLAN.md 17.44).
+budgetRows.length = 0;
+budgetRows.push([crypto.randomUUID(), "shopping", budgetMonth, 5000]);
+const sheetRowsBeforeBudgetWarn = sheetRows.length;
+
+// Expected figures are derived from the sheet, not hardcoded — this section
+// runs after plenty of other transactions, so the shopping category already
+// carries a balance and a literal "เหลือ 500" would only be testing the test.
+const shoppingSpent = () =>
+  sheetRows
+    .filter((r) => r[2] === "expense" && r[4] === "shopping" && String(r[1]).startsWith(budgetMonth))
+    .reduce((sum, r) => sum + Number(r[3]), 0);
+const baht = (n) => n.toLocaleString("th-TH", { maximumFractionDigits: 2 });
+
+await handleTextMessage(env, lineUserId, "ซื้อกระเป๋า 4500", origin);
+const underBudgetSave = await handleTextMessage(env, lineUserId, "ใช่", origin);
+const remainingAfterBag = 5000 - shoppingSpent();
+check(
+  "saving an expense in a budgeted category reports what's left, unprompted",
+  underBudgetSave.includes("บันทึกรายจ่าย") &&
+    remainingAfterBag > 0 &&
+    underBudgetSave.includes(`เหลือ ${baht(remainingAfterBag)} บาท`)
+);
+
+await handleTextMessage(env, lineUserId, "รองเท้า 800", origin);
+const overBudgetSave = await handleTextMessage(env, lineUserId, "ใช่", origin);
+const overspend = shoppingSpent() - 5000;
+check(
+  "and the one that tips it over says so, with the overspend",
+  overBudgetSave.includes("⚠️") && overspend > 0 && overBudgetSave.includes(`เกินแล้ว ${baht(overspend)} บาท`)
+);
+
+// Every expense logged here must land in the current Bangkok month, or it
+// would silently miss the budget it was meant to count against — the money
+// path was the last place still stamping rows with a UTC date.
+check(
+  "the saved rows carry the Bangkok date, not the UTC one",
+  sheetRows.slice(sheetRowsBeforeBudgetWarn).every((r) => r[1] === bangkokDateKey())
+);
+
+// An expense in a category with no budget must stay silent — the feature
+// shouldn't start narrating budgets at people who never set one.
+const noBudgetCategorySave = await (async () => {
+  await handleTextMessage(env, lineUserId, "ค่าแท็กซี่ 120", origin);
+  return handleTextMessage(env, lineUserId, "ใช่", origin);
+})();
+check(
+  "an expense in an unbudgeted category says nothing about budgets",
+  noBudgetCategorySave.includes("บันทึกรายจ่าย") && !noBudgetCategorySave.includes("งบ")
+);
+
+// The AI prompt had no idea budgets existed — a user asked about the very
+// category they'd just budgeted and the answer never mentioned it.
+geminiRequests.length = 0;
+await handleTextMessage(env, lineUserId, "ถาม งบช้อปปิ้งเหลือเท่าไหร่", origin);
+const budgetAwarePrompt = [...geminiRequests].reverse().find((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน"));
+check(
+  "the AI Q&A prompt now carries the budgets, with remaining precomputed",
+  budgetAwarePrompt?.systemInstruction.includes("งบประมาณเดือนนี้ที่ผู้ใช้ตั้งไว้") &&
+    budgetAwarePrompt.systemInstruction.includes("ห้ามคำนวณเอง")
+);
+
+budgetRows.length = 0;
+budgetRows.push([keptBudgetId, "food", budgetMonth, 4500], [crypto.randomUUID(), "transport", budgetMonth, 1200]);
+
 const budgetDeleteReply = await handleTextMessage(env, lineUserId, "ลบงบ อาหาร", origin);
 check("ลบงบ confirms first too", budgetDeleteReply.includes('"ใช่"') && budgetRows.length === 2);
 await handleTextMessage(env, lineUserId, "ใช่", origin);
