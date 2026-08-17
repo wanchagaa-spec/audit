@@ -25,18 +25,14 @@ from PIL import Image, ImageDraw, ImageFont
 HERE = Path(__file__).parent
 FONT_DIR = HERE / "fonts"
 
-# LINE rich menu images must be one of a few fixed sizes. Used to be the
-# "full" 2500x1686 size with a 4x2 grid (8 tappable tiles, grew from an
-# original 3x2 grid, then to a 4x1 read-only-command set once the AI Q&A
-# and web-viewer features gave every slot an actual command to hold) —
-# pared back down to just the 4 tiles asked for (help, web viewer, recent
-# transactions, month summary), so this switched to the "compact" 2500x843
-# size instead of leaving 4 tappable tiles plus 4 empty ones in a half-used
-# full-size grid. Tile dimensions (625x843) are unchanged from before —
-# only ROWS dropped from 2 to 1, so every per-tile layout/icon-drawing
-# calculation below still applies as-is.
+# LINE rich menu images must be one of a few fixed sizes. This is the
+# "compact" 2500x843, down from the "full" 2500x1686 it used when the grid
+# held eight tiles. Three columns as of PLAN.md 17.50 (help, web viewer,
+# settings), down from four — every per-tile layout and icon calculation
+# below is expressed as a fraction of its own tile, so changing COLS is the
+# only edit a different tile count needs.
 WIDTH, HEIGHT = 2500, 843
-COLS, ROWS = 4, 1
+COLS, ROWS = 3, 1
 
 PAGE_BG = (240, 247, 242)  # soft off-white, faint green tint
 FRAME_BORDER = (22, 163, 74)  # same green as the tiles
@@ -136,6 +132,28 @@ def icon_sparkle(draw, cx, cy, r, color):
     draw.polygon(pts, fill=color)
 
 
+def icon_gear(draw, cx, cy, r, stroke, color):
+    # Eight teeth around a ring, then a hole punched in the middle by
+    # redrawing the tile colour — simpler and cleaner than trying to stroke
+    # an annulus, and the badge underneath is always a flat white circle.
+    outer = r * 1.05
+    tooth_w = r * 0.34
+    tooth_h = r * 0.38
+    for i in range(8):
+        angle = math.pi / 4 * i
+        tx, ty = cx + outer * math.cos(angle), cy + outer * math.sin(angle)
+        pts = []
+        for dx, dy in ((-tooth_w / 2, -tooth_h / 2), (tooth_w / 2, -tooth_h / 2), (tooth_w / 2, tooth_h / 2), (-tooth_w / 2, tooth_h / 2)):
+            px = tx + dx * math.cos(angle) - dy * math.sin(angle)
+            py = ty + dx * math.sin(angle) + dy * math.cos(angle)
+            pts.append((px, py))
+        draw.polygon(pts, fill=color)
+    body = r * 0.92
+    draw.ellipse([cx - body, cy - body, cx + body, cy + body], fill=color)
+    hole = r * 0.36
+    draw.ellipse([cx - hole, cy - hole, cx + hole, cy + hole], fill=(255, 255, 255))
+
+
 def icon_globe(draw, cx, cy, r, stroke, color):
     rad = r * 0.85
     draw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad], outline=color, width=stroke)
@@ -145,15 +163,16 @@ def icon_globe(draw, cx, cy, r, stroke, color):
     draw.line([cx - rad, cy, cx + rad, cy], fill=color, width=max(2, stroke - 4))
 
 
-# Pared down from 8 tiles to just these 4 (user request) — trip status,
-# today's calendar, this month's diary, and AI analysis all still work fine
-# as typed commands or via the "วิธีใช้" reference, they just don't get a
-# dedicated tap-target anymore.
+# Three tiles (PLAN.md 17.50). "รายการล่าสุด" and "สรุปเดือนนี้" were here
+# and gave up their slots to settings: both are still typed commands and
+# both are already on the page the web-viewer tile opens, so neither became
+# harder to reach — while the settings page holds the bot's name, its
+# character and the wipe, and had no way in but typing a URL you'd have to
+# know about first.
 BUTTONS = [
     {"title": "วิธีใช้", "sub": "HELP", "icon": "help"},
     {"title": "เปิดเว็บดูข้อมูล", "sub": "WEB VIEW", "icon": "globe"},
-    {"title": "รายการล่าสุด", "sub": "RECENT", "icon": "clock"},
-    {"title": "สรุปเดือนนี้", "sub": "MONEY SUMMARY", "icon": "money"},
+    {"title": "ตั้งค่า", "sub": "SETTINGS", "icon": "gear"},
 ]
 
 
@@ -183,6 +202,8 @@ def draw_icon(draw, kind, cx, cy, r, help_font):
         icon_sparkle(draw, cx, cy, r, color)
     elif kind == "globe":
         icon_globe(draw, cx, cy, r, ICON_STROKE, color)
+    elif kind == "gear":
+        icon_gear(draw, cx, cy, r, ICON_STROKE, color)
 
 
 def main():

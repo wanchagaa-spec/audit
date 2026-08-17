@@ -95,7 +95,7 @@ import { renderErrorPage } from "./viewAuth.ts";
 import { handleViewBudgetsRequest } from "./viewBudgetsPage.ts";
 import { handleViewSettingsRequest } from "./viewSettingsPage.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
-import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
+import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewHelpRequest } from "./viewHelpPage.ts";
 import { handleViewSearchRequest } from "./viewSearchPage.ts";
@@ -588,6 +588,8 @@ async function runInterpretedIntent(
         return buildCapabilityText();
       case "view_link":
         return await buildViewLinkReply(env, subjectId, origin);
+      case "settings_link":
+        return await buildSettingsLinkReply(env, subjectId, origin);
       case "chitchat":
       case "unclear":
         return intent.reply;
@@ -773,6 +775,12 @@ async function dispatchLegacyCommands(
     // token only needs STATE_SIGNING_SECRET, no Google auth at all.
     if (matchViewLinkCommand(text)) {
       return await buildViewLinkReply(env, subjectId, origin);
+    }
+
+    // Same shape, and for the same reason: minting a link needs only
+    // STATE_SIGNING_SECRET, no Google auth (PLAN.md 17.50).
+    if (matchSettingsLinkCommand(text)) {
+      return await buildSettingsLinkReply(env, subjectId, origin);
     }
 
     // Before matchCommand's report handler for two reasons: its

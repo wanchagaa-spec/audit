@@ -20,20 +20,27 @@ const imagePath = join(__dirname, "..", "assets", "rich-menu.png");
 // Tap area texts must exactly match phrases the bot already understands
 // (see src/commands.ts, viewCommands.ts) — a rich menu tap sends the text as
 // an ordinary message, nothing special. Bounds must stay in sync with the
-// compact 4x1 grid drawn in assets/generate-rich-menu.py (625x843 per tile,
-// 2500x843 total — pared down from a full-size 4x2/8-tile grid to just
-// these 4 tiles on request, so this switched to LINE's "compact" size
-// instead of a half-empty full-size one).
+// grid drawn in assets/generate-rich-menu.py.
+//
+// Three tiles as of PLAN.md 17.50, down from four: "รายการล่าสุด" and
+// "สรุปเดือนนี้" gave up their slots to "ตั้งค่า". Both are still ordinary
+// typed commands and both are on the web viewer the middle tile opens, so
+// nothing became unreachable — whereas the settings page is where the bot's
+// name, character and the wipe live, and a page nobody can find is a page
+// nobody uses.
+//
+// 2500 doesn't divide by three, so the first column takes the spare pixel:
+// LINE requires the areas to tile the image exactly, with no gap and no
+// overlap.
 const richMenuDefinition = {
   size: { width: 2500, height: 843 },
   selected: true,
   name: "expense-tracker-main-menu",
   chatBarText: "เมนู",
   areas: [
-    { bounds: { x: 0, y: 0, width: 625, height: 843 }, action: { type: "message", text: "วิธีใช้" } },
-    { bounds: { x: 625, y: 0, width: 625, height: 843 }, action: { type: "message", text: "เปิดเว็บดูข้อมูล" } },
-    { bounds: { x: 1250, y: 0, width: 625, height: 843 }, action: { type: "message", text: "รายการล่าสุด" } },
-    { bounds: { x: 1875, y: 0, width: 625, height: 843 }, action: { type: "message", text: "สรุปเดือนนี้" } },
+    { bounds: { x: 0, y: 0, width: 834, height: 843 }, action: { type: "message", text: "วิธีใช้" } },
+    { bounds: { x: 834, y: 0, width: 833, height: 843 }, action: { type: "message", text: "เปิดเว็บดูข้อมูล" } },
+    { bounds: { x: 1667, y: 0, width: 833, height: 843 }, action: { type: "message", text: "ตั้งค่า" } },
   ],
 };
 
