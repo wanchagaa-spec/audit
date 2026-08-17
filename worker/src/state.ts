@@ -87,6 +87,11 @@ export type PendingConfirmation =
   | { kind: "taskDelete"; taskId: string; title: string }
   | { kind: "emailSend"; to: string; subject: string; body: string }
   | { kind: "transactionDeleteLast" }
+  // PLAN.md 17.43. `month` is captured when the prompt is built, not when
+  // it's confirmed — a confirmation left overnight across the 1st should
+  // still set the budget for the month the user was actually looking at.
+  | { kind: "budgetSet"; categoryId: string; month: string; limitAmount: number }
+  | { kind: "budgetDelete"; categoryId: string; month: string }
   // PLAN.md 17.9: money logging no longer saves immediately, even for an
   // unambiguous message — always confirms first, same as every other
   // create/delete action already did. `attribution` is resolved once, at

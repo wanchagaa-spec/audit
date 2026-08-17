@@ -5,6 +5,7 @@
 // unrelated later "ใช่". A confirmation only clears it after the apply step
 // actually succeeds — see resolveConfirmation's own comment for why.
 
+import { applyBudgetDelete, applyBudgetSet } from "./budgetCommands.ts";
 import { applyCalendarCreate, applyCalendarDelete, applyCalendarEdit } from "./calendarCommands.ts";
 import { applyDiaryCreate } from "./diaryCommands.ts";
 import { applyEmailSend } from "./gmailCommands.ts";
@@ -90,6 +91,10 @@ function applyPendingConfirmation(ctx: ActionCtx, pending: PendingConfirmation):
       return applyTaskDelete(ctx, pending);
     case "emailSend":
       return applyEmailSend(ctx, pending);
+    case "budgetSet":
+      return applyBudgetSet(ctx, pending);
+    case "budgetDelete":
+      return applyBudgetDelete(ctx, pending);
     case "transactionDeleteLast":
       return applyTransactionDeleteLast(ctx);
     case "transactionCreate":
