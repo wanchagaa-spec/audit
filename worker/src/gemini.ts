@@ -20,7 +20,63 @@ const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models
 export class GeminiError extends Error {}
 
 interface GeminiResponse {
-  candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> };
+    finishReason?: string;
+    groundingMetadata?: {
+      searchEntryPoint?: { renderedContent?: string };
+      groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+      webSearchQueries?: string[];
+    };
+  }>;
+}
+
+/** One web page the grounded answer actually drew on. */
+export interface GroundingSource {
+  uri: string;
+  title: string;
+}
+
+/**
+ * Present only when the model actually ran a search for this request — the
+ * `google_search` tool is a tool the model chooses to invoke, not a mode, so
+ * a question it could answer from the data already in the prompt comes back
+ * with no grounding at all (and, per Google's pricing, costs nothing extra).
+ * Callers use exactly that to tell "answered from the user's own data" apart
+ * from "answered from the web", which is the distinction that decides
+ * whether a reply needs the /view/search page (see webSearch.ts).
+ */
+export interface GroundingInfo {
+  /**
+   * Google's own pre-rendered "Search Suggestions" widget: HTML + CSS that
+   * Grounding with Google Search *requires* be displayed alongside any
+   * grounded answer. It cannot be shown in a LINE text message, which is the
+   * entire reason grounded answers get a web page instead of just a chat
+   * reply (PLAN.md 17.38). Rendered verbatim, not escaped — see
+   * viewSearchPage.ts, which is where that decision is documented.
+   */
+  searchEntryPointHtml: string | null;
+  sources: GroundingSource[];
+  queries: string[];
+}
+
+export interface GeminiResult {
+  text: string;
+  grounding: GroundingInfo | null;
+}
+
+function parseGrounding(candidate: NonNullable<GeminiResponse["candidates"]>[number]): GroundingInfo | null {
+  const metadata = candidate.groundingMetadata;
+  if (!metadata) return null;
+  const sources: GroundingSource[] = (metadata.groundingChunks ?? [])
+    .map((chunk) => ({ uri: chunk.web?.uri ?? "", title: chunk.web?.title ?? "" }))
+    .filter((s) => s.uri !== "");
+  const searchEntryPointHtml = metadata.searchEntryPoint?.renderedContent ?? null;
+  const queries = (metadata.webSearchQueries ?? []).filter((q) => typeof q === "string" && q.trim() !== "");
+  // Metadata with nothing usable in it is the same as no grounding — the
+  // model didn't actually reach the web for this answer.
+  if (!searchEntryPointHtml && sources.length === 0 && queries.length === 0) return null;
+  return { searchEntryPointHtml, sources, queries };
 }
 
 // One shared ceiling used to serve every call here, which meant it had to
@@ -45,9 +101,14 @@ interface GeminiResponse {
 // Raising a ceiling doesn't cost anything by itself — output tokens are
 // billed on what's actually generated, and a cap is not a reservation, so
 // a short answer stays exactly as cheap as it was.
+// - SEARCH is the grounded AI Q&A call (PLAN.md 17.38). An answer built from
+//   live web results carries more than one built from the user's own rows —
+//   the summary itself plus whatever the model quotes from its sources — and
+//   unlike the callers above there's no fixed input whose length bounds it.
 export const INTERPRETER_MAX_OUTPUT_TOKENS = 800;
 export const PERSONA_MAX_OUTPUT_TOKENS = 2000;
 export const ANSWER_MAX_OUTPUT_TOKENS = 1200;
+export const SEARCH_MAX_OUTPUT_TOKENS = 2000;
 
 export interface AskGeminiOptions {
   signal?: AbortSignal;
@@ -60,15 +121,47 @@ export interface AskGeminiOptions {
   // differ. The default only exists so the option stays optional; nothing
   // in this codebase relies on it.
   maxOutputTokens?: number;
+  // Hands the model the Google Search tool (PLAN.md 17.38). A tool, not a
+  // mode: the model decides per request whether the prompt already contains
+  // what it needs or whether it has to go and look, which is exactly the
+  // "search only when there's no data to answer from" behaviour this feature
+  // wanted — and why it's safe to leave switched on for every question,
+  // since Gemini bills per search actually executed, not per request that
+  // merely offered the tool. Never combined with jsonMode: the only JSON
+  // caller is the interpreter, which has nothing to look up.
+  googleSearch?: boolean;
 }
 
+/** Text only, for the callers that neither offer the search tool nor care
+ * about grounding metadata — every caller that predates PLAN.md 17.38. */
 export async function askGemini(
   apiKey: string,
   systemInstruction: string,
   userQuestion: string,
   options: AskGeminiOptions = {}
 ): Promise<string> {
-  const { signal, jsonMode, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
+  return (await callGemini(apiKey, systemInstruction, userQuestion, options)).text;
+}
+
+/** Same call with the Google Search tool offered, returning the grounding
+ * metadata alongside the text. `grounding` is null when the model answered
+ * without searching. */
+export async function askGeminiWithSearch(
+  apiKey: string,
+  systemInstruction: string,
+  userQuestion: string,
+  options: Omit<AskGeminiOptions, "googleSearch" | "jsonMode"> = {}
+): Promise<GeminiResult> {
+  return callGemini(apiKey, systemInstruction, userQuestion, { ...options, googleSearch: true });
+}
+
+async function callGemini(
+  apiKey: string,
+  systemInstruction: string,
+  userQuestion: string,
+  options: AskGeminiOptions = {}
+): Promise<GeminiResult> {
+  const { signal, jsonMode, googleSearch, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
   const res = await fetch(GEMINI_ENDPOINT, {
     method: "POST",
     headers: {
@@ -78,6 +171,7 @@ export async function askGemini(
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: systemInstruction }] },
       contents: [{ role: "user", parts: [{ text: userQuestion }] }],
+      ...(googleSearch ? { tools: [{ google_search: {} }] } : {}),
       // Keeps replies within LINE's comfortable message length without
       // relying on the model to police its own length.
       generationConfig: {
@@ -117,5 +211,5 @@ export async function askGemini(
   if (!text.trim()) {
     throw new GeminiError("Gemini returned an empty response");
   }
-  return text.trim();
+  return { text: text.trim(), grounding: candidate ? parseGrounding(candidate) : null };
 }

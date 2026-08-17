@@ -12,7 +12,9 @@
 
 import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { ANSWER_MAX_OUTPUT_TOKENS, askGemini, GeminiError } from "./gemini.ts";
+import { askGeminiWithSearch, GeminiError, SEARCH_MAX_OUTPUT_TOKENS } from "./gemini.ts";
+import { signViewToken } from "./signedState.ts";
+import { buildSearchChatReply, saveSearchResult } from "./webSearch.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
 import { readAllDiaryEntries, readAllTransactions, readShiftGrid, SHIFT_TYPES, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
@@ -204,7 +206,21 @@ function buildSystemInstruction(
     `ตารางเวรของผู้ใช้เดือน ${month} (จากตารางเวรที่ผู้ใช้ติ๊กไว้เอง แต่ละบรรทัดคือวันที่แล้วตามด้วยประเภทเวรที่ติ๊กในวันนั้น ใช้ข้อมูลชุดนี้เท่านั้นเวลาตอบคำถามเรื่องเวร ห้ามเดา):`,
     shiftLines.length > 0 ? shiftLines.join("\n") : "(ยังไม่ได้ติ๊กเวรไว้เลยเดือนนี้)",
     "",
-    "ถ้าคำถามต้องการข้อมูลที่ไม่มีในนี้ (เช่น นัดหมายนอกช่วงที่ให้มา) ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ แทนที่จะเดา",
+    // Web search (PLAN.md 17.38). The split below is the whole rule, and it
+    // matters in both directions. Personal data is never on the web, so
+    // searching for a question about this user's own money/appointments/
+    // diary/shifts could only ever produce a confident answer about someone
+    // else's life — the old "say you don't have enough data" behaviour stays
+    // exactly as it was for those. Everything else, the model was previously
+    // forced to refuse or answer from stale training data; now it can look.
+    "ถ้าคำถามเป็นเรื่องข้อมูลส่วนตัวของผู้ใช้ (เงิน นัดหมาย ไดอารี่ เวร) แล้วไม่มีอยู่ในข้อมูลที่ให้มาข้างบน ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ ห้ามเดา และห้ามใช้ Google Search หาข้อมูลส่วนตัวของผู้ใช้เด็ดขาด (เว็บไม่มีทางรู้ข้อมูลส่วนตัวของผู้ใช้)",
+    "ถ้าเป็นคำถามความรู้ทั่วไป ข่าวสาร ราคา หรือข้อมูลอะไรก็ตามที่ไม่ได้อยู่ในข้อมูลส่วนตัวข้างบน ให้ใช้ Google Search ค้นหาข้อมูลจริงมาตอบ ห้ามตอบจากความจำของโมเดลเอง",
+    // The chat only shows this first paragraph (buildAnswerPreview in
+    // webSearch.ts caps it); the rest lands on the /view/search page. Asking
+    // for a self-contained opener is what makes the preview read like an
+    // answer rather than a fragment — the cap is the backstop for when this
+    // isn't followed, not the plan.
+    "เวลาตอบจากผลการค้นหาเว็บ ให้ย่อหน้าแรกเป็นคำตอบสั้นๆ ที่จบในตัวเอง (2-3 ประโยค อ่านแล้วเข้าใจโดยไม่ต้องอ่านต่อ) แล้วค่อยขยายรายละเอียดในย่อหน้าถัดไป",
   ].join("\n");
 }
 
@@ -296,14 +312,76 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
     shiftGrid
   );
 
+  // The first timeout this call has ever had. It was already the only Gemini
+  // call in the codebase that could hang indefinitely, and offering the
+  // search tool makes a slow request meaningfully more likely — the model
+  // may run several real searches before it starts writing. Deliberately
+  // generous: this is a guard against hanging forever, not a latency target.
+  // A question is an explicit request where some waiting is expected, and a
+  // reply slow enough to lose its LINE reply token still reaches the user as
+  // a push (see replyOrPush in index.ts). Worth revisiting against real
+  // numbers once there are some.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), QUESTION_TIMEOUT_MS);
   try {
-    return await askGemini(ctx.geminiApiKey, systemInstruction, question, {
-      maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
+    const result = await askGeminiWithSearch(ctx.geminiApiKey, systemInstruction, question, {
+      signal: controller.signal,
+      maxOutputTokens: SEARCH_MAX_OUTPUT_TOKENS,
     });
+
+    // No grounding means the model answered from the data already in the
+    // prompt — an ordinary question about this account's own rows. That path
+    // is unchanged: the whole answer goes straight into the chat, with no
+    // page and no link, because there is nothing here Google requires be
+    // displayed and nothing a page would add.
+    if (!result.grounding) return result.text;
+
+    return await buildGroundedReply(ctx, question, result.text, result.grounding);
   } catch (err) {
-    console.error("askGemini failed", err);
+    console.error("answerQuestion failed", err);
     if (err instanceof GeminiError) return FALLBACK_MESSAGE;
+    // An aborted fetch throws a DOMException rather than a GeminiError, and
+    // a timed-out question should read the same to the user as a failed one.
+    if (controller.signal.aborted) return FALLBACK_MESSAGE;
     throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+const QUESTION_TIMEOUT_MS = 15000;
+
+// A grounded answer can't be delivered as one chat message: Google requires
+// its Search Suggestions be shown alongside it and those are HTML, so the
+// answer is stored, a short preview goes to the chat, and the link carries
+// the reader to the page that can display the rest (PLAN.md 17.38, see
+// webSearch.ts and viewSearchPage.ts).
+//
+// If storing or signing fails there is still a real answer in hand, so this
+// falls back to sending it as plain text rather than losing it. That reply
+// is missing the Search Suggestions, which is a compliance gap — but it only
+// happens when KV itself is failing, and dropping an answer the user asked
+// for is the worse outcome of the two.
+async function buildGroundedReply(
+  ctx: ActionCtx,
+  question: string,
+  answer: string,
+  grounding: NonNullable<Awaited<ReturnType<typeof askGeminiWithSearch>>["grounding"]>
+): Promise<string> {
+  try {
+    const id = await saveSearchResult(ctx.kv, ctx.lineUserId, {
+      question,
+      answer,
+      sources: grounding.sources,
+      searchEntryPointHtml: grounding.searchEntryPointHtml,
+      createdAtIso: new Date().toISOString(),
+    });
+    const token = await signViewToken(ctx.lineUserId, ctx.stateSigningSecret);
+    const pageUrl = `${ctx.origin}/view/search?token=${token}&id=${id}`;
+    return buildSearchChatReply(answer, pageUrl);
+  } catch (err) {
+    console.error("buildGroundedReply: storing the search result failed, sending the answer inline", err);
+    return answer;
   }
 }
 

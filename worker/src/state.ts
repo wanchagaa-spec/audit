@@ -123,6 +123,15 @@ export interface ActionCtx {
   lineUserId: string;
   spreadsheetId: string;
   geminiApiKey: string;
+  // Both added for web search (PLAN.md 17.38), which is the first handler
+  // that has to hand the user a link back into this Worker rather than just
+  // text: a grounded answer's chat reply carries a /view/search URL, and
+  // minting one needs the request's own origin plus the secret that signs
+  // view tokens. Every ActionCtx is built in one place (index.ts's
+  // makeActionCtxFactory), so this is filled in once for every handler
+  // rather than threaded through the ones that don't need it.
+  origin: string;
+  stateSigningSecret: string;
 }
 
 // The morning briefing (PLAN.md 15.11) needs to know which calendar day a

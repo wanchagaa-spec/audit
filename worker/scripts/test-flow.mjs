@@ -122,6 +122,7 @@ let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling 
 let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
 let simulatePersonaDropLink = false; // one-shot: same idea for a URL — the travel/places replies carry no quoted spans at all, so links need their own coverage
 let simulateGeminiTruncation = false; // one-shot: makes the next non-interpreter Gemini call return a *successful* 200 whose text was cut off at the token ceiling (finishReason MAX_TOKENS), the failure that used to be indistinguishable from a complete answer
+let simulateGroundedAnswer = false; // one-shot: makes the next AI Q&A call come back with groundingMetadata, i.e. the model went and searched the web (PLAN.md 17.38) rather than answering from the user's own data
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
@@ -678,6 +679,7 @@ globalThis.fetch = async (url, init = {}) => {
         question,
         apiKey: init.headers?.["x-goog-api-key"],
         maxOutputTokens: body.generationConfig?.maxOutputTokens,
+        hasGoogleSearchTool: Boolean(body.tools?.some((t) => "google_search" in t)),
       });
       if (simulateInterpreterTruncation) {
         simulateInterpreterTruncation = false;
@@ -715,6 +717,7 @@ globalThis.fetch = async (url, init = {}) => {
       question,
       apiKey: init.headers?.["x-goog-api-key"],
       maxOutputTokens: body.generationConfig?.maxOutputTokens,
+      hasGoogleSearchTool: Boolean(body.tools?.some((t) => "google_search" in t)),
     });
 
     // A 200 carrying real-looking but incomplete text — exactly what the
@@ -766,6 +769,40 @@ globalThis.fetch = async (url, init = {}) => {
         );
       }
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: question }] } }] }), { status: 200 });
+    }
+
+    // A grounded answer (PLAN.md 17.38) — the model chose to run a search,
+    // so the response carries groundingMetadata: the sources it used and
+    // Google's Search Suggestions widget, which is HTML that has to be
+    // rendered rather than escaped. Deliberately long and multi-paragraph so
+    // tests can tell the chat preview apart from the full page text.
+    if (simulateGroundedAnswer) {
+      simulateGroundedAnswer = false;
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: `นายกรัฐมนตรีคนปัจจุบันตอบจากผลค้นหาจริงนะคะ\n\nรายละเอียดเพิ่มเติมย่อหน้าที่สอง ${"ก".repeat(400)}`,
+                  },
+                ],
+              },
+              finishReason: "STOP",
+              groundingMetadata: {
+                searchEntryPoint: { renderedContent: '<style>.gsc{color:red}</style><div class="gsc">ค้นหาต่อ</div>' },
+                groundingChunks: [
+                  { web: { uri: "https://example.com/a", title: "แหล่งข่าว ก" } },
+                  { web: { uri: "https://example.com/b", title: "แหล่งข่าว <ข>" } },
+                ],
+                webSearchQueries: ["นายกรัฐมนตรีไทยคนปัจจุบัน"],
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
     }
 
     // A canned (not truly AI-generated) answer that echoes the question back,
@@ -1946,14 +1983,23 @@ check(
 const lastRequestWhere = (predicate) => [...geminiRequests].reverse().find(predicate);
 const lastInterpreterRequest = lastRequestWhere((r) => r.systemInstruction.includes(INTERPRETER_MARKER));
 const lastPersonaRequest = lastRequestWhere((r) => r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข"));
-const lastAnswerRequest = lastRequestWhere(
-  (r) => !r.systemInstruction.includes(INTERPRETER_MARKER) && !r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข")
-);
+// The AI Q&A call carries the Google Search tool (PLAN.md 17.38) and so
+// gets its own, larger ceiling than the plain prose callers (news, the diary
+// reflection) that share ANSWER_MAX_OUTPUT_TOKENS.
+const lastQuestionRequest = lastRequestWhere((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน"));
+const lastNewsRequest = lastRequestWhere((r) => r.systemInstruction.includes("ช่วยสรุปข่าว"));
 check(
   "each Gemini caller sends its own output ceiling rather than one shared value",
   lastInterpreterRequest?.maxOutputTokens === 800 &&
     lastPersonaRequest?.maxOutputTokens === 2000 &&
-    lastAnswerRequest?.maxOutputTokens === 1200
+    lastQuestionRequest?.maxOutputTokens === 2000 &&
+    lastNewsRequest?.maxOutputTokens === 1200
+);
+check(
+  "only the AI Q&A call offers the Google Search tool — the interpreter and persona never do",
+  lastQuestionRequest?.hasGoogleSearchTool === true &&
+    lastInterpreterRequest?.hasGoogleSearchTool === false &&
+    lastPersonaRequest?.hasGoogleSearchTool === false
 );
 // Clean up the dangling pendingConfirmation this created directly (rather
 // than through a chat message, which would have side effects of its own),
@@ -3634,6 +3680,83 @@ const viewUnlinkedResponse = await worker.fetch(new Request(`${origin}/view?toke
 check(
   "a view token for an account that never linked shows a friendly prompt to link first",
   viewUnlinkedResponse.status === 400 && (await viewUnlinkedResponse.text()).includes("ยังไม่ได้เชื่อมบัญชี")
+);
+
+// ---- Web search (PLAN.md 17.38) -------------------------------------------
+// A question the model answers by searching can't be delivered as one chat
+// message: Google requires the Search Suggestions that come back with a
+// grounded answer be displayed alongside it, and they're HTML. So the chat
+// gets a short preview plus a link, and /view/search carries the rest.
+
+simulateGroundedAnswer = true;
+const groundedReply = await handleTextMessage(env, lineUserId, "ถาม นายกรัฐมนตรีไทยคนปัจจุบันคือใคร", origin);
+const searchPageMatch = groundedReply.match(/https?:\/\/\S+\/view\/search\?token=\S+/);
+check("a grounded answer replies with a link to /view/search", searchPageMatch !== null);
+check(
+  "the chat gets a short preview, not the whole answer",
+  groundedReply.includes("ตอบจากผลค้นหาจริง") &&
+    !groundedReply.includes("รายละเอียดเพิ่มเติมย่อหน้าที่สอง") &&
+    groundedReply.length < 600
+);
+
+const searchPageResponse = await worker.fetch(new Request(searchPageMatch[0]), env, new FakeExecutionContext());
+const searchPageHtml = await searchPageResponse.text();
+check("the /view/search page opens", searchPageResponse.status === 200);
+check(
+  "it shows the question and the full answer, both paragraphs",
+  searchPageHtml.includes("นายกรัฐมนตรีไทยคนปัจจุบันคือใคร") &&
+    searchPageHtml.includes("ตอบจากผลค้นหาจริง") &&
+    searchPageHtml.includes("รายละเอียดเพิ่มเติมย่อหน้าที่สอง")
+);
+check(
+  "it lists every source the answer drew on, as real links",
+  searchPageHtml.includes('href="https://example.com/a"') && searchPageHtml.includes('href="https://example.com/b"')
+);
+// The compliance requirement this whole two-surface design exists for:
+// Google's Search Suggestions widget arrives as HTML+CSS and has to be
+// rendered as markup, not printed as text.
+check(
+  "Google's Search Suggestions widget is rendered as live markup, not escaped into text",
+  searchPageHtml.includes('<div class="gsc">ค้นหาต่อ</div>') && !searchPageHtml.includes("&lt;div class=&quot;gsc&quot;")
+);
+// ...while everything the model produced is still escaped, including a
+// source title containing angle brackets.
+check(
+  "a source title containing markup is still escaped",
+  searchPageHtml.includes("แหล่งข่าว &lt;ข&gt;") && !searchPageHtml.includes("แหล่งข่าว <ข>")
+);
+
+// A stored result belongs to the account that produced it: the id is only
+// meaningful when paired with that account's own token.
+const otherSubjectToken = await signViewToken("Usomeoneelse", env.STATE_SIGNING_SECRET);
+const storedId = new URL(searchPageMatch[0]).searchParams.get("id");
+const foreignSearchResponse = await worker.fetch(
+  new Request(`${origin}/view/search?token=${otherSubjectToken}&id=${storedId}`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "another account's token cannot read this search result, even with the exact id",
+  foreignSearchResponse.status === 404
+);
+
+const missingSearchResponse = await worker.fetch(
+  new Request(`${origin}/view/search?token=${viewToken}&id=does-not-exist`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "an expired or unknown result id shows a friendly page explaining it, not a crash",
+  missingSearchResponse.status === 404 && (await missingSearchResponse.text()).includes("หมดอายุ")
+);
+
+// The ordinary case must be untouched: a question the model answers from the
+// account's own rows never searched, so there is nothing Google requires be
+// displayed and no reason to make the user tap through to a page.
+const ungroundedReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+check(
+  "a question answered from the user's own data still replies in full in the chat, with no link",
+  ungroundedReply.includes("[mock AI answer]") && !ungroundedReply.includes("/view/search")
 );
 
 // Regression test for the exact hijack scenario signedState.ts's top
