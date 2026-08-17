@@ -203,6 +203,13 @@ understands, nothing new to build on the LINE side.
 3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
    the previous menu of the same name first, so it's safe to run repeatedly.
 
+The workflow checks out `main` explicitly, whatever branch you dispatch it from. It
+publishes straight to the live LINE account with no staging step, so a run from an old
+branch would replace the real menu with that branch's version **and still finish green** —
+which is exactly what happened once, with nothing to show for it but a branch name on the
+run. The script also prints the tile list before publishing, so the log says what it did
+rather than only that it worked.
+
 Three tiles in a single row (LINE's "compact" rich menu size): วิธีใช้ (help), เปิดเว็บดูข้อมูล
 (web viewer link, PLAN.md 16), and ตั้งค่า (settings page, PLAN.md 17.48). It has been as large
 as a full-size 4x2 grid; รายการล่าสุด and สรุปเดือนนี้ held the last two slots until 17.50 and gave

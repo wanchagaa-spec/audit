@@ -55,6 +55,16 @@ async function lineFetch(base, path, init = {}) {
   return res;
 }
 
+// 0. Say what is about to be published. The run that prompted this printed
+// nothing but "Created rich menu <id>" and finished green while replacing
+// the live menu with a stale branch's version (PLAN.md 17.51) — a success
+// message that doesn't say *what* succeeded can't tell you it did the wrong
+// thing.
+console.log(
+  `Publishing ${richMenuDefinition.areas.length} tiles: ` +
+    richMenuDefinition.areas.map((a) => a.action.text).join(" | ")
+);
+
 // 1. Clean up any menu(s) from previous runs so re-running this script after
 // changing the design doesn't pile up unused rich menus.
 const list = await (await lineFetch("https://api.line.me", "/v2/bot/richmenu/list")).json();

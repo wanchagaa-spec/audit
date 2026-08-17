@@ -10,7 +10,15 @@ jobs:
       run:
         working-directory: worker
     steps:
+      # Pinned to main, not the branch this was dispatched from (PLAN.md
+      # 17.51). This publishes straight to the live LINE account — there is
+      # no staging menu — so running it from an old branch quietly replaces
+      # the real menu with that branch's version and still finishes green.
+      # That happened: three runs from a months-old branch kept restoring the
+      # four-tile menu, and the only clue was the branch name on the run.
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: 22
