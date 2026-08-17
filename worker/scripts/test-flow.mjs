@@ -17,6 +17,10 @@ class FakeKV {
       simulateQueuePutFailureOnce = false;
       throw new Error("simulated KV put failure");
     }
+    if (simulateSearchResultPutFailureOnce && key.startsWith("search-result:")) {
+      simulateSearchResultPutFailureOnce = false;
+      throw new Error("simulated KV put failure");
+    }
     this.store.set(key, value);
     if (options.metadata) this.metadataStore.set(key, options.metadata);
     else this.metadataStore.delete(key);
@@ -123,6 +127,7 @@ let simulatePersonaDropQuote = false; // one-shot: makes the next persona-stylin
 let simulatePersonaDropLink = false; // one-shot: same idea for a URL — the travel/places replies carry no quoted spans at all, so links need their own coverage
 let simulateGeminiTruncation = false; // one-shot: makes the next non-interpreter Gemini call return a *successful* 200 whose text was cut off at the token ceiling (finishReason MAX_TOKENS), the failure that used to be indistinguishable from a complete answer
 let simulateGroundedAnswer = false; // one-shot: makes the next AI Q&A call come back with groundingMetadata, i.e. the model went and searched the web (PLAN.md 17.38) rather than answering from the user's own data
+let simulateSearchResultPutFailureOnce = false; // one-shot: fails the KV write that stores a grounded answer, leaving a real answer with nowhere permitted to display it
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
@@ -3692,11 +3697,14 @@ simulateGroundedAnswer = true;
 const groundedReply = await handleTextMessage(env, lineUserId, "ถาม นายกรัฐมนตรีไทยคนปัจจุบันคือใคร", origin);
 const searchPageMatch = groundedReply.match(/https?:\/\/\S+\/view\/search\?token=\S+/);
 check("a grounded answer replies with a link to /view/search", searchPageMatch !== null);
+// Not one word of the answer goes in the chat: a grounded result shown
+// without the Search Suggestions that came with it is the thing this design
+// exists to avoid, and a preview would have been exactly that.
 check(
-  "the chat gets a short preview, not the whole answer",
-  groundedReply.includes("ตอบจากผลค้นหาจริง") &&
+  "the chat carries only the link — no part of the grounded answer",
+  !groundedReply.includes("ตอบจากผลค้นหาจริง") &&
     !groundedReply.includes("รายละเอียดเพิ่มเติมย่อหน้าที่สอง") &&
-    groundedReply.length < 600
+    groundedReply.includes("ค้นหาให้แล้ว")
 );
 
 const searchPageResponse = await worker.fetch(new Request(searchPageMatch[0]), env, new FakeExecutionContext());
@@ -3748,6 +3756,20 @@ const missingSearchResponse = await worker.fetch(
 check(
   "an expired or unknown result id shows a friendly page explaining it, not a crash",
   missingSearchResponse.status === 404 && (await missingSearchResponse.text()).includes("หมดอายุ")
+);
+
+// When the page can't be created there is a real answer in hand and nowhere
+// permitted to put it. It must not fall back to sending the answer inline —
+// that would be a grounded result with no Search Suggestions, the one thing
+// the page exists to prevent.
+simulateGroundedAnswer = true;
+simulateSearchResultPutFailureOnce = true;
+const unstorableReply = await handleTextMessage(env, lineUserId, "ถาม นายกรัฐมนตรีไทยคนปัจจุบันคือใคร", origin);
+check(
+  "if the result can't be stored, the answer is not leaked into the chat instead",
+  !unstorableReply.includes("ตอบจากผลค้นหาจริง") &&
+    !unstorableReply.includes("/view/search") &&
+    unstorableReply.includes("ระบบ AI ขัดข้อง")
 );
 
 // The ordinary case must be untouched: a question the model answers from the

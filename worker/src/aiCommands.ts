@@ -215,11 +215,10 @@ function buildSystemInstruction(
     // forced to refuse or answer from stale training data; now it can look.
     "ถ้าคำถามเป็นเรื่องข้อมูลส่วนตัวของผู้ใช้ (เงิน นัดหมาย ไดอารี่ เวร) แล้วไม่มีอยู่ในข้อมูลที่ให้มาข้างบน ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ ห้ามเดา และห้ามใช้ Google Search หาข้อมูลส่วนตัวของผู้ใช้เด็ดขาด (เว็บไม่มีทางรู้ข้อมูลส่วนตัวของผู้ใช้)",
     "ถ้าเป็นคำถามความรู้ทั่วไป ข่าวสาร ราคา หรือข้อมูลอะไรก็ตามที่ไม่ได้อยู่ในข้อมูลส่วนตัวข้างบน ให้ใช้ Google Search ค้นหาข้อมูลจริงมาตอบ ห้ามตอบจากความจำของโมเดลเอง",
-    // The chat only shows this first paragraph (buildAnswerPreview in
-    // webSearch.ts caps it); the rest lands on the /view/search page. Asking
-    // for a self-contained opener is what makes the preview read like an
-    // answer rather than a fragment — the cap is the backstop for when this
-    // isn't followed, not the plan.
+    // Nothing in the chat depends on this any more (the chat gets the link
+    // alone — see buildSearchChatReply), but it still shapes the page well:
+    // a reader who has just tapped through wants the answer in the first
+    // line, not after three paragraphs of preamble.
     "เวลาตอบจากผลการค้นหาเว็บ ให้ย่อหน้าแรกเป็นคำตอบสั้นๆ ที่จบในตัวเอง (2-3 ประโยค อ่านแล้วเข้าใจโดยไม่ต้องอ่านต่อ) แล้วค่อยขยายรายละเอียดในย่อหน้าถัดไป",
   ].join("\n");
 }
@@ -351,17 +350,19 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
 
 const QUESTION_TIMEOUT_MS = 15000;
 
-// A grounded answer can't be delivered as one chat message: Google requires
-// its Search Suggestions be shown alongside it and those are HTML, so the
-// answer is stored, a short preview goes to the chat, and the link carries
-// the reader to the page that can display the rest (PLAN.md 17.38, see
-// webSearch.ts and viewSearchPage.ts).
+// A grounded answer can't be delivered as a chat message at all: Google
+// requires its Search Suggestions be shown alongside it and those are HTML,
+// so the answer is stored and the chat gets only the link to the page that
+// can display it (PLAN.md 17.38, see webSearch.ts and viewSearchPage.ts).
 //
-// If storing or signing fails there is still a real answer in hand, so this
-// falls back to sending it as plain text rather than losing it. That reply
-// is missing the Search Suggestions, which is a compliance gap — but it only
-// happens when KV itself is failing, and dropping an answer the user asked
-// for is the worse outcome of the two.
+// If storing or signing fails there is a real answer in hand and nowhere
+// permitted to put it, so this says the search failed rather than sending
+// the answer inline. That loses an answer the user asked for, which is a
+// genuine cost — but sending it would be displaying a grounded result with
+// no Search Suggestions, the exact thing this whole two-surface design
+// exists to avoid, and "sometimes we do it anyway when KV hiccups" is not a
+// rule anyone can rely on. Rare enough to be the right trade: it takes KV
+// itself failing, and the user can simply ask again.
 async function buildGroundedReply(
   ctx: ActionCtx,
   question: string,
@@ -378,10 +379,10 @@ async function buildGroundedReply(
     });
     const token = await signViewToken(ctx.lineUserId, ctx.stateSigningSecret);
     const pageUrl = `${ctx.origin}/view/search?token=${token}&id=${id}`;
-    return buildSearchChatReply(answer, pageUrl);
+    return buildSearchChatReply(pageUrl);
   } catch (err) {
-    console.error("buildGroundedReply: storing the search result failed, sending the answer inline", err);
-    return answer;
+    console.error("buildGroundedReply: storing the search result failed, no page to link to", err);
+    return FALLBACK_MESSAGE;
   }
 }
 

@@ -61,34 +61,25 @@ export async function getSearchResult(
   return raw ? (JSON.parse(raw) as StoredSearchResult) : null;
 }
 
-// Long enough for a real answer to a real question, short enough that the
-// chat stays a chat. Anything past this lives on the page.
-const CHAT_PREVIEW_MAX_CHARS = 300;
-
-/** The part of a grounded answer that goes in the chat message. Takes the
- * first paragraph — the system instruction asks for a self-contained one —
- * and caps it, rather than trusting that instruction to have been followed.
- * Same verify-don't-trust habit as persona.ts's quoted-span and link checks:
- * a model told to be brief usually is, and this is what happens when it
- * isn't. */
-export function buildAnswerPreview(answer: string): string {
-  const firstParagraph = answer.split(/\n\s*\n/)[0].trim() || answer.trim();
-  if (firstParagraph.length <= CHAT_PREVIEW_MAX_CHARS) return firstParagraph;
-  // A hard cut, not a word-boundary one: Thai doesn't put spaces between
-  // words, so there's no boundary to find for the text this mostly handles.
-  // The ellipsis plus the link below it makes the truncation obvious rather
-  // than something the reader has to notice.
-  return `${firstParagraph.slice(0, CHAT_PREVIEW_MAX_CHARS).trimEnd()}…`;
-}
-
-/** The whole chat reply for a grounded answer: the preview, then the link to
- * the full thing. The link is not optional decoration — it is where the
- * sources and Google's Search Suggestions live, which is what makes showing
- * this answer permitted at all. */
-export function buildSearchChatReply(answer: string, pageUrl: string): string {
+/**
+ * The chat reply for a grounded answer: the link, and nothing of the answer
+ * itself.
+ *
+ * An earlier version led with a short preview of the answer. Chosen against
+ * (by the user, and it's the better call on the merits too): a preview *is*
+ * grounded output, and showing grounded output without the Search
+ * Suggestions that came with it is exactly what Grounding with Google Search
+ * doesn't allow. Keeping every word of the answer on the one surface that
+ * can display the widget makes the rule easy to hold rather than something
+ * to reason about case by case — and it removes the question of what a
+ * half-shown answer does to a reader who never taps through.
+ *
+ * Nothing here is derived from the model's output, so there is nothing to
+ * verify: the URL is built from an id this codebase generated.
+ */
+export function buildSearchChatReply(pageUrl: string): string {
   return [
-    `🔎 ${buildAnswerPreview(answer)}`,
-    "",
-    `อ่านคำตอบเต็มๆ พร้อมแหล่งอ้างอิงที่นี่ (ลิงก์ใช้ได้ 1 ชั่วโมง):\n${pageUrl}`,
+    "🔎 ค้นหาให้แล้ว กดดูคำตอบพร้อมแหล่งอ้างอิงได้เลย (ลิงก์ใช้ได้ 1 ชั่วโมง):",
+    pageUrl,
   ].join("\n");
 }
