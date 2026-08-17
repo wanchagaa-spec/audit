@@ -12,7 +12,13 @@
 
 import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { askGeminiWithSearch, GeminiError, SEARCH_MAX_OUTPUT_TOKENS } from "./gemini.ts";
+import {
+  ANSWER_MAX_OUTPUT_TOKENS,
+  askGemini,
+  askGeminiWithSearch,
+  GeminiError,
+  SEARCH_MAX_OUTPUT_TOKENS,
+} from "./gemini.ts";
 import { signViewToken } from "./signedState.ts";
 import { buildSearchChatReply, isAnswerShortEnoughForChat, saveSearchResult } from "./webSearch.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
@@ -30,8 +36,14 @@ const CALENDAR_LOOKAHEAD_DAYS = 30;
 type Handler = (ctx: ActionCtx) => Promise<string>;
 
 const USAGE_HINT = 'พิมพ์คำถามต่อท้ายด้วยนะ เช่น "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด"';
+// Names no cause, on purpose. The old wording guessed at one ("ระบบ AI
+// ขัดข้องหรือโควตาฟรีเต็มพอดี") and guessed wrong during a real incident: a
+// rejected search tool showed up to the user as a quota problem, and the
+// first thing anyone did was go and check a quota that was fine. A message
+// that says only what is actually known sends people to the logs, where the
+// real error has been waiting all along.
 const FALLBACK_MESSAGE =
-  "ขอโทษด้วย ตอนนี้ระบบ AI ขัดข้องหรือโควตาฟรีเต็มพอดี ลองใหม่อีกครั้งในอีกสักครู่นะ";
+  "ขอโทษด้วย ตอบคำถามนี้ไม่สำเร็จตอนนี้ ลองใหม่อีกครั้งในอีกสักครู่นะ ถ้ายังไม่หายให้แจ้งผู้ดูแลบอทดู";
 
 // Caps how many individual rows go into the prompt — a month's worth of
 // transactions/diary entries is normally well under this, but an unusually
@@ -152,7 +164,13 @@ function buildSystemInstruction(
   diaryRows: DiaryRow[],
   calendarEvents: CalendarEventSummary[] | null,
   calendarRangeLabel: string,
-  shiftGrid: ShiftGrid
+  shiftGrid: ShiftGrid,
+  // False on the retry that runs without the Google Search tool (see
+  // askQuestionModel). Telling a model to go and search when it has no
+  // search tool doesn't just waste the instruction — it invites a reply
+  // about being unable to look things up, instead of the honest "I don't
+  // have that" this file asked for before search existed at all.
+  canSearch: boolean
 ): string {
   const { income, expense } = totals(txRows);
   const top = topCategories(txRows);
@@ -213,13 +231,19 @@ function buildSystemInstruction(
     // else's life — the old "say you don't have enough data" behaviour stays
     // exactly as it was for those. Everything else, the model was previously
     // forced to refuse or answer from stale training data; now it can look.
-    "ถ้าคำถามเป็นเรื่องข้อมูลส่วนตัวของผู้ใช้ (เงิน นัดหมาย ไดอารี่ เวร) แล้วไม่มีอยู่ในข้อมูลที่ให้มาข้างบน ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ ห้ามเดา และห้ามใช้ Google Search หาข้อมูลส่วนตัวของผู้ใช้เด็ดขาด (เว็บไม่มีทางรู้ข้อมูลส่วนตัวของผู้ใช้)",
-    "ถ้าเป็นคำถามความรู้ทั่วไป ข่าวสาร ราคา หรือข้อมูลอะไรก็ตามที่ไม่ได้อยู่ในข้อมูลส่วนตัวข้างบน ให้ใช้ Google Search ค้นหาข้อมูลจริงมาตอบ ห้ามตอบจากความจำของโมเดลเอง",
-    // Nothing in the chat depends on this any more (the chat gets the link
-    // alone — see buildSearchChatReply), but it still shapes the page well:
-    // a reader who has just tapped through wants the answer in the first
-    // line, not after three paragraphs of preamble.
-    "เวลาตอบจากผลการค้นหาเว็บ ให้ย่อหน้าแรกเป็นคำตอบสั้นๆ ที่จบในตัวเอง (2-3 ประโยค อ่านแล้วเข้าใจโดยไม่ต้องอ่านต่อ) แล้วค่อยขยายรายละเอียดในย่อหน้าถัดไป",
+    ...(canSearch
+      ? [
+          "ถ้าคำถามเป็นเรื่องข้อมูลส่วนตัวของผู้ใช้ (เงิน นัดหมาย ไดอารี่ เวร) แล้วไม่มีอยู่ในข้อมูลที่ให้มาข้างบน ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ ห้ามเดา และห้ามใช้ Google Search หาข้อมูลส่วนตัวของผู้ใช้เด็ดขาด (เว็บไม่มีทางรู้ข้อมูลส่วนตัวของผู้ใช้)",
+          "ถ้าเป็นคำถามความรู้ทั่วไป ข่าวสาร ราคา หรือข้อมูลอะไรก็ตามที่ไม่ได้อยู่ในข้อมูลส่วนตัวข้างบน ให้ใช้ Google Search ค้นหาข้อมูลจริงมาตอบ ห้ามตอบจากความจำของโมเดลเอง",
+          // Only matters for a long answer, which is the one case the chat
+          // shows a lead paragraph of before linking to the rest — and it
+          // reads better on the page either way.
+          "เวลาตอบจากผลการค้นหาเว็บ ให้ย่อหน้าแรกเป็นคำตอบสั้นๆ ที่จบในตัวเอง (2-3 ประโยค อ่านแล้วเข้าใจโดยไม่ต้องอ่านต่อ) แล้วค่อยขยายรายละเอียดในย่อหน้าถัดไป",
+        ]
+      : // Exactly the rule this file used before search existed. The
+        // account's own data still answers most questions, and saying so
+        // honestly is far better than the whole feature going dark.
+        ["ถ้าคำถามต้องการข้อมูลที่ไม่มีในนี้ (เช่น นัดหมายนอกช่วงที่ให้มา) ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ แทนที่จะเดา"]),
   ].join("\n");
 }
 
@@ -300,16 +324,18 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
 
   const monthTx = allTx.filter((r) => r.date?.startsWith(month));
   const monthDiary = allDiary.filter((r) => r.date?.startsWith(month));
-  const systemInstruction = buildSystemInstruction(
-    formatThaiDateLabel(today),
-    weatherLine,
-    month,
-    monthTx,
-    monthDiary,
-    calendarEvents,
-    calendarRangeLabel,
-    shiftGrid
-  );
+  const instructionFor = (canSearch: boolean) =>
+    buildSystemInstruction(
+      formatThaiDateLabel(today),
+      weatherLine,
+      month,
+      monthTx,
+      monthDiary,
+      calendarEvents,
+      calendarRangeLabel,
+      shiftGrid,
+      canSearch
+    );
 
   // The first timeout this call has ever had. It was already the only Gemini
   // call in the codebase that could hang indefinitely, and offering the
@@ -323,10 +349,7 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), QUESTION_TIMEOUT_MS);
   try {
-    const result = await askGeminiWithSearch(ctx.geminiApiKey, systemInstruction, question, {
-      signal: controller.signal,
-      maxOutputTokens: SEARCH_MAX_OUTPUT_TOKENS,
-    });
+    const result = await askQuestionModel(ctx, instructionFor, question, controller.signal);
 
     // No grounding means the model answered from the data already in the
     // prompt — an ordinary question about this account's own rows. That path
@@ -349,6 +372,63 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
 }
 
 const QUESTION_TIMEOUT_MS = 15000;
+
+/**
+ * The Q&A call, offering the Google Search tool — and, if that specific call
+ * is rejected, one more attempt without it.
+ *
+ * Written after a real production failure. Adding the tool put it on *every*
+ * question, including the ones about the account's own rows that had worked
+ * for months, so when Gemini refused the tool-bearing request outright the
+ * whole Q&A feature went dark: "ใช้จ่ายหมวดไหนเยอะสุด" started failing
+ * alongside the web questions it was meant to enable. Everything else kept
+ * working, which is what made it confusing — the interpreter and persona
+ * calls send no tools and were never affected.
+ *
+ * A retry without the tool is the honest floor. Whatever the reason the
+ * grounded call can't be served — a model that doesn't offer search, a key
+ * without the entitlement, a grounding-specific quota — the account's own
+ * data still answers most questions, and answering those is strictly better
+ * than failing all of them. The same degrade-never-dead-end shape as the
+ * rest of this codebase: an AI hiccup drops to the deterministic matchers, a
+ * persona failure sends unstyled text, a travel price lookup falls back to
+ * links.
+ *
+ * Narrow on purpose — only a 4xx, which is the API refusing the request as
+ * sent, and the shape every "this tool isn't available to you" answer takes
+ * (400 unsupported, 403 no entitlement, 429 grounding quota). Explicitly not
+ * retried:
+ *   - 5xx, a server hiccup that says nothing about the tool. Quietly
+ *     downgrading search on every blip would hide a passing outage.
+ *   - a truncated or empty response, where the request was fine and the
+ *     answer wasn't (GeminiError carries no status for those).
+ *   - a timeout, where the second attempt would spend what's left of the
+ *     same budget and most likely time out too.
+ */
+async function askQuestionModel(
+  ctx: ActionCtx,
+  instructionFor: (canSearch: boolean) => string,
+  question: string,
+  signal: AbortSignal
+): Promise<{ text: string; grounding: Awaited<ReturnType<typeof askGeminiWithSearch>>["grounding"] }> {
+  try {
+    return await askGeminiWithSearch(ctx.geminiApiKey, instructionFor(true), question, {
+      signal,
+      maxOutputTokens: SEARCH_MAX_OUTPUT_TOKENS,
+    });
+  } catch (err) {
+    const rejected = err instanceof GeminiError && err.status !== undefined && err.status >= 400 && err.status < 500;
+    if (signal.aborted || !rejected) throw err;
+    console.error("answerQuestion: the grounded call was rejected, retrying without the search tool", err);
+    // A fresh instruction, not the same one: the search rules are dropped so
+    // the model doesn't promise to look something up it now has no way to.
+    const text = await askGemini(ctx.geminiApiKey, instructionFor(false), question, {
+      signal,
+      maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
+    });
+    return { text, grounding: null };
+  }
+}
 
 // Length decides where a grounded answer goes (PLAN.md 17.38). A short one
 // — the common case, since most questions want a fact rather than an essay —

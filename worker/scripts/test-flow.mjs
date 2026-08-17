@@ -129,6 +129,7 @@ let simulateGeminiTruncation = false; // one-shot: makes the next non-interprete
 let simulateGroundedAnswer = false; // one-shot: next AI Q&A call comes back grounded (the model searched the web, PLAN.md 17.38) with a LONG answer — long enough that it belongs on /view/search rather than in the chat
 let simulateShortGroundedAnswer = false; // one-shot: same, but with a short answer — the common case, which goes straight into the chat with no page and nothing stored
 let simulateSearchResultPutFailureOnce = false; // one-shot: fails the KV write that stores a grounded answer, leaving a real answer with nowhere permitted to display it
+let simulateGroundingRejected = false; // one-shot: Gemini refuses any request carrying the google_search tool with a 400 — the real production failure, where a model that doesn't serve the tool took the whole Q&A feature down with it
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
@@ -775,6 +776,16 @@ globalThis.fetch = async (url, init = {}) => {
         );
       }
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: question }] } }] }), { status: 200 });
+    }
+
+    // Cleared as soon as it fires, so the retry that follows — which sends
+    // no tools — goes through the normal path below and succeeds.
+    if (simulateGroundingRejected && body.tools?.some((t) => "google_search" in t)) {
+      simulateGroundingRejected = false;
+      return new Response(
+        JSON.stringify({ error: { code: 400, message: "Search Grounding is not supported for this model." } }),
+        { status: 400 }
+      );
     }
 
     // A grounded answer (PLAN.md 17.38) — the model chose to run a search,
@@ -2002,7 +2013,7 @@ simulateGeminiTruncation = true;
 const answerTruncatedReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
 check(
   "a truncated AI answer shows the honest fallback message instead of a sentence that stops mid-thought",
-  answerTruncatedReply.includes("ระบบ AI ขัดข้อง")
+  answerTruncatedReply.includes("ตอบคำถามนี้ไม่สำเร็จ")
 );
 
 // The ceilings differ per caller now (gemini.ts) — one shared number had to
@@ -3506,7 +3517,7 @@ simulateFinanceNewsFetchFailure = true;
 const financeNewsFailureReply = await handleTextMessage(env, lineUserId, "ถาม ราคาบิตคอยน์วันนี้", origin);
 check(
   "a finance-news RSS failure degrades to the friendly fallback, not a crash",
-  financeNewsFailureReply.includes("ระบบ AI ขัดข้อง")
+  financeNewsFailureReply.includes("ตอบคำถามนี้ไม่สำเร็จ")
 );
 
 // Market-data fetches are independent of the RSS fetch and of each other —
@@ -3548,7 +3559,7 @@ simulateNewsFetchFailure = true;
 const domesticNewsFailureReply = await handleTextMessage(env, lineUserId, "ถาม ข่าวเช้านี้มีอะไรบ้าง", origin);
 check(
   "a domestic-news RSS failure degrades to the friendly fallback, not a crash",
-  domesticNewsFailureReply.includes("ระบบ AI ขัดข้อง")
+  domesticNewsFailureReply.includes("ตอบคำถามนี้ไม่สำเร็จ")
 );
 
 const aiAnalyzeReply = await handleTextMessage(env, lineUserId, "วิเคราะห์", origin);
@@ -3561,7 +3572,7 @@ simulateGeminiFailure = true;
 const aiFailureReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
 check(
   "a Gemini failure (quota/error) surfaces as a friendly fallback message, not a crash",
-  aiFailureReply.includes("ระบบ AI ขัดข้อง")
+  aiFailureReply.includes("ตอบคำถามนี้ไม่สำเร็จ")
 );
 
 const aiPhraseOverlapReply = await handleTextMessage(env, lineUserId, "ถาม หมวดไหนใช้เงินเยอะที่สุด", origin);
@@ -3811,6 +3822,29 @@ const ungroundedReply = await handleTextMessage(env, lineUserId, "ถาม เ�
 check(
   "a question answered from the user's own data still replies in full in the chat, with no link",
   ungroundedReply.includes("[mock AI answer]") && !ungroundedReply.includes("/view/search")
+);
+
+// Regression test for a real production failure. Offering the search tool
+// put it on *every* question, so when Gemini refused the tool-bearing
+// request the entire Q&A feature went dark — questions about the account's
+// own rows, which had worked for months and never needed a search, started
+// failing alongside the web ones. A rejected tool must cost the search, not
+// the answer.
+simulateGroundingRejected = true;
+const toolRejectedReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+check(
+  "if Gemini refuses the search tool, the question is still answered without it",
+  toolRejectedReply.includes("[mock AI answer]") && !toolRejectedReply.includes("ตอบคำถามนี้ไม่สำเร็จ")
+);
+const retryRequest = lastRequestWhere((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน"));
+check(
+  "the retry sends no tool, and drops the search rules from the prompt with it",
+  retryRequest?.hasGoogleSearchTool === false && !retryRequest.systemInstruction.includes("ให้ใช้ Google Search")
+);
+check(
+  "the retry still carries the account's own data, and the pre-search rule about missing data",
+  retryRequest.systemInstruction.includes("ตัวเลขที่คำนวณไว้แล้วสำหรับเดือน") &&
+    retryRequest.systemInstruction.includes("ให้บอกตรงๆ ว่าไม่มีข้อมูลพอจะตอบ")
 );
 
 // Regression test for the exact hijack scenario signedState.ts's top
