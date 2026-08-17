@@ -213,7 +213,7 @@ globalThis.fetch = async (url, init = {}) => {
       // matching the real sheet's row 2 = index 0 offset already applied
       // by the real code under test — sheetId tells the two sheets' delete
       // requests apart, same as a real spreadsheet would.
-      const target = sheetId === 100 ? diaryRows : sheetRows;
+      const target = sheetId === 100 ? diaryRows : sheetId === 2 ? budgetRows : sheetRows;
       target.splice(startIndex - 1, endIndex - startIndex);
     }
     return new Response(JSON.stringify({}), { status: 200 });
@@ -225,6 +225,24 @@ globalThis.fetch = async (url, init = {}) => {
     const rowNumber = Number(diaryRowUpdateMatch[1]);
     const body = JSON.parse(init.body);
     diaryRows[rowNumber - 2] = body.values[0]; // -2: 1-based row number, minus the header row
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  // Budget writes (PLAN.md 17.43) — the header PUT that ensureBudgetsTab
+  // makes, an append for a brand-new budget, and an in-place row update when
+  // one already exists for that category+month.
+  if (u.includes("Budgets!A1:D1?valueInputOption=RAW")) {
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  if (u.includes("Budgets!A1:append")) {
+    const body = JSON.parse(init.body);
+    budgetRows.push(...body.values);
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  const budgetRowUpdateMatch = u.match(/Budgets!A(\d+):D\1\?valueInputOption=RAW/);
+  if (budgetRowUpdateMatch) {
+    const rowNumber = Number(budgetRowUpdateMatch[1]);
+    const body = JSON.parse(init.body);
+    budgetRows[rowNumber - 2] = body.values[0]; // -2: 1-based row, minus the header
     return new Response(JSON.stringify({}), { status: 200 });
   }
   if (u.includes("Transactions!A1:append")) {
@@ -958,6 +976,7 @@ const { countQueuedForUser } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting, broadcastMorningBriefings } = await import("../src/greetingCommands.ts");
 const { buildHelpText } = await import("../src/commands.ts");
+const { validateIntent } = await import("../src/aiInterpreter.ts");
 const { getConversationHistory } = await import("../src/conversationHistory.ts");
 
 async function signLineBody(rawBody, secret) {
@@ -4518,6 +4537,107 @@ check("personal mode's help command hands over the guide link", personalHelpRepl
 const groupHelpReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิธีใช้", origin);
 check("group mode's help command hands over the same guide link", groupHelpReply.includes(`${origin}/view/help`));
 check("the guide it links to still advertises the web viewer, which works in both modes", buildHelpText(true).includes("เปิดเว็บดูข้อมูล"));
+
+// ---- Budgets (PLAN.md 17.43) ----------------------------------------------
+// readBudgets and the over-budget warning have been here since the start;
+// nothing could ever write one, so "งบเหลือเท่าไหร่" answered "ยังไม่ได้ตั้งงบ"
+// forever unless the separate React PWA happened to be pointed at the very
+// same spreadsheet. These cover the write side, from both surfaces.
+
+budgetRows.length = 0;
+const budgetMonth = bangkokMonthKey();
+
+const noBudgetReply = await handleTextMessage(env, lineUserId, "ดูงบ", origin);
+check("with nothing set, ดูงบ explains how to set one instead of showing an empty list",
+  noBudgetReply.includes("ยังไม่ได้ตั้งงบ") && noBudgetReply.includes("ตั้งงบ"));
+
+const budgetPromptReply = await handleTextMessage(env, lineUserId, "ตั้งงบ อาหาร 5000", origin);
+check(
+  "ตั้งงบ asks to confirm before writing, like every other chat write",
+  budgetPromptReply.includes("5,000") && budgetPromptReply.includes('"ใช่"') && budgetRows.length === 0
+);
+const budgetConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming writes the budget to the account's own book",
+  budgetConfirmReply.includes("ตั้งงบ") &&
+    budgetRows.length === 1 &&
+    budgetRows[0][2] === budgetMonth &&
+    Number(budgetRows[0][3]) === 5000
+);
+
+// One row per category+month. Setting the same one again has to replace the
+// figure, not stack a second row that readBudgets would then report twice.
+const budgetChangeReply = await handleTextMessage(env, lineUserId, "ตั้งงบ อาหาร 3000", origin);
+check("setting the same category again warns that it replaces the old figure", budgetChangeReply.includes("เดิมตั้งไว้ 5,000"));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and it overwrites in place rather than adding a second row",
+  budgetRows.length === 1 && Number(budgetRows[0][3]) === 3000
+);
+const keptBudgetId = budgetRows[0][0];
+
+const budgetListReply = await handleTextMessage(env, lineUserId, "ดูงบ", origin);
+check("ดูงบ lists what's set", budgetListReply.includes("3,000") && budgetListReply.includes("อาหาร"));
+
+// The report that has always existed should now actually find something.
+const budgetRemainingReply = await handleTextMessage(env, lineUserId, "งบเหลือเท่าไหร่", origin);
+check(
+  "งบเหลือเท่าไหร่ finally reports against a real budget instead of 'ยังไม่ได้ตั้งงบ'",
+  !budgetRemainingReply.includes("ยังไม่ได้ตั้งงบ") && budgetRemainingReply.includes("เหลือ")
+);
+
+const unknownCategoryReply = await handleTextMessage(env, lineUserId, "ตั้งงบ ยานอวกาศ 900", origin);
+check(
+  "an unknown category lists the real ones instead of failing silently",
+  unknownCategoryReply.includes("ไม่รู้จักหมวด") && budgetRows.length === 1
+);
+
+// A budget caps spending, so an income category must not be settable.
+const incomeCategoryBudget = validateIntent({ intent: "budget_set", budgetCategoryId: "salary", budgetLimitAmount: 100 });
+check("validateIntent refuses a budget on an income category", incomeCategoryBudget === null);
+check(
+  "and refuses a zero or negative limit",
+  validateIntent({ intent: "budget_set", budgetCategoryId: "food", budgetLimitAmount: 0 }) === null
+);
+
+simulateInterpreterResult = { intent: "budget_set", budgetCategoryId: "food", budgetLimitAmount: 7000 };
+const interpBudgetReply = await handleTextMessage(env, lineUserId, "ขอตั้งงบค่ากินเดือนนี้เจ็ดพันนะ", origin);
+check("an AI-interpreted budget_set reaches the same confirm prompt", interpBudgetReply.includes("7,000") && interpBudgetReply.includes('"ใช่"'));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("and still keeps one row, with the id preserved across the overwrite",
+  budgetRows.length === 1 && budgetRows[0][0] === keptBudgetId && Number(budgetRows[0][3]) === 7000);
+
+// The web page — the second write-capable /view page after ตารางเวร.
+const budgetsPageResponse = await worker.fetch(new Request(`${origin}/view/budgets?token=${viewToken}`), env, new FakeExecutionContext());
+const budgetsPageHtml = await budgetsPageResponse.text();
+check(
+  "/view/budgets shows every expense category, prefilled with what's set",
+  budgetsPageResponse.status === 200 && budgetsPageHtml.includes('name="budget-food"') && budgetsPageHtml.includes('value="7000"')
+);
+check("it shows spending next to each limit, so the number isn't picked blind", budgetsPageHtml.includes("ใช้ไปแล้ว"));
+
+const budgetSaveBody = new URLSearchParams({ "budget-food": "4500", "budget-transport": "1200" });
+const budgetSaveResponse = await worker.fetch(
+  new Request(`${origin}/view/budgets?token=${viewToken}`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: budgetSaveBody.toString(),
+  }),
+  env,
+  new FakeExecutionContext()
+);
+check("saving the form writes every submitted category at once", budgetSaveResponse.status === 200 && budgetRows.length === 2);
+check(
+  "a blank field clears that category's budget rather than storing NaN",
+  budgetRows.every((r) => Number.isFinite(Number(r[3])) && Number(r[3]) > 0) &&
+    budgetRows.some((r) => r[1] === "food" && Number(r[3]) === 4500)
+);
+
+const budgetDeleteReply = await handleTextMessage(env, lineUserId, "ลบงบ อาหาร", origin);
+check("ลบงบ confirms first too", budgetDeleteReply.includes('"ใช่"') && budgetRows.length === 2);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("confirming removes just that category's row", budgetRows.length === 1 && !budgetRows.some((r) => r[1] === "food"));
+budgetRows.length = 0;
 
 // "เปิดเว็บดูข้อมูล" (PLAN.md 17.7 second pass) works in group mode now,
 // after a user asked for it once they noticed calendar/diary/trip/province

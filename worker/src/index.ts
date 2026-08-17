@@ -14,6 +14,7 @@ import {
   promptCalendarDeleteByKeyword,
   promptCalendarEditByKeyword,
 } from "./calendarCommands.ts";
+import { matchBudgetCommand, promptBudgetDelete, promptBudgetSet, answerBudgetList } from "./budgetCommands.ts";
 import { buildHelpReply, matchCommand } from "./commands.ts";
 import { appendConversationTurn, getConversationHistory } from "./conversationHistory.ts";
 import { resolveConfirmation } from "./confirmations.ts";
@@ -90,6 +91,7 @@ import { isWebSearchEnabled } from "./webSearch.ts";
 // own note on why it keeps a duplicate `html` helper rather than importing
 // this file's.
 import { renderErrorPage } from "./viewAuth.ts";
+import { handleViewBudgetsRequest } from "./viewBudgetsPage.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
@@ -538,6 +540,12 @@ async function runInterpretedIntent(
           destinationSlug: intent.groundDestinationSlug,
           dateKey: intent.groundDateKey,
         });
+      case "budget_set":
+        return await withToken((ctx) => promptBudgetSet(ctx, intent.budgetCategoryId, intent.budgetLimitAmount));
+      case "budget_delete":
+        return await withToken((ctx) => promptBudgetDelete(ctx, intent.budgetCategoryId));
+      case "budget_list":
+        return await withToken((ctx) => answerBudgetList(ctx));
       case "trip_start":
         return await withToken((ctx) => promptOrStartTrip(ctx, intent.tripName));
       case "trip_end":
@@ -737,6 +745,21 @@ async function dispatchLegacyCommands(
     // token only needs STATE_SIGNING_SECRET, no Google auth at all.
     if (matchViewLinkCommand(text)) {
       return await buildViewLinkReply(env, subjectId, origin);
+    }
+
+    // Before matchCommand's report handler for two reasons: its
+    // "งบเหลือเท่าไหร่" test is a substring check that would also catch
+    // "ตั้งงบ..." phrasings, and its search regex ("^(?:ค้นหา|หา)...") takes
+    // anything starting with หา. Neither overlaps with this matcher's own
+    // fixed prefixes, so running it first can't swallow a report command.
+    const budgetHandler = await matchBudgetCommand(text);
+    if (budgetHandler) {
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => budgetHandler(actionCtx(accessToken)),
+        tokenCache
+      );
     }
 
     // Checked before reportHandler below: "ลบรายการล่าสุด"/"ยกเลิกรายการล่าสุด"
@@ -1699,6 +1722,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 
   if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
   if (url.pathname === "/view") return handleViewAccountsRequest(request, env);
+  if (url.pathname === "/view/budgets") return handleViewBudgetsRequest(request, env);
   if (url.pathname === "/view/calendar") return handleViewCalendarRequest(request, env);
   if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
   // No token, no env — the guide is the same for everyone and holds no

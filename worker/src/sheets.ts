@@ -216,6 +216,104 @@ export async function readBudgets(accessToken: string, spreadsheetId: string): P
     }));
 }
 
+// ---- Budget writes (PLAN.md 17.43) ---------------------------------------
+// readBudgets above has been here since the beginning; nothing could ever
+// write one. Budgets were set in the separate React PWA, which signs into
+// Google on its own and creates its *own* spreadsheet — so in practice a
+// LINE user's budgets often lived in a different book from the one the bot
+// reads, and "งบเหลือเท่าไหร่" answered "ยังไม่ได้ตั้งงบไว้เลย" forever.
+//
+// The layout matches app/src/lib/sheetsService.ts exactly (same header, same
+// column order), so a book written by either side stays readable by both.
+
+const BUDGET_HEADERS = ["id", "categoryId", "month", "limitAmount"];
+
+// createBookSpreadsheet makes the Budgets *tab* but only ever wrote headers
+// for Transactions, so a bot-created book has an empty, header-less Budgets
+// sheet — while readBudgets starts at A2, assuming row 1 is a header. That
+// mismatch was invisible while nothing wrote budgets; the moment something
+// does, the first one would land in row 1 and be skipped on read. Writing
+// the header before the first write is what keeps the two ends agreeing.
+// Same lazy, KV-cached shape as ensureDiaryTab above, and it also covers a
+// book whose tab was deleted by hand.
+async function ensureBudgetsTab(accessToken: string, spreadsheetId: string, kv: KVNamespace): Promise<void> {
+  const cacheKey = `budgets-tab:${spreadsheetId}`;
+  if (await kv.get(cacheKey)) return;
+
+  const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties.title`);
+  const titles: string[] = (meta.sheets ?? []).map((s: any) => s.properties.title);
+  if (!titles.includes("Budgets")) {
+    await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Budgets" } } }] }),
+    });
+  }
+  // Written unconditionally rather than only for a new tab: the tab usually
+  // already exists (createBookSpreadsheet made it) but without its header.
+  // A1:D1 is the header row either way, so setting it is idempotent.
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A1:D1?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values: [BUDGET_HEADERS] }),
+  });
+  await kv.put(cacheKey, "1");
+}
+
+async function readBudgetRawRows(accessToken: string, spreadsheetId: string): Promise<string[][]> {
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A2:D10000`);
+  return data.values ?? [];
+}
+
+/** One budget per (category, month): setting the same pair again replaces
+ * the existing figure rather than stacking a second row that readBudgets
+ * would then report twice. Row indices come from the raw values response,
+ * never a filtered list — same reasoning as updateDiaryEntry above. */
+export async function upsertBudget(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  budget: { categoryId: string; month: string; limitAmount: number }
+): Promise<void> {
+  await ensureBudgetsTab(accessToken, spreadsheetId, kv);
+  const rawRows = await readBudgetRawRows(accessToken, spreadsheetId);
+  const rawIndex = rawRows.findIndex((r) => r[1] === budget.categoryId && r[2] === budget.month);
+
+  if (rawIndex === -1) {
+    await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A1:append?valueInputOption=RAW`, {
+      method: "POST",
+      body: JSON.stringify({
+        values: [[crypto.randomUUID(), budget.categoryId, budget.month, budget.limitAmount]],
+      }),
+    });
+    return;
+  }
+
+  const rowNumber = rawIndex + 2; // +1 for the header, +1 for 1-based rows
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Budgets!A${rowNumber}:D${rowNumber}?valueInputOption=RAW`, {
+    method: "PUT",
+    // Keeps the existing id — the row is the same budget with a new figure,
+    // not a new one.
+    body: JSON.stringify({ values: [[rawRows[rawIndex][0], budget.categoryId, budget.month, budget.limitAmount]] }),
+  });
+}
+
+/** Returns false (not an error) when there was no budget for that pair —
+ * the caller reports "there wasn't one" rather than treating it as failure. */
+export async function deleteBudget(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  categoryId: string,
+  month: string
+): Promise<boolean> {
+  await ensureBudgetsTab(accessToken, spreadsheetId, kv);
+  const rawRows = await readBudgetRawRows(accessToken, spreadsheetId);
+  const rawIndex = rawRows.findIndex((r) => r[1] === categoryId && r[2] === month);
+  if (rawIndex === -1) return false;
+
+  await deleteSheetRow(accessToken, spreadsheetId, "Budgets", rawIndex);
+  return true;
+}
+
 // ---- Diary (PLAN.md 15.4) -----------------------------------------------
 // Personal-only tab: never used for shared group-book spreadsheets (PLAN.md
 // 15.5). Older spreadsheets (created before this feature existed) don't have

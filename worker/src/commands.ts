@@ -1,5 +1,6 @@
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { readAllTransactions, readBudgets, type TransactionRow } from "./sheets.ts";
+import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokWeekdayIndex } from "./thaiDate.ts";
 
 export function formatBaht(n: number): string {
   return n.toLocaleString("th-TH", { maximumFractionDigits: 2 });
@@ -10,34 +11,41 @@ export function categoryLabel(categoryId: string): string {
   return `${cat?.icon ?? "📦"} ${cat?.name ?? "อื่น ๆ"}`;
 }
 
+// Bangkok time, not UTC. These used to slice `new Date().toISOString()`,
+// which is seven hours behind: between midnight and 07:00 Bangkok, "today"
+// resolved to yesterday and — on the 1st of a month — "this month" resolved
+// to the one that just ended. Every report in this file keys off these, so
+// an early-morning "สรุปวันนี้" silently answered about yesterday, and a
+// budget check on the 1st compared this month's spending against last
+// month's limits. Everything else in the codebase already went through
+// thaiDate.ts; this file was the holdout.
 function todayKey(): string {
-  return new Date().toISOString().slice(0, 10);
+  return bangkokDateKey();
 }
 
 function currentMonthKey(): string {
-  return new Date().toISOString().slice(0, 7);
+  return bangkokMonthKey();
 }
 
+// The same seven-hour shift as todayKey/currentMonthKey above, in the three
+// other date helpers this file's reports run on. Computed from the Bangkok
+// date *string* rather than from a Date's UTC fields, so there's no timezone
+// left in the arithmetic to get wrong.
 function lastMonthKey(): string {
-  const d = new Date();
-  d.setUTCDate(1); // avoid month-length overflow when subtracting a month
-  d.setUTCMonth(d.getUTCMonth() - 1);
-  return d.toISOString().slice(0, 7);
+  const [y, m] = currentMonthKey().split("-").map(Number);
+  const prev = m === 1 ? { y: y - 1, m: 12 } : { y, m: m - 1 };
+  return `${prev.y}-${String(prev.m).padStart(2, "0")}`;
 }
 
 function startOfWeekKey(): string {
-  const d = new Date();
-  const day = d.getUTCDay(); // 0 = Sunday
-  const diffToMonday = day === 0 ? 6 : day - 1;
-  d.setUTCDate(d.getUTCDate() - diffToMonday);
-  return d.toISOString().slice(0, 10);
+  // bangkokWeekdayIndex is 0 = Monday (see WEEKDAY_TH in greetingCommands.ts),
+  // which is already the offset back to the start of the week.
+  return addDaysToDateKey(todayKey(), -bangkokWeekdayIndex());
 }
 
 function daysElapsedInMonth(month: string): number {
   const [y, m] = month.split("-").map(Number);
-  const today = new Date();
-  const isCurrentMonth = today.toISOString().slice(0, 7) === month;
-  if (isCurrentMonth) return today.getUTCDate();
+  if (month === currentMonthKey()) return Number(todayKey().slice(8, 10));
   return new Date(Date.UTC(y, m, 0)).getUTCDate(); // days in that month
 }
 
@@ -102,7 +110,8 @@ export function buildHelpText(webSearchEnabled: boolean): string {
     "📊 ดูรายงาน",
     "• สรุปวันนี้ / สรุปสัปดาห์นี้ / สรุปเดือนนี้ / สรุปเดือนที่แล้ว / เหลือเงินเท่าไหร่ / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่",
     "• วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด / เฉลี่ยใช้เงินต่อวันเท่าไหร่",
-    "• งบเหลือเท่าไหร่ — เทียบกับงบที่ตั้งไว้ (ตั้งงบได้จากหน้าเว็บแอป) แจ้งเตือนถ้าเกินงบ",
+    "• งบเหลือเท่าไหร่ — เทียบกับงบที่ตั้งไว้ แจ้งเตือนถ้าเกินงบ / ดูงบ — ดูงบที่ตั้งไว้เดือนนี้",
+    "• ตั้งงบ <หมวด> <จำนวน> เช่น \"ตั้งงบ อาหาร 5000\" (ถามยืนยันก่อนเสมอ) / ลบงบ <หมวด> — ตั้งหลายหมวดพร้อมกันได้ที่แท็บ \"งบ\" ในเว็บ",
     "• ค้นหา <คำ> เช่น \"ค้นหากาแฟ\" / รายการล่าสุด — ดู 5 รายการล่าสุด",
     "",
     "📸 อัลบั้มรูปทริป",
@@ -322,7 +331,7 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
       ]);
       const monthBudgets = budgets.filter((b) => b.month === month);
       if (monthBudgets.length === 0) {
-        return "ยังไม่ได้ตั้งงบไว้เลยนะ ตั้งได้จากหน้าตั้งค่าในเว็บแอป";
+        return 'ยังไม่ได้ตั้งงบไว้เลยนะ ตั้งได้เลยเช่น "ตั้งงบ อาหาร 5000" หรือตั้งหลายหมวดพร้อมกันที่แท็บ "งบ" ในเว็บ';
       }
       const spentByCategory = new Map<string, number>();
       for (const r of all) {

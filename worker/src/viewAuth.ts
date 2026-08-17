@@ -61,10 +61,11 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-export type ViewNavKey = "accounts" | "calendar" | "diary" | "trips" | "shifts" | "tasks";
+export type ViewNavKey = "accounts" | "budgets" | "calendar" | "diary" | "trips" | "shifts" | "tasks";
 
 const NAV_ITEMS: Array<{ key: ViewNavKey; path: string; label: string }> = [
   { key: "accounts", path: "/view", label: "บัญชี" },
+  { key: "budgets", path: "/view/budgets", label: "งบ" },
   { key: "calendar", path: "/view/calendar", label: "ปฏิทิน" },
   { key: "diary", path: "/view/diary", label: "ไดอารี่" },
   { key: "trips", path: "/view/trips", label: "รูปทริป" },
@@ -192,6 +193,12 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
      viewSearchPage.ts); this only gives it room and keeps it from forcing
      the page to scroll sideways on a phone. */
   .search-suggestions { overflow-x: auto; }
+  .budget-table input[type="number"] {
+    width: 6.5rem; padding: .45rem .5rem; border-radius: 8px; border: 1px solid #d8dade;
+    font-size: .88rem; font-family: inherit; text-align: right;
+  }
+  .budget-table td { white-space: normal; vertical-align: middle; }
+  .budget-spent { color: #6b6f76; font-size: .72rem; margin-top: .15rem; }
   .help-lead { font-size: .88rem; color: #40444b; margin: 0 0 1rem; line-height: 1.5; }
   .help-list { margin: 0; padding-left: 1.1rem; }
   .help-list li { margin-bottom: .5rem; font-size: .85rem; line-height: 1.55; }

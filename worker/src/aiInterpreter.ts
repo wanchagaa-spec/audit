@@ -76,6 +76,9 @@ export type InterpretedIntent =
       groundDestinationSlug: string;
       groundDateKey?: string;
     }
+  | { intent: "budget_set"; budgetCategoryId: string; budgetLimitAmount: number }
+  | { intent: "budget_delete"; budgetCategoryId: string }
+  | { intent: "budget_list" }
   | { intent: "trip_start"; tripName: string }
   | { intent: "trip_end" }
   | { intent: "trip_status" }
@@ -288,6 +291,26 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
         groundDateKey,
       };
     }
+    // Budgets (PLAN.md 17.43). categoryId is pinned to a real *expense*
+    // category the same way validateTransaction pins its own — a budget is a
+    // spending limit, so an income category here is as wrong as an invented
+    // one. The amount is validated, never computed: the model may only pass
+    // through a figure the user typed.
+    case "budget_set": {
+      if (typeof r.budgetCategoryId !== "string") return null;
+      const category = DEFAULT_CATEGORIES.find((c) => c.id === r.budgetCategoryId && c.type === "expense");
+      if (!category) return null;
+      const amount = typeof r.budgetLimitAmount === "number" ? r.budgetLimitAmount : Number(r.budgetLimitAmount);
+      if (!Number.isFinite(amount) || amount <= 0) return null;
+      return { intent: "budget_set", budgetCategoryId: r.budgetCategoryId, budgetLimitAmount: amount };
+    }
+    case "budget_delete": {
+      if (typeof r.budgetCategoryId !== "string") return null;
+      if (!DEFAULT_CATEGORIES.some((c) => c.id === r.budgetCategoryId && c.type === "expense")) return null;
+      return { intent: "budget_delete", budgetCategoryId: r.budgetCategoryId };
+    }
+    case "budget_list":
+      return { intent: "budget_list" };
     case "trip_start": {
       if (!isNonEmptyString(r.tripName)) return null;
       return { intent: "trip_start", tripName: r.tripName };
@@ -363,6 +386,9 @@ function buildSystemInstruction(today: string, history: ConversationTurn[]): str
     '{"intent":"flight_search","flightOriginCode":"IATA 3 ตัวใหญ่","flightDestinationCode":"IATA 3 ตัวใหญ่","flightOriginName":string,"flightDestinationName":string,"flightDateKey":"YYYY-MM-DD"} — หาตั๋วเครื่องบิน/เทียบราคาเที่ยวบิน เช่น "หาตั๋วไปเชียงใหม่พรุ่งนี้" (Code คือรหัสสนามบิน/เมืองมาตรฐาน IATA ที่ตรงกับเมืองนั้นจริงๆ เช่น กรุงเทพ=BKK เชียงใหม่=CNX ภูเก็ต=HKT — แปลงชื่อเมืองเป็นรหัสได้เลยเพราะเป็นข้อมูลมาตรฐานสากล ไม่ใช่การเดาข้อมูลส่วนตัว แต่ถ้าไม่แน่ใจรหัสของเมืองไหนจริงๆ ให้ใช้ unclear ถามกลับ; Name คือชื่อเมืองตามที่ผู้ใช้พิมพ์; ไม่บอกต้นทางให้ถือว่าออกจากกรุงเทพ/BKK ได้; ต้องรู้วันที่แน่ชัด ไม่รู้ให้ unclear)',
     '{"intent":"hotel_search","hotelCityName":string,"hotelCheckInDateKey":"YYYY-MM-DD","hotelCheckOutDateKey":"YYYY-MM-DD"} — หาที่พัก/โรงแรม/เทียบราคาที่พักในเมืองหนึ่งๆ เช่น "หาที่พักภูเก็ต ศุกร์นี้ 2 คืน" (hotelCityName คือชื่อเมืองตามที่ผู้ใช้พิมพ์; บอกจำนวนคืนมาก็คำนวณ checkOut จาก checkIn ได้; บอกแค่วันเดียวไม่บอกจำนวนคืน = พัก 1 คืน; ไม่รู้วันที่เลยให้ unclear)',
     '{"intent":"ground_ticket_search","groundOriginName":string,"groundDestinationName":string,"groundOriginSlug":"ชื่อเมืองอังกฤษตัวเล็ก-คั่นขีด","groundDestinationSlug":"ชื่อเมืองอังกฤษตัวเล็ก-คั่นขีด","groundDateKey"?:"YYYY-MM-DD"} — หาตั๋วรถทัวร์/รถไฟ/รถตู้/เรือระหว่างเมือง เช่น "ตั๋วรถทัวร์ไปขอนแก่น" (slug คือชื่อเมืองภาษาอังกฤษตัวพิมพ์เล็กคั่นด้วยขีด เช่น bangkok, chiang-mai, khon-kaen; ไม่บอกต้นทางให้ถือว่า bangkok; วันที่ใส่เฉพาะตอนผู้ใช้ระบุ)',
+    '{"intent":"budget_set","budgetCategoryId":string,"budgetLimitAmount":number} — ตั้ง/แก้งบประมาณรายจ่ายของเดือนนี้ เช่น "ตั้งงบค่าอาหารเดือนนี้ 5000", "ขอตั้งงบเดินทางไม่เกินสามพัน" (budgetCategoryId ต้องเป็น categoryId ของหมวด "รายจ่าย" จากลิสต์ข้างบนเท่านั้น; budgetLimitAmount คือจำนวนเงินที่ผู้ใช้พิมพ์มาจริงๆ ห้ามคิดเลขหรือเดาเอง)',
+    '{"intent":"budget_delete","budgetCategoryId":string} — ยกเลิก/ลบงบของหมวดนั้นในเดือนนี้ เช่น "ลบงบค่าอาหาร", "ไม่ต้องตั้งงบเดินทางแล้ว"',
+    '{"intent":"budget_list"} — ขอดูว่าตั้งงบอะไรไว้บ้างเดือนนี้ (คนละอย่างกับ "งบเหลือเท่าไหร่" ที่ถามยอดคงเหลือ — อันนั้นใช้ intent question)',
     '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
     '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',
