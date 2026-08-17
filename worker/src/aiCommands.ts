@@ -450,7 +450,12 @@ const REVEAL_SEARCH_ERROR = true;
 
 function withSearchDebug(text: string, searchError: string | undefined): string {
   if (!REVEAL_SEARCH_ERROR || !searchError) return text;
-  return `${text}\n\n[debug] ค้นเว็บไม่สำเร็จ: ${searchError.slice(0, 400)}`;
+  // 1,500, not the 400 this started at: the first real error came back as a
+  // 429 whose `details` array — the only part naming the quota that was
+  // actually exhausted, and the one thing needed to tell "this tier has no
+  // grounding at all" from "today's allowance is spent" — got cut off mid
+  // field. Still far short of LINE's own 5,000-character message cap.
+  return `${text}\n\n[debug] ค้นเว็บไม่สำเร็จ: ${searchError.slice(0, 1500)}`;
 }
 
 // Length decides where a grounded answer goes (PLAN.md 17.38). A short one
