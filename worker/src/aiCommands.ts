@@ -22,7 +22,7 @@ import {
 import { signViewToken } from "./signedState.ts";
 import { buildSearchChatReply, isAnswerShortEnoughForChat, saveSearchResult } from "./webSearch.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
-import { readAllDiaryEntries, readAllTransactions, readShiftGrid, SHIFT_TYPES, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
+import { readAllDiaryEntries, readAllTransactions, readBudgets, readShiftGrid, SHIFT_TYPES, type BudgetRow, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokStartOfDayIso, formatThaiDateLabel } from "./thaiDate.ts";
 import { fetchWeatherSummary } from "./weather.ts";
@@ -165,6 +165,7 @@ function buildSystemInstruction(
   calendarEvents: CalendarEventSummary[] | null,
   calendarRangeLabel: string,
   shiftGrid: ShiftGrid,
+  budgets: BudgetRow[],
   // False on the retry that runs without the Google Search tool (see
   // askQuestionModel). Telling a model to go and search when it has no
   // search tool doesn't just waste the instruction — it invites a reply
@@ -184,6 +185,19 @@ function buildSystemInstruction(
     .slice(-MAX_ROWS_IN_PROMPT)
     .map((e) => `${e.dateKey} ${e.time || "(ไม่ระบุเวลา)"} ${e.title}`);
   const shiftLines = formatShiftLines(shiftGrid);
+  const spentByCategory = new Map<string, number>();
+  for (const row of txRows) {
+    if (row.type !== "expense") continue;
+    spentByCategory.set(row.categoryId, (spentByCategory.get(row.categoryId) ?? 0) + row.amount);
+  }
+  const budgetLines = budgets
+    .filter((b) => b.month === month)
+    .map((b) => {
+      const spent = spentByCategory.get(b.categoryId) ?? 0;
+      const remaining = b.limitAmount - spent;
+      const flag = remaining < 0 ? " (เกินงบแล้ว)" : "";
+      return `- ${categoryLabel(b.categoryId)}: งบ ${formatBaht(b.limitAmount)} บาท ใช้ไป ${formatBaht(spent)} เหลือ ${formatBaht(remaining)}${flag}`;
+    });
 
   return [
     "คุณเป็นผู้ช่วยส่วนตัวในแชท LINE ที่ช่วยตอบคำถามเกี่ยวกับการเงิน นัดหมาย และไดอารี่ของผู้ใช้คนเดียว",
@@ -207,6 +221,15 @@ function buildSystemInstruction(
     `- รายจ่ายรวม: ${formatBaht(expense)} บาท`,
     `- คงเหลือ: ${formatBaht(income - expense)} บาท`,
     top.length > 0 ? `- หมวดที่จ่ายเยอะสุด: ${top.join(", ")}` : "- ยังไม่มีรายจ่ายเดือนนี้",
+    "",
+    // Budgets were missing from this prompt entirely until PLAN.md 17.44 —
+    // a real user set one and then asked about that very category, and the
+    // answer never mentioned it, because the model had no idea a limit
+    // existed. The remaining figures are computed here, like every other
+    // number in this block, and handed over as ground truth.
+    budgetLines.length > 0
+      ? `งบประมาณเดือนนี้ที่ผู้ใช้ตั้งไว้ (คำนวณคงเหลือให้แล้ว ห้ามคำนวณเอง):\n${budgetLines.join("\n")}`
+      : "งบประมาณเดือนนี้: ผู้ใช้ยังไม่ได้ตั้งงบหมวดไหนไว้เลย",
     "",
     `รายการรายรับ-รายจ่ายเดือนนี้ (ล่าสุด ${txLines.length} รายการ ใช้ดูรูปแบบ/พฤติกรรม ไม่ใช่ใช้คำนวณยอดรวมเอง):`,
     txLines.length > 0 ? txLines.join("\n") : "(ไม่มีรายการ)",
@@ -287,10 +310,11 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
     addDaysToDateKey(today, CALENDAR_LOOKAHEAD_DAYS - 1)
   )}`;
 
-  const [allTx, allDiary, shiftGrid] = await Promise.all([
+  const [allTx, allDiary, shiftGrid, budgets] = await Promise.all([
     readAllTransactions(ctx.accessToken, ctx.spreadsheetId),
     readAllDiaryEntries(ctx.accessToken, ctx.spreadsheetId, ctx.kv),
     readShiftGrid(ctx.accessToken, ctx.spreadsheetId, ctx.kv, month),
+    readBudgets(ctx.accessToken, ctx.spreadsheetId),
   ]);
   // Calendar access needs its own OAuth scope some already-linked accounts
   // never granted, and can fail for other transient reasons too — fetched
@@ -334,6 +358,7 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
       calendarEvents,
       calendarRangeLabel,
       shiftGrid,
+      budgets,
       canSearch
     );
 

@@ -7,9 +7,11 @@
 // report handler in index.ts so this always wins for these exact phrases.
 
 import type { TransactionDraft } from "../../app/src/lib/chatEngine.ts";
+import { buildBudgetStatusLines } from "./budgetCommands.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { appendTransaction, deleteMostRecentTransaction, readAllTransactions } from "./sheets.ts";
 import { setPendingConfirmation, type ActionCtx, type TransactionAttribution } from "./state.ts";
+import { bangkokDateKey } from "./thaiDate.ts";
 
 type Handler = (ctx: ActionCtx) => Promise<string>;
 
@@ -71,11 +73,18 @@ export async function applyTransactionCreate(
   pending: { drafts: TransactionDraft[]; rawText: string; attribution: TransactionAttribution }
 ): Promise<string> {
   const now = new Date().toISOString();
+  // Bangkok-local, not `now.slice(0, 10)`. UTC is seven hours behind, so an
+  // expense logged between midnight and 07:00 was stamped with yesterday's
+  // date — and on the 1st of a month it landed in the *previous* month,
+  // where it counted toward neither "สรุปเดือนนี้" nor this month's budget.
+  // diaryCommands.ts already did this correctly; the money path, of all
+  // things, was the one still on UTC.
+  const dateKey = bangkokDateKey(new Date(now));
   await Promise.all(
     pending.drafts.map((draft) =>
       appendTransaction(ctx.accessToken, ctx.spreadsheetId, {
         id: crypto.randomUUID(),
-        date: now.slice(0, 10),
+        date: dateKey,
         type: draft.type,
         amount: draft.amount,
         categoryId: draft.categoryId,
@@ -88,10 +97,23 @@ export async function applyTransactionCreate(
     )
   );
 
+  // Where this leaves the budget, if there is one for the category just
+  // spent in (PLAN.md 17.44). Best-effort on purpose: the money is already
+  // saved by this point, and a Sheets hiccup while looking up a limit must
+  // never turn a successful save into an error the user has to interpret.
+  const budgetLines = await buildBudgetStatusLines(
+    ctx,
+    pending.drafts.filter((d) => d.type === "expense").map((d) => d.categoryId)
+  ).catch((err) => {
+    console.error("applyTransactionCreate: budget status lookup failed, saved anyway", err);
+    return [] as string[];
+  });
+  const withBudget = (text: string) => (budgetLines.length > 0 ? [text, ...budgetLines].join("\n") : text);
+
   if (pending.drafts.length === 1) {
     const d = pending.drafts[0];
     const verb = d.type === "income" ? "รายรับ" : "รายจ่าย";
-    return `บันทึก${verb} ${formatBaht(d.amount)} บาท หมวด ${categoryLabel(d.categoryId)} ให้แล้วนะ`;
+    return withBudget(`บันทึก${verb} ${formatBaht(d.amount)} บาท หมวด ${categoryLabel(d.categoryId)} ให้แล้วนะ`);
   }
   const totalExpense = pending.drafts.filter((d) => d.type === "expense").reduce((s, d) => s + d.amount, 0);
   const totalIncome = pending.drafts.filter((d) => d.type === "income").reduce((s, d) => s + d.amount, 0);
@@ -99,9 +121,11 @@ export async function applyTransactionCreate(
     totalExpense > 0 ? `รายจ่ายรวม ${formatBaht(totalExpense)} บาท` : null,
     totalIncome > 0 ? `รายรับรวม ${formatBaht(totalIncome)} บาท` : null,
   ].filter((p): p is string => p !== null);
-  return [
-    `บันทึกให้แล้ว ${pending.drafts.length} รายการ:`,
-    ...pending.drafts.map(formatDraftLine),
-    totalParts.join(" / "),
-  ].join("\n");
+  return withBudget(
+    [
+      `บันทึกให้แล้ว ${pending.drafts.length} รายการ:`,
+      ...pending.drafts.map(formatDraftLine),
+      totalParts.join(" / "),
+    ].join("\n")
+  );
 }

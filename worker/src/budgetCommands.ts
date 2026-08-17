@@ -14,7 +14,7 @@
 
 import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { deleteBudget, readBudgets, upsertBudget } from "./sheets.ts";
+import { deleteBudget, readAllTransactions, readBudgets, upsertBudget } from "./sheets.ts";
 import { setPendingConfirmation, type ActionCtx } from "./state.ts";
 import { bangkokMonthKey } from "./thaiDate.ts";
 
@@ -110,6 +110,47 @@ export async function applyBudgetDelete(
   return deleted
     ? `ลบงบ ${categoryLabel(pending.categoryId)} เดือนนี้แล้วนะ`
     : `ไม่เจองบ ${categoryLabel(pending.categoryId)} เดือนนี้แล้ว อาจถูกลบไปก่อนหน้านี้`;
+}
+
+// ---- Budget status after a save (PLAN.md 17.44) ----------------------------
+// The gap a real user found immediately: they set a 5,000 shopping budget,
+// then logged 4,500 and 800 against it, and the bot said nothing either
+// time. A limit that only speaks when you ask "งบเหลือเท่าไหร่" isn't doing
+// the job a limit exists for — you find out you've overspent by going and
+// checking, which is exactly what having a budget was supposed to save you
+// from. So every expense in a budgeted category now reports where it leaves
+// you, right in the save confirmation.
+//
+// Cost is kept off people who don't use budgets: readBudgets comes first
+// (the Budgets tab holds a handful of rows), and the full transaction read —
+// which is the expensive one — only happens when one of the categories just
+// saved actually has a budget this month.
+
+export async function buildBudgetStatusLines(ctx: ActionCtx, categoryIds: string[]): Promise<string[]> {
+  const unique = [...new Set(categoryIds)];
+  if (unique.length === 0) return [];
+
+  const month = bangkokMonthKey();
+  const budgets = (await readBudgets(ctx.accessToken, ctx.spreadsheetId)).filter(
+    (b) => b.month === month && unique.includes(b.categoryId)
+  );
+  if (budgets.length === 0) return [];
+
+  const transactions = await readAllTransactions(ctx.accessToken, ctx.spreadsheetId);
+  const spentByCategory = new Map<string, number>();
+  for (const row of transactions) {
+    if (row.type !== "expense" || !row.date?.startsWith(month)) continue;
+    spentByCategory.set(row.categoryId, (spentByCategory.get(row.categoryId) ?? 0) + row.amount);
+  }
+
+  return budgets.map((budget) => {
+    const spent = spentByCategory.get(budget.categoryId) ?? 0;
+    const remaining = budget.limitAmount - spent;
+    if (remaining < 0) {
+      return `⚠️ งบ ${categoryLabel(budget.categoryId)} เกินแล้ว ${formatBaht(-remaining)} บาท (ใช้ไป ${formatBaht(spent)} จากงบ ${formatBaht(budget.limitAmount)})`;
+    }
+    return `งบ ${categoryLabel(budget.categoryId)} เหลือ ${formatBaht(remaining)} บาท (ใช้ไป ${formatBaht(spent)} จากงบ ${formatBaht(budget.limitAmount)})`;
+  });
 }
 
 // ---- Matcher ---------------------------------------------------------------
