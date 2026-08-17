@@ -15,7 +15,7 @@ import {
   promptCalendarEditByKeyword,
 } from "./calendarCommands.ts";
 import { matchBudgetCommand, promptBudgetDelete, promptBudgetSet, answerBudgetList } from "./budgetCommands.ts";
-import { buildHelpReply, matchCommand } from "./commands.ts";
+import { buildCapabilityText, buildHelpReply, matchCommand } from "./commands.ts";
 import { appendConversationTurn, getConversationHistory } from "./conversationHistory.ts";
 import { resolveConfirmation } from "./confirmations.ts";
 import {
@@ -79,7 +79,8 @@ import {
   type ActiveTrip,
   type TransactionAttribution,
 } from "./state.ts";
-import { applyPersona, BOT_NAME } from "./persona.ts";
+import { applyPersona } from "./persona.ts";
+import { getBotSettings } from "./settings.ts";
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
 import { answerFlightSearch, answerGroundSearch, answerHotelSearch, matchTravelCommand } from "./travelCommands.ts";
@@ -92,6 +93,7 @@ import { isWebSearchEnabled } from "./webSearch.ts";
 // this file's.
 import { renderErrorPage } from "./viewAuth.ts";
 import { handleViewBudgetsRequest } from "./viewBudgetsPage.ts";
+import { handleViewSettingsRequest } from "./viewSettingsPage.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
@@ -137,8 +139,10 @@ export interface Env {
   ENABLE_WEB_SEARCH: string | undefined;
 }
 
-const WELCOME_MESSAGE = [
-  `สวัสดีค่ะ 👋 ฉันชื่อ${BOT_NAME}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 12 เรื่องหลักๆ:`,
+// A function rather than a constant since PLAN.md 17.48 — the bot's name is
+// the account's to choose, and this message is the first place it says it.
+const welcomeMessage = (botName: string) => [
+  `สวัสดีค่ะ 👋 ฉันชื่อ${botName}นะ เป็นผู้ช่วยส่วนตัวในแชท ช่วยได้ 12 เรื่องหลักๆ:`,
   "",
   "💰 จดรายรับ-รายจ่ายประจำวัน พร้อมสรุปรายงาน",
   "📸 เก็บรูป/คลิปทริปอัตโนมัติขึ้น Google Drive",
@@ -554,10 +558,34 @@ async function runInterpretedIntent(
         return await withToken((ctx) => tripStatus(ctx));
       case "set_province":
         return await setProvinceByName(env.ACCOUNTS, subjectId, intent.provinceName);
+      // Straight back to the deterministic matcher (PLAN.md 17.49). The
+      // model recognised "this is one of the canned money reports"; the
+      // report itself is computed and formatted by the same code the typed
+      // command has always used, so "รายการล่าสุด" gives the same five rows
+      // however it was phrased.
+      //
+      // Falls through to a free-form answer if the matcher doesn't
+      // recognise the wording after all — the model can be right that this
+      // is a report request and still be looking at a phrasing commands.ts
+      // has no test for, and answering is better than saying nothing.
+      case "report": {
+        const reportHandler = await matchCommand(rawText, origin);
+        if (reportHandler) {
+          return await withFreshAccessToken(
+            env,
+            link.refreshToken,
+            (accessToken) => reportHandler(accessToken, link.spreadsheetId, env.ACCOUNTS),
+            tokenCache
+          );
+        }
+        return await withToken((ctx) => answerQuestion(ctx, rawText));
+      }
       case "question":
         return await withToken((ctx) => answerQuestion(ctx, intent.question));
       case "help":
         return buildHelpReply(origin);
+      case "capabilities":
+        return buildCapabilityText();
       case "view_link":
         return await buildViewLinkReply(env, subjectId, origin);
       case "chitchat":
@@ -853,6 +881,12 @@ export async function handleTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
 
+  // The account's own bot name and character (PLAN.md 17.48). Read once and
+  // shared by the two places below that speak in the bot's own voice: the
+  // AI interpreter's chitchat replies, and the first-ever welcome message
+  // where it introduces itself by name.
+  const settings = await getBotSettings(env.ACCOUNTS, lineUserId);
+
   const confirmationReply = await resolvePendingConfirmation(env, lineUserId, link, text, origin, tokenCache);
   if (confirmationReply !== null) {
     await recordConversationTurn(env, lineUserId, text, confirmationReply);
@@ -879,7 +913,7 @@ export async function handleTextMessage(
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history);
+    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings);
     if (intent) {
       const reply = await runInterpretedIntent(env, lineUserId, link, intent, text, origin, tokenCache, async () => ({
         addedBy: lineUserId,
@@ -921,7 +955,7 @@ export async function handleTextMessage(
     const greetingKind = await classifyGreeting(env.ACCOUNTS, lineUserId);
     const reply =
       greetingKind === "welcome"
-        ? WELCOME_MESSAGE
+        ? welcomeMessage(settings.botName)
         : greetingKind === "briefing"
           ? await buildMorningBriefing(env, env.ACCOUNTS, lineUserId)
           : buildReturnGreeting();
@@ -989,6 +1023,9 @@ export async function handleGroupTextMessage(
   const link = await getAccountLink(env.ACCOUNTS, subjectId);
   if (!link) return buildGroupUnlinkedPrompt(env, groupId, origin);
 
+  // The group's shared settings — see the personal-mode call above.
+  const settings = await getBotSettings(env.ACCOUNTS, subjectId);
+
   const confirmationReply = await resolvePendingConfirmation(env, subjectId, link, text, origin, tokenCache);
   if (confirmationReply !== null) {
     await recordConversationTurn(env, subjectId, text, confirmationReply);
@@ -1014,7 +1051,7 @@ export async function handleGroupTextMessage(
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history);
+    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings);
     if (intent) {
       const reply = await runInterpretedIntent(env, subjectId, link, intent, text, origin, tokenCache, () =>
         resolveGroupAttribution(env, groupId, senderUserId)
@@ -1227,7 +1264,8 @@ async function replyOrPush(
   text: string,
   env: Env
 ): Promise<void> {
-  const styledText = await applyPersona(text, env.GEMINI_API_KEY);
+  const settings = await getBotSettings(env.ACCOUNTS, subjectIdForSource(event.source));
+  const styledText = await applyPersona(text, env.GEMINI_API_KEY, settings);
   try {
     await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
   } catch (err) {
@@ -1409,10 +1447,10 @@ async function verifyAndParseWebhookBody(request: Request, env: Env): Promise<Li
 // stripSelfMention's single-span removal — a message repeating the name
 // keeps any later mentions as ordinary text, which no realistic case relies
 // on stripping.
-function stripBotNameMention(text: string): string | null {
-  const index = text.indexOf(BOT_NAME);
+function stripBotNameMention(text: string, botName: string): string | null {
+  const index = text.indexOf(botName);
   if (index === -1) return null;
-  return (text.slice(0, index) + text.slice(index + BOT_NAME.length)).trim();
+  return (text.slice(0, index) + text.slice(index + botName.length)).trim();
 }
 
 // One text/unsupported event, start to finish (matcher dispatch, reply).
@@ -1439,9 +1477,14 @@ async function handleOneOtherEvent(
         // is accepted too, requested directly so group members don't have
         // to reach for the @ picker every time (PLAN.md 17.12).
         const selfMention = findSelfMention(event.message);
+        // The group's own settings, since the name it answers to is the
+        // group's to change (PLAN.md 17.48). Read before deciding whether
+        // the message is even addressed to the bot, so a renamed bot starts
+        // answering to the new name immediately.
+        const groupSettings = await getBotSettings(env.ACCOUNTS, subjectIdForSource(event.source));
         const text = selfMention
           ? stripSelfMention(event.message.text, selfMention)
-          : stripBotNameMention(event.message.text);
+          : stripBotNameMention(event.message.text, groupSettings.botName);
         if (text === null) return;
         const reply = await handleGroupTextMessage(env, event.source.groupId, event.source.userId, text, origin, tokenCache);
         await replyOrPush(event, reply, env);
@@ -1683,7 +1726,8 @@ export async function drainUploadQueue(env: Env): Promise<void> {
     // pushTarget, not lineUserId — a group's push target is the real
     // groupId, not the synthesized "group:<groupId>" subject id lineUserId
     // holds in that case (see QueuedUpload's own comment).
-    const styledSummary = await applyPersona(parts.join(" "), env.GEMINI_API_KEY);
+    const summarySettings = await getBotSettings(env.ACCOUNTS, summary.lineUserId);
+    const styledSummary = await applyPersona(parts.join(" "), env.GEMINI_API_KEY, summarySettings);
     await pushToLine(summary.pushTarget, styledSummary, env.LINE_CHANNEL_ACCESS_TOKEN).catch((err) =>
       console.error("drain summary push failed", err)
     );
@@ -1729,6 +1773,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   // account data (see viewHelpPage.ts).
   if (url.pathname === "/view/help") return handleViewHelpRequest(env);
   if (url.pathname === "/view/search") return handleViewSearchRequest(request, env);
+  if (url.pathname === "/view/settings") return handleViewSettingsRequest(request, env);
   if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);
   if (url.pathname === "/view/tasks") return handleViewTasksRequest(request, env);
   if (url.pathname === "/view/trips" || url.pathname.startsWith("/view/trips/")) {

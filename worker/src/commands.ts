@@ -106,6 +106,48 @@ function searchMatch(text: string): string | null {
 
 const HELP_TEST = (t: string) => includesAny(t, ["วิธีใช้", "คำสั่ง", "help", "ช่วยเหลือ"]);
 
+// "ทำอะไรได้บ้าง" (PLAN.md 17.48) — a different question from "วิธีใช้",
+// and it was getting the same answer: a link to a guide long enough to need
+// its own web page. Someone asking what the bot *is* wants a list they can
+// read in one glance, not a manual.
+//
+// Matched on exact-ish whole phrases rather than a loose substring, unlike
+// HELP_TEST above. This codebase has been bitten three times by short Thai
+// substrings swallowing unrelated messages ("นัด", "ข่าว", "ยา"), and a
+// fragment like "ทำอะไรได้" sits inside plenty of ordinary sentences —
+// "พรุ่งนี้ทำอะไรได้บ้างที่เชียงใหม่" is a travel question, not this.
+const CAPABILITY_PHRASES = [
+  "ทำอะไรได้บ้าง",
+  "ทำอะไรได้บ้างคะ",
+  "ทำอะไรได้บ้างครับ",
+  "ช่วยอะไรได้บ้าง",
+  "ทำอะไรเป็นบ้าง",
+  "คุณทำอะไรได้บ้าง",
+  "บอททำอะไรได้บ้าง",
+];
+
+const CAPABILITY_TEST = (t: string) => CAPABILITY_PHRASES.includes(t.trim().replace(/[?？!]/g, "").trim());
+
+/** The short answer. One line per thing, no explanation of how to type any
+ * of it — that's what "วิธีใช้" is for, and the last line says so. */
+export function buildCapabilityText(): string {
+  return [
+    "ฉันช่วยได้ประมาณนี้:",
+    "",
+    "💰 จดบัญชี รายรับ-รายจ่าย + ตั้งงบ",
+    "📔 จดไดอารี่",
+    "📅 นัดหมาย + สิ่งที่ต้องทำ",
+    "✈️ หาตั๋วเครื่องบิน + ที่พัก",
+    "📍 หาร้าน/สถานที่ใกล้ตัว",
+    "📧 เช็ค/ส่งอีเมล + หาอีเมลผู้ติดต่อ",
+    "📸 เก็บรูปทริปขึ้น Google Drive",
+    "🗓️ ตารางเวร",
+    "☀️ ทักตอนเช้า บอกอากาศ/ข่าว/ราคาทอง-บิตคอยน์",
+    "",
+    'อยากรู้ว่าพิมพ์ยังไง พิมพ์ "วิธีใช้" ได้เลย',
+  ].join("\n");
+}
+
 // `webSearchEnabled` gates exactly one bullet (PLAN.md 17.42). The guide is
 // the bot's own promise about what it can do, so a feature that's switched
 // off must not appear in it — a user who reads "บอทค้น Google ให้" and then
@@ -202,7 +244,11 @@ export function buildHelpText(webSearchEnabled: boolean): string {
     // and a group's reply posts straight into the shared chat, so the link
     // is visible to whoever's in the group, not just whoever asked for it.
     "• เปิดเว็บดูข้อมูล — ขอลิงก์ดูบัญชี/ปฏิทิน/ไดอารี่/รูปทริป/ตารางเวร/สิ่งที่ต้องทำ ในหน้าเดียว (ใช้ได้ 1 ชั่วโมง หมดอายุแล้วพิมพ์ใหม่ได้เลย) — กลุ่มขอลิงก์ของสมุดกลุ่มเองได้เหมือนกัน",
-    "• แท็บ \"ไดอารี่\" แก้ไข/ลบบันทึกเก่าได้ตรงนั้นเลย เป็นหน้าเดียว (นอกจาก \"ตารางเวร\") ที่แก้ไขข้อมูลได้จริง ไม่ใช่แค่ดูอย่างเดียว",
+    "• แท็บ \"ไดอารี่\" แก้ไข/ลบบันทึกเก่าได้ตรงนั้นเลย",
+    "• แท็บ \"ตั้งค่า\" — ตั้งชื่อบอท คาแรคเตอร์ ชื่อที่อยากให้บอทเรียกเรา จังหวัดพยากรณ์อากาศ และล้างรายรับ-รายจ่ายเพื่อเริ่มใหม่ (ต้องยืนยันด้วยรหัสที่ส่งไปทางอีเมลก่อน)",
+    "",
+    "❓ ไม่แน่ใจว่าถามอะไรได้",
+    "• พิมพ์ \"ทำอะไรได้บ้าง\" ได้ลิสต์สั้นๆ ว่าฉันช่วยอะไรได้บ้าง",
   ];
   return ["ฉันช่วยได้ 13 เรื่อง — พิมพ์คำสั่งด้านล่าง หรือแตะเมนูใต้ช่องพิมพ์ก็ได้:", "", ...sections].join("\n");
 }
@@ -396,6 +442,13 @@ export function buildHelpReply(origin: string): string {
 }
 
 export async function matchCommand(text: string, origin: string): Promise<Handler | null> {
+  // Checked before HELP_TEST so "ทำอะไรได้บ้าง" gets the short list rather
+  // than the guide link. They don't currently overlap, but the phrase list
+  // is the more specific of the two and belongs first either way.
+  if (CAPABILITY_TEST(text)) {
+    return async () => buildCapabilityText();
+  }
+
   if (HELP_TEST(text)) {
     return async () => buildHelpReply(origin);
   }
