@@ -7,15 +7,27 @@
 // sums a column itself, so a wrong total is structurally impossible here,
 // not just unlikely.
 //
-// Model: gemini-3.5-flash-lite. The 2.5 series (originally used here) got
-// blocked for newly created API keys ahead of its official shutdown —
-// Google returns a 404 "no longer available to new users" for every request
-// from a fresh key, which is exactly the failure a real key hit right after
-// this feature shipped. 3.5-flash-lite is the current free-tier-eligible,
-// low-cost replacement Google points migrators to. Swapping models later
-// (Google's lineup moves fast) only means changing this one constant.
-const GEMINI_MODEL = "gemini-3.5-flash-lite";
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// Default model: gemini-3.5-flash-lite. The 2.5 series (originally used
+// here) got blocked for newly created API keys ahead of its official
+// shutdown — Google returns a 404 "no longer available to new users" for
+// every request from a fresh key, which is exactly the failure a real key
+// hit right after this feature shipped. 3.5-flash-lite is the current
+// free-tier-eligible, low-cost replacement Google points migrators to, and
+// it serves the interpreter, the persona pass, the news summaries and the
+// diary reflection perfectly well.
+export const DEFAULT_MODEL = "gemini-3.5-flash-lite";
+
+// The one exception (PLAN.md 17.41). Grounded search runs on the full Flash
+// model because Lite appears not to serve the google_search tool at all: the
+// grounded call started failing in production the moment it shipped, while
+// every other call — same key, same endpoint, no tools — kept working. Only
+// this one call pays the difference; everything above stays on Lite, which
+// is cheaper, faster, and was never the problem.
+export const SEARCH_MODEL = "gemini-3.5-flash";
+
+function endpointFor(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+}
 
 /**
  * `status` is set only when the API answered with an HTTP error — i.e. it
@@ -148,6 +160,9 @@ export interface AskGeminiOptions {
   // merely offered the tool. Never combined with jsonMode: the only JSON
   // caller is the interpreter, which has nothing to look up.
   googleSearch?: boolean;
+  // Defaults to DEFAULT_MODEL. Only the grounded search call overrides it —
+  // see SEARCH_MODEL above for why that one call needs a different model.
+  model?: string;
 }
 
 /** Text only, for the callers that neither offer the search tool nor care
@@ -170,7 +185,11 @@ export async function askGeminiWithSearch(
   userQuestion: string,
   options: Omit<AskGeminiOptions, "googleSearch" | "jsonMode"> = {}
 ): Promise<GeminiResult> {
-  return callGemini(apiKey, systemInstruction, userQuestion, { ...options, googleSearch: true });
+  return callGemini(apiKey, systemInstruction, userQuestion, {
+    model: SEARCH_MODEL,
+    ...options,
+    googleSearch: true,
+  });
 }
 
 async function callGemini(
@@ -179,8 +198,8 @@ async function callGemini(
   userQuestion: string,
   options: AskGeminiOptions = {}
 ): Promise<GeminiResult> {
-  const { signal, jsonMode, googleSearch, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
-  const res = await fetch(GEMINI_ENDPOINT, {
+  const { signal, jsonMode, googleSearch, model = DEFAULT_MODEL, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
+  const res = await fetch(endpointFor(model), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

@@ -687,6 +687,7 @@ globalThis.fetch = async (url, init = {}) => {
         apiKey: init.headers?.["x-goog-api-key"],
         maxOutputTokens: body.generationConfig?.maxOutputTokens,
         hasGoogleSearchTool: Boolean(body.tools?.some((t) => "google_search" in t)),
+        model: u.match(/models\/([^:]+):/)?.[1],
       });
       if (simulateInterpreterTruncation) {
         simulateInterpreterTruncation = false;
@@ -725,6 +726,7 @@ globalThis.fetch = async (url, init = {}) => {
       apiKey: init.headers?.["x-goog-api-key"],
       maxOutputTokens: body.generationConfig?.maxOutputTokens,
       hasGoogleSearchTool: Boolean(body.tools?.some((t) => "google_search" in t)),
+      model: u.match(/models\/([^:]+):/)?.[1],
     });
 
     // A 200 carrying real-looking but incomplete text — exactly what the
@@ -2038,6 +2040,15 @@ check(
   lastQuestionRequest?.hasGoogleSearchTool === true &&
     lastInterpreterRequest?.hasGoogleSearchTool === false &&
     lastPersonaRequest?.hasGoogleSearchTool === false
+);
+// PLAN.md 17.41: the grounded call runs on the full Flash model because Lite
+// doesn't appear to serve the search tool. Nothing else moves off Lite —
+// that model was never the problem and is cheaper and faster.
+check(
+  "the grounded call runs on full Flash while every other caller stays on Lite",
+  lastQuestionRequest?.model === "gemini-3.5-flash" &&
+    lastInterpreterRequest?.model === "gemini-3.5-flash-lite" &&
+    lastPersonaRequest?.model === "gemini-3.5-flash-lite"
 );
 // Clean up the dangling pendingConfirmation this created directly (rather
 // than through a chat message, which would have side effects of its own),
@@ -3840,6 +3851,18 @@ const retryRequest = lastRequestWhere((r) => r.systemInstruction.includes("ช�
 check(
   "the retry sends no tool, and drops the search rules from the prompt with it",
   retryRequest?.hasGoogleSearchTool === false && !retryRequest.systemInstruction.includes("ให้ใช้ Google Search")
+);
+check(
+  "the retry also drops back to Lite — the full model was only for the search tool",
+  retryRequest?.model === "gemini-3.5-flash-lite"
+);
+// TEMPORARY diagnostic (PLAN.md 17.41): while it's on, a refused search tool
+// appends Google's own error to the reply so it can be read from the chat
+// instead of the Cloudflare dashboard. Delete this check with the feature.
+check(
+  "a refused search tool surfaces the real error in the reply for diagnosis",
+  toolRejectedReply.includes("[debug] ค้นเว็บไม่สำเร็จ") &&
+    toolRejectedReply.includes("Search Grounding is not supported for this model")
 );
 check(
   "the retry still carries the account's own data, and the pre-search rule about missing data",
