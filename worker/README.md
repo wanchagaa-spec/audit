@@ -1042,6 +1042,25 @@ specifically checks that the signed `state` param on the generated Google auth l
 decodes back to the same LINE user id the webhook event carried, which is the exact bug
 class the LIFF removal above fixed.
 
+### How much of the sheet a command reads
+
+Reports about a single month don't read the whole `Transactions` tab. The
+Worker remembers, per book and per month, which sheet row that month starts
+on (KV key `tx-month-start:<sheetId>:<YYYY-MM>`) and asks Google only for
+`Transactions!A<start>:J` — one request whose size follows how much has
+happened since the month began rather than how long the book is. The row is
+treated as a hint: the row directly above the window comes back in the same
+request and must belong to an earlier month, otherwise the hint is thrown
+away and rebuilt from a full read. That is what makes hand-edits in Google
+Sheets safe — nothing else could notice them.
+
+Four commands still read everything, deliberately, and say so at each call
+site: `เหลือเงินเท่าไหร่` (a cumulative balance is every month there has ever
+been), `ค้นหา` (searching only this month would quietly stop finding things),
+`รายการล่าสุด` and `ลบรายการล่าสุด` (the five most recent overall, which on
+the 1st of a month are last month's). See PLAN.md 17.47 for why monthly tabs
+plus a precomputed summary tab were considered and turned down.
+
 `scripts/chat-engine-check.mjs` covers `src/chatEngine.ts` on its own — the multi-turn
 money conversation with no webhook, Sheets or KV around it. `test-flow.mjs` drives the
 same engine through the whole Worker, but a wrong turn in the conversation is much

@@ -152,19 +152,179 @@ export async function readAllTransactions(
   return parseTransactionRows(data.values ?? []);
 }
 
-/** Both money tabs in one HTTP request, for the handlers that need spending
- * and limits together — "งบเหลือเท่าไหร่", /view/budgets, and the
- * after-a-save budget line. Each of those used to fire two requests. */
-export async function readTransactionsAndBudgets(
-  accessToken: string,
-  spreadsheetId: string
-): Promise<{ transactions: TransactionRow[]; budgets: BudgetRow[] }> {
-  const [txRaw, budgetRaw] = await sheetsBatchGet(accessToken, spreadsheetId, [
-    TRANSACTIONS_RANGE,
-    BUDGETS_RANGE,
-  ]);
-  return { transactions: parseTransactionRows(txRaw), budgets: parseBudgetRows(budgetRaw) };
+// ---- Reading from a month onward, not from the beginning (PLAN.md 17.47) --
+// 17.45 stopped the same tab being fetched twice in one message, but every
+// one of those fetches still pulled the entire history, and that grows
+// forever. Almost everything the bot answers is about the current month.
+//
+// The plan considered first was splitting Transactions into one tab per
+// month with a precomputed summary tab. That was turned down: the summary
+// would be a cache living inside the user's own spreadsheet, and this is a
+// spreadsheet its owner edits by hand — delete a row and the summary keeps
+// reporting the old total, confidently and silently. A wrong money figure is
+// worse than a slow one. It would also need every live book migrated with an
+// API that has no transactions, and it would break the five commands that
+// genuinely span months ("เหลือเงินเท่าไหร่", "ค้นหา", "รายการล่าสุด",
+// "ลบรายการล่าสุด", and "สรุปสัปดาห์นี้" for the ~4 days a week straddles
+// two months).
+//
+// What's here instead: remember which sheet row a month starts on. Rows are
+// appended in chronological order, so a month is a contiguous run, and
+// `Transactions!A<start>:J` is one request whose size is bounded by how much
+// has happened since that month began rather than by the whole history. The
+// tab layout, the columns and every existing book are untouched, and nothing
+// is derived and stored that could disagree with the rows themselves.
+//
+// The remembered row is a hint, never trusted blindly — see checkMonthWindow.
+
+/** Remembered per book and per month. TTL only so keys for long-past months
+ * don't accumulate; expiry costs one full read and is otherwise invisible. */
+const MONTH_START_TTL_SECONDS = 90 * 24 * 60 * 60;
+
+function monthStartKey(spreadsheetId: string, month: string): string {
+  return `tx-month-start:${spreadsheetId}:${month}`;
 }
+
+/** The 1-based sheet row where `month` begins. When the month has no rows
+ * yet this is the row its first one will land on, which is what makes the
+ * hint usable from the very start of a month rather than only after the
+ * first save. Indices come from the raw response, blanks included, for the
+ * same reason deleteSheetRow's do. */
+function findMonthStartRow(rawRows: string[][], month: string): number {
+  const index = rawRows.findIndex((r) => r[0] && String(r[1] ?? "").startsWith(month));
+  return index === -1 ? rawRows.length + 2 : index + 2;
+}
+
+/**
+ * Is the remembered start row still a real month boundary? Answered from the
+ * single row directly above the window, fetched in the same batchGet, so the
+ * check costs nothing extra.
+ *
+ * It must exist and belong to an earlier month. Blank means rows above were
+ * cleared or deleted; a date in `month` or later means the index has drifted
+ * down and rows of this month are now sitting above the window — the one
+ * failure that would silently under-report money. Either way the hint is
+ * discarded and rebuilt from a full read.
+ *
+ * Drift the other way (the row points too far *up*, into an earlier month)
+ * needs no detection: the window simply starts early, and callers filter by
+ * date regardless, so the answer stays correct and only the request is
+ * bigger than it had to be.
+ *
+ * Row 2 has nothing above it but the header, so there is nothing to check
+ * and nothing that can have drifted.
+ */
+function checkMonthWindow(startRow: number, boundaryRaw: string[][], month: string): boolean {
+  if (startRow <= 2) return true;
+  const boundary = boundaryRaw[0];
+  if (!boundary || !boundary[0]) return false;
+  const boundaryMonth = String(boundary[1] ?? "").slice(0, 7);
+  return boundaryMonth !== "" && boundaryMonth < month;
+}
+
+/**
+ * Every transaction from the start of `month` to the end of the sheet, plus
+ * whatever other ranges the caller wants, in one HTTP request.
+ *
+ * Open-ended on purpose: a window that runs to the end of the sheet is what
+ * lets "สรุปสัปดาห์นี้" cross a month boundary and "สรุปเดือนที่แล้ว" work,
+ * both from a single read. Callers filter down to the dates they want.
+ */
+async function readTransactionsFromMonth(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string,
+  extraRanges: string[] = []
+): Promise<{ transactions: TransactionRow[]; extras: string[][][] }> {
+  // Applied to both paths, not just the full read. A window can legitimately
+  // open earlier than the month it was asked for — a hint that drifted *up*
+  // is deliberately not detected, since starting early costs a bigger request
+  // but never a wrong answer — and without this the two paths would return
+  // different row sets for the same call. Every caller filters by date on top
+  // of this anyway, which is exactly why the difference could sit here
+  // unnoticed; the function's own promise is what's being kept.
+  const fromFirstOfMonth = (rows: TransactionRow[]) => rows.filter((r) => r.date >= `${month}-01`);
+
+  const cached = Number(await kv.get(monthStartKey(spreadsheetId, month)));
+  if (Number.isInteger(cached) && cached >= 2) {
+    // The boundary row needs only its id and date, so it asks for A:B.
+    const boundaryRanges = cached > 2 ? [`Transactions!A${cached - 1}:B${cached - 1}`] : [];
+    const raw = await sheetsBatchGet(accessToken, spreadsheetId, [
+      ...boundaryRanges,
+      `Transactions!A${cached}:J`,
+      ...extraRanges,
+    ]);
+    const boundaryRaw = boundaryRanges.length > 0 ? raw[0] : [];
+    if (checkMonthWindow(cached, boundaryRaw, month)) {
+      return {
+        transactions: fromFirstOfMonth(parseTransactionRows(raw[boundaryRanges.length])),
+        extras: raw.slice(boundaryRanges.length + 1),
+      };
+    }
+    // Hint no good — fall through and rebuild it from the whole tab.
+  }
+
+  const raw = await sheetsBatchGet(accessToken, spreadsheetId, [TRANSACTIONS_RANGE, ...extraRanges]);
+  const allRaw = raw[0];
+  await kv.put(monthStartKey(spreadsheetId, month), String(findMonthStartRow(allRaw, month)), {
+    expirationTtl: MONTH_START_TTL_SECONDS,
+  });
+  return { transactions: fromFirstOfMonth(parseTransactionRows(allRaw)), extras: raw.slice(1) };
+}
+
+/** Rows dated on or after the first of `month`. */
+export async function readTransactionsFrom(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string
+): Promise<TransactionRow[]> {
+  const { transactions } = await readTransactionsFromMonth(accessToken, spreadsheetId, kv, month);
+  return transactions;
+}
+
+/** Just the one month. */
+export async function readTransactionsForMonth(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string
+): Promise<TransactionRow[]> {
+  const rows = await readTransactionsFrom(accessToken, spreadsheetId, kv, month);
+  return rows.filter((r) => r.date?.startsWith(month));
+}
+
+/** One month's spending and this month's limits, in one HTTP request — for
+ * "งบเหลือเท่าไหร่", /view/budgets, and the after-a-save budget line. */
+export async function readMonthTransactionsAndBudgets(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string
+): Promise<{ transactions: TransactionRow[]; budgets: BudgetRow[] }> {
+  const { transactions, extras } = await readTransactionsFromMonth(
+    accessToken,
+    spreadsheetId,
+    kv,
+    month,
+    [BUDGETS_RANGE]
+  );
+  return {
+    transactions: transactions.filter((r) => r.date?.startsWith(month)),
+    budgets: parseBudgetRows(extras[0]),
+  };
+}
+
+// Nothing invalidates these hints, and nothing needs to. An append lands
+// below every window, so a row that was a boundary stays one. A delete can
+// shift rows out from under a hint, but only ever in the direction
+// checkMonthWindow detects: removing a row above the window pulls this
+// month's first row up into the boundary slot, which fails the check and
+// triggers a rebuild. Removing one at or below the start row leaves the rows
+// above it — and therefore the boundary — exactly where they were. The same
+// check is what covers edits made by hand in Google Sheets, which no
+// invalidation hook could ever see.
 
 /** Shared by deleteMostRecentTransaction and deleteDiaryEntry — resolves
  * the tab's sheetId and deletes one data row. `dataRowIndex` is 0-based
@@ -633,14 +793,18 @@ export async function readAccountSnapshot(
     ensureDiaryTab(accessToken, spreadsheetId, kv),
     ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey),
   ]);
-  const [txRaw, diaryRaw, budgetRaw, shiftRaw] = await sheetsBatchGet(accessToken, spreadsheetId, [
-    TRANSACTIONS_RANGE,
+  // Transactions come windowed to the month (PLAN.md 17.47) — answerQuestion
+  // filtered them to `monthKey` immediately anyway, so nothing downstream
+  // changes. Diary is still read whole; it's a handful of rows a day of text
+  // and has never been the expensive one.
+  const { transactions, extras } = await readTransactionsFromMonth(accessToken, spreadsheetId, kv, monthKey, [
     DIARY_RANGE,
     BUDGETS_RANGE,
     shiftsDataRange(monthKey),
   ]);
+  const [diaryRaw, budgetRaw, shiftRaw] = extras;
   return {
-    transactions: parseTransactionRows(txRaw),
+    transactions,
     diary: parseDiaryRows(diaryRaw),
     budgets: parseBudgetRows(budgetRaw),
     shifts: parseShiftGrid(monthKey, shiftRaw),

@@ -27,6 +27,11 @@ export async function matchTransactionCommand(text: string): Promise<Handler | n
 
   if (DELETE_LAST_PHRASES.includes(trimmed)) {
     return async (ctx) => {
+      // Whole tab on purpose (PLAN.md 17.47): the most recent row overall,
+      // which on the 1st of a month is still last month's. It also has to
+      // agree with deleteMostRecentTransaction, which reads the whole tab
+      // too — a prompt naming a different row than the one deleted would be
+      // the worst possible bug here.
       const all = await readAllTransactions(ctx.accessToken, ctx.spreadsheetId);
       if (all.length === 0) return "ยังไม่มีรายการเลยนะ ไม่มีอะไรให้ลบ";
       const mostRecent = [...all].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];

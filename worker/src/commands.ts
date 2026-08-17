@@ -1,5 +1,11 @@
 import { DEFAULT_CATEGORIES } from "./categories.ts";
-import { readAllTransactions, readTransactionsAndBudgets, type TransactionRow } from "./sheets.ts";
+import {
+  readAllTransactions,
+  readMonthTransactionsAndBudgets,
+  readTransactionsForMonth,
+  readTransactionsFrom,
+  type TransactionRow,
+} from "./sheets.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokWeekdayIndex } from "./thaiDate.ts";
 
 export function formatBaht(n: number): string {
@@ -82,7 +88,11 @@ function topCategoriesBlock(rows: TransactionRow[]): string[] {
 
 // ---- Command matching -------------------------------------------------
 
-type Handler = (accessToken: string, spreadsheetId: string) => Promise<string>;
+// `kv` arrived with the month-windowed reads (PLAN.md 17.47), which look up
+// where the month starts before asking Google for it. Handlers that answer
+// about all of history — "เหลือเงินเท่าไหร่", "ค้นหา", "รายการล่าสุด" —
+// still read the whole tab and simply don't declare the parameter.
+type Handler = (accessToken: string, spreadsheetId: string, kv: KVNamespace) => Promise<string>;
 
 function includesAny(text: string, phrases: string[]): boolean {
   const t = text.trim();
@@ -200,41 +210,45 @@ export function buildHelpText(webSearchEnabled: boolean): string {
 const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   {
     test: (t) => includesAny(t, ["สรุปวันนี้", "วันนี้ใช้ไปเท่าไหร่", "วันนี้จ่ายไปเท่าไหร่", "ยอดวันนี้"]),
-    handle: async (accessToken, spreadsheetId) => {
-      const all = await readAllTransactions(accessToken, spreadsheetId);
+    handle: async (accessToken, spreadsheetId, kv) => {
+      const all = await readTransactionsForMonth(accessToken, spreadsheetId, kv, currentMonthKey());
       const rows = all.filter((r) => r.date === todayKey());
       return summaryText("สรุปวันนี้", rows);
     },
   },
   {
     test: (t) => includesAny(t, ["สรุปสัปดาห์นี้", "อาทิตย์นี้ใช้ไปเท่าไหร่", "สัปดาห์นี้ใช้ไปเท่าไหร่"]),
-    handle: async (accessToken, spreadsheetId) => {
-      const all = await readAllTransactions(accessToken, spreadsheetId);
+    handle: async (accessToken, spreadsheetId, kv) => {
       const start = startOfWeekKey();
+      // The week starts on Monday, so about four days in thirty it began in
+      // last month. Opening the window at the month the week started in
+      // covers both cases in one read — a window runs to the end of the
+      // sheet, so it always includes today as well.
+      const all = await readTransactionsFrom(accessToken, spreadsheetId, kv, start.slice(0, 7));
       const rows = all.filter((r) => r.date >= start);
       return summaryText("สรุปสัปดาห์นี้", rows);
     },
   },
   {
     test: (t) => includesAny(t, ["สรุปเดือนที่แล้ว", "เดือนที่แล้วใช้ไปเท่าไหร่", "เดือนก่อนใช้ไปเท่าไหร่"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = lastMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
-      const rows = all.filter((r) => r.date?.startsWith(month));
+      const rows = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
       return summaryText(`สรุปเดือนที่แล้ว (${month})`, rows) + topCategoriesBlock(rows).join("\n");
     },
   },
   {
     test: (t) => includesAny(t, ["สรุปเดือนนี้", "สรุป"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
-      const rows = all.filter((r) => r.date?.startsWith(month));
+      const rows = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
       return summaryText(`สรุปเดือนนี้ (${month})`, rows) + topCategoriesBlock(rows).join("\n");
     },
   },
   {
     test: (t) => includesAny(t, ["เหลือเงินเท่าไหร่", "ยอดคงเหลือ", "คงเหลือเท่าไหร่", "มีเงินเหลือเท่าไหร่"]),
+    // Whole tab on purpose: a cumulative balance is every month there has
+    // ever been, so no window can answer it (PLAN.md 17.47).
     handle: async (accessToken, spreadsheetId) => {
       const all = await readAllTransactions(accessToken, spreadsheetId);
       if (all.length === 0) return "ยังไม่มีรายการเลยนะ";
@@ -244,34 +258,30 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
   {
     test: (t) => includesAny(t, ["รายรับเดือนนี้"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
-      const income = all
-        .filter((r) => r.type === "income" && r.date?.startsWith(month))
-        .reduce((s, r) => s + r.amount, 0);
+      const all = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
+      const income = all.filter((r) => r.type === "income").reduce((s, r) => s + r.amount, 0);
       return `รายรับเดือนนี้: ${formatBaht(income)} บาท`;
     },
   },
   {
     test: (t) => includesAny(t, ["รายจ่ายเดือนนี้"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
-      const expense = all
-        .filter((r) => r.type === "expense" && r.date?.startsWith(month))
-        .reduce((s, r) => s + r.amount, 0);
+      const all = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
+      const expense = all.filter((r) => r.type === "expense").reduce((s, r) => s + r.amount, 0);
       return `รายจ่ายเดือนนี้: ${formatBaht(expense)} บาท`;
     },
   },
   {
     test: (t) => includesAny(t, ["วันไหนใช้เงินเยอะที่สุด", "วันไหนจ่ายเยอะสุด", "วันที่ใช้เงินเยอะที่สุด"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
+      const all = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
       const byDay = new Map<string, number>();
       for (const r of all) {
-        if (r.type !== "expense" || !r.date?.startsWith(month)) continue;
+        if (r.type !== "expense") continue; // already scoped to `month` by the read
         byDay.set(r.date, (byDay.get(r.date) ?? 0) + r.amount);
       }
       if (byDay.size === 0) return "เดือนนี้ยังไม่มีรายจ่ายเลยนะ";
@@ -281,12 +291,12 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
   {
     test: (t) => includesAny(t, ["ซื้ออะไรบ่อยที่สุด", "หมวดไหนใช้บ่อยที่สุด", "จ่ายอะไรบ่อยสุด"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
+      const all = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
       const counts = new Map<string, number>();
       for (const r of all) {
-        if (r.type !== "expense" || !r.date?.startsWith(month)) continue;
+        if (r.type !== "expense") continue; // already scoped to `month` by the read
         counts.set(r.categoryId, (counts.get(r.categoryId) ?? 0) + 1);
       }
       if (counts.size === 0) return "เดือนนี้ยังไม่มีรายจ่ายเลยนะ";
@@ -296,12 +306,12 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
   {
     test: (t) => includesAny(t, ["หมวดไหนใช้เงินเยอะที่สุด", "จ่ายหมวดไหนเยอะสุด", "ใช้เงินหมวดไหนมากที่สุด"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
+      const all = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
       const byCategory = new Map<string, number>();
       for (const r of all) {
-        if (r.type !== "expense" || !r.date?.startsWith(month)) continue;
+        if (r.type !== "expense") continue; // already scoped to `month` by the read
         byCategory.set(r.categoryId, (byCategory.get(r.categoryId) ?? 0) + r.amount);
       }
       if (byCategory.size === 0) return "เดือนนี้ยังไม่มีรายจ่ายเลยนะ";
@@ -311,29 +321,33 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
   {
     test: (t) => includesAny(t, ["เฉลี่ยวันละเท่าไหร่", "ใช้เงินเฉลี่ยต่อวันเท่าไหร่", "เฉลี่ยใช้จ่ายต่อวัน"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const all = await readAllTransactions(accessToken, spreadsheetId);
-      const expense = all
-        .filter((r) => r.type === "expense" && r.date?.startsWith(month))
-        .reduce((s, r) => s + r.amount, 0);
+      const all = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
+      const expense = all.filter((r) => r.type === "expense").reduce((s, r) => s + r.amount, 0);
       const days = daysElapsedInMonth(month);
       return `เฉลี่ยใช้จ่ายวันละ ${formatBaht(expense / days)} บาท (จากรายจ่ายรวม ${formatBaht(expense)} บาท ใน ${days} วัน)`;
     },
   },
   {
     test: (t) => includesAny(t, ["งบเหลือเท่าไหร่", "งบที่ตั้งไว้เหลือเท่าไหร่", "ใช้งบไปเท่าไหร่แล้ว"]),
-    handle: async (accessToken, spreadsheetId) => {
+    handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      // One request for both tabs, not two in parallel (PLAN.md 17.45).
-      const { transactions: all, budgets } = await readTransactionsAndBudgets(accessToken, spreadsheetId);
+      // One request for both tabs (PLAN.md 17.45), and only this month's rows
+      // of the big one (PLAN.md 17.47).
+      const { transactions: all, budgets } = await readMonthTransactionsAndBudgets(
+        accessToken,
+        spreadsheetId,
+        kv,
+        month
+      );
       const monthBudgets = budgets.filter((b) => b.month === month);
       if (monthBudgets.length === 0) {
         return 'ยังไม่ได้ตั้งงบไว้เลยนะ ตั้งได้เลยเช่น "ตั้งงบ อาหาร 5000" หรือตั้งหลายหมวดพร้อมกันที่แท็บ "งบ" ในเว็บ';
       }
       const spentByCategory = new Map<string, number>();
       for (const r of all) {
-        if (r.type !== "expense" || !r.date?.startsWith(month)) continue;
+        if (r.type !== "expense") continue; // already scoped to `month` by the read
         spentByCategory.set(r.categoryId, (spentByCategory.get(r.categoryId) ?? 0) + r.amount);
       }
       const lines = monthBudgets.map((b) => {
@@ -347,6 +361,8 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
   {
     test: (t) => includesAny(t, ["รายการล่าสุด"]),
+    // Whole tab on purpose (PLAN.md 17.47): five most recent across all time,
+    // and on the 1st of a month a window would have fewer than five in it.
     handle: async (accessToken, spreadsheetId) => {
       const all = await readAllTransactions(accessToken, spreadsheetId);
       if (all.length === 0) return "ยังไม่มีรายการเลยนะ";
@@ -386,6 +402,8 @@ export async function matchCommand(text: string, origin: string): Promise<Handle
 
   const searchTerm = searchMatch(text);
   if (searchTerm) {
+    // Whole tab on purpose (PLAN.md 17.47): searching only the current month
+    // would quietly stop finding things, which is worse than being slower.
     return async (accessToken, spreadsheetId) => {
       const all = await readAllTransactions(accessToken, spreadsheetId);
       const matches = all.filter(

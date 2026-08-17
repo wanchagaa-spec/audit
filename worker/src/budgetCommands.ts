@@ -14,7 +14,7 @@
 
 import { DEFAULT_CATEGORIES } from "./categories.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { deleteBudget, readBudgets, readTransactionsAndBudgets, upsertBudget } from "./sheets.ts";
+import { deleteBudget, readBudgets, readMonthTransactionsAndBudgets, upsertBudget } from "./sheets.ts";
 import { setPendingConfirmation, type ActionCtx } from "./state.ts";
 import { bangkokMonthKey } from "./thaiDate.ts";
 
@@ -147,9 +147,11 @@ export async function buildBudgetStatusLines(ctx: ActionCtx, justSaved: SavedExp
   const categoryIds = new Set(justSaved.map((e) => e.categoryId));
 
   const month = bangkokMonthKey();
-  const { transactions, budgets: allBudgets } = await readTransactionsAndBudgets(
+  const { transactions, budgets: allBudgets } = await readMonthTransactionsAndBudgets(
     ctx.accessToken,
-    ctx.spreadsheetId
+    ctx.spreadsheetId,
+    ctx.kv,
+    month
   );
   const budgets = allBudgets.filter((b) => b.month === month && categoryIds.has(b.categoryId));
   if (budgets.length === 0) return [];
@@ -157,7 +159,7 @@ export async function buildBudgetStatusLines(ctx: ActionCtx, justSaved: SavedExp
   const spentByCategory = new Map<string, number>();
   const alreadyCounted = new Set<string>();
   for (const row of transactions) {
-    if (row.type !== "expense" || !row.date?.startsWith(month)) continue;
+    if (row.type !== "expense") continue; // already scoped to `month` by the read
     alreadyCounted.add(row.id);
     spentByCategory.set(row.categoryId, (spentByCategory.get(row.categoryId) ?? 0) + row.amount);
   }

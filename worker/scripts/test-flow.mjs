@@ -170,16 +170,51 @@ let simulateSpreadsheetAccessDeniedOnce = false; // makes the next canAccessSpre
 // trips, which is the whole point of the change and is otherwise invisible
 // from the reply text.
 let sheetsValueReadRequests = 0;
+// Every range asked for, in order, so a test can assert *what* was read and
+// not merely how many requests it took.
+const sheetRangesRead = [];
 
-/** Which mock store a range refers to. Shared by the single-range and
- * batchGet paths so both answer from the same data. */
+function columnIndex(letters) {
+  return [...letters].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0) - 1;
+}
+
+/**
+ * Resolves any A1 range against the mock stores, the way the real values API
+ * would. Shared by the single-range and batchGet paths so both answer from
+ * the same data.
+ *
+ * Deliberately general rather than a list of the exact ranges the code
+ * happens to ask for today. The month-window reads (PLAN.md 17.47) ask for
+ * arbitrary slices — `Transactions!A48:J` for a window, `Transactions!A47:B47`
+ * for the boundary row above it — and a mock that only knew `A2:` would have
+ * thrown on the first one. It didn't, which is the point worth recording:
+ * every seeded row in this suite is dated today, so the current month always
+ * began at row 2 and the window was indistinguishable from a full read. The
+ * mechanism looked covered by 491 passing tests while being entirely untested.
+ */
 function sheetValuesForRange(range) {
-  if (range.startsWith("Transactions!A2:")) return sheetRows;
-  if (range.startsWith("Budgets!A2:")) return budgetRows;
-  if (range.startsWith("Diary!A2:")) return diaryRows;
-  const shiftTab = range.match(/^'(Shifts-\d{4}-\d{2})'!A2:/)?.[1];
-  if (shiftTab) return shiftGridStore[shiftTab] ?? [];
-  throw new Error(`test mock: unhandled sheet range "${range}"`);
+  const parsed = range.match(/^(?:'([^']+)'|(\w+))!([A-Z]+)(\d+):([A-Z]+)(\d*)$/);
+  if (!parsed) throw new Error(`test mock: unparseable sheet range "${range}"`);
+  const [, quotedTab, plainTab, startCol, startRow, endCol, endRow] = parsed;
+  const tab = quotedTab ?? plainTab;
+
+  const store =
+    tab === "Transactions" ? sheetRows
+    : tab === "Budgets" ? budgetRows
+    : tab === "Diary" ? diaryRows
+    : /^Shifts-\d{4}-\d{2}$/.test(tab) ? (shiftGridStore[tab] ?? [])
+    : null;
+  if (store === null) throw new Error(`test mock: unhandled sheet tab "${tab}"`);
+
+  // Every store holds data rows only, so store[0] is sheet row 2. An
+  // open-ended range (no end row) runs to the last row that has data, which
+  // is what makes the real API trim rather than return blanks forever.
+  sheetRangesRead.push(range);
+  const from = Math.max(0, Number(startRow) - 2);
+  const to = endRow === "" ? store.length : Number(endRow) - 1;
+  const firstCol = columnIndex(startCol);
+  const lastCol = columnIndex(endCol);
+  return store.slice(from, to).map((row) => row.slice(firstCol, lastCol + 1));
 }
 
 const realFetch = fetch;
@@ -295,13 +330,10 @@ globalThis.fetch = async (url, init = {}) => {
     sheetRows.push(...body.values);
     return new Response(JSON.stringify({}), { status: 200 });
   }
-  if (u.includes("Transactions!A2:J")) {
+  const singleRangeRead = u.match(/\/values\/((?:Transactions|Budgets|Diary)![A-Z]+\d+:[A-Z]+\d*)$/);
+  if (singleRangeRead) {
     sheetsValueReadRequests++;
-    return new Response(JSON.stringify({ values: sheetRows }), { status: 200 });
-  }
-  if (u.includes("Budgets!A2:D")) {
-    sheetsValueReadRequests++;
-    return new Response(JSON.stringify({ values: budgetRows }), { status: 200 });
+    return new Response(JSON.stringify({ values: sheetValuesForRange(singleRangeRead[1]) }), { status: 200 });
   }
   if (u.includes("api.line.me/v2/bot/message/reply")) {
     const body = JSON.parse(init.body);
@@ -704,10 +736,6 @@ globalThis.fetch = async (url, init = {}) => {
     const body = JSON.parse(init.body);
     diaryRows.push(...body.values);
     return new Response(JSON.stringify({}), { status: 200 });
-  }
-  if (u.includes("Diary!A2:E")) {
-    sheetsValueReadRequests++;
-    return new Response(JSON.stringify({ values: diaryRows }), { status: 200 });
   }
   if (u.includes("Shifts-") && u.includes("!A1?valueInputOption=RAW")) {
     const tabName = u.match(/'(Shifts-\d{4}-\d{2})'/)?.[1];
@@ -5453,6 +5481,177 @@ check(
   driveUploads.length === driveUploadsBeforeRedeliveryDrain + 1 &&
     driveUploads.filter((u) => u.name.includes("redelivered-img-1")).length === 1
 );
+
+// ---- Month windows (PLAN.md 17.47) ----------------------------------------
+// Reading only from the start of the month, instead of the whole history,
+// hangs on a remembered sheet row. Everything below needs the current month
+// to start somewhere *other* than row 2, which no earlier test in this file
+// produces — every row they seed is dated today — so this section builds a
+// sheet with real history above the current month.
+
+sheetRows.length = 0;
+budgetRows.length = 0;
+for (const key of [...kv.store.keys()].filter((k) => k.startsWith("tx-month-start:"))) kv.store.delete(key);
+
+const thisMonth = bangkokMonthKey();
+const lastMonth = (() => {
+  const [y, m] = thisMonth.split("-").map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
+})();
+const twoMonthsAgo = (() => {
+  const [y, m] = lastMonth.split("-").map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
+})();
+const txRow = (date, type, amount, categoryId, note) => [
+  crypto.randomUUID(), date, type, String(amount), categoryId, note, note, lineUserId, "LINE", `${date}T03:00:00.000Z`,
+];
+
+// Six rows of history, then three in the current month: the month starts at
+// sheet row 8 (row 1 is the header, so data row 6 is sheet row 7).
+sheetRows.push(
+  txRow(`${twoMonthsAgo}-05`, "income", 30000, "salary", "เงินเดือน"),
+  txRow(`${twoMonthsAgo}-11`, "expense", 900, "food", "ข้าว"),
+  txRow(`${lastMonth}-03`, "income", 30000, "salary", "เงินเดือน"),
+  txRow(`${lastMonth}-09`, "expense", 1500, "food", "ข้าว"),
+  txRow(`${lastMonth}-19`, "expense", 700, "transport", "แท็กซี่"),
+  txRow(`${lastMonth}-27`, "expense", 400, "shopping", "เสื้อ"),
+  txRow(`${thisMonth}-01`, "income", 30000, "salary", "เงินเดือน"),
+  txRow(bangkokDateKey(), "expense", 250, "food", "กาแฟ"),
+  txRow(bangkokDateKey(), "expense", 120, "transport", "รถเมล์")
+);
+const CURRENT_MONTH_START_ROW = 8;
+
+// First ask of the month: nothing remembered, so the whole tab is read once
+// and the boundary is worked out from it.
+sheetRangesRead.length = 0;
+sheetsValueReadRequests = 0;
+const coldSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "with no remembered row, the month summary reads the whole tab once",
+  sheetsValueReadRequests === 1 && sheetRangesRead.includes("Transactions!A2:J")
+);
+check(
+  "and it remembers where this month starts",
+  (await kv.get(`tx-month-start:fake-sheet-id:${thisMonth}`)) === String(CURRENT_MONTH_START_ROW)
+);
+check(
+  "the cold answer covers this month only, not the history above it",
+  coldSummary.includes("30,000") && coldSummary.includes("370") && !coldSummary.includes("60,000")
+);
+
+// Second ask: the remembered row turns it into a window, and the boundary row
+// above it is checked in the very same request.
+sheetRangesRead.length = 0;
+sheetsValueReadRequests = 0;
+const warmSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "the next one reads only from that row, never the whole tab",
+  sheetsValueReadRequests === 1 &&
+    sheetRangesRead.includes(`Transactions!A${CURRENT_MONTH_START_ROW}:J`) &&
+    !sheetRangesRead.includes("Transactions!A2:J")
+);
+check(
+  "the boundary row above the window is verified in the same request",
+  sheetRangesRead.includes(`Transactions!A${CURRENT_MONTH_START_ROW - 1}:B${CURRENT_MONTH_START_ROW - 1}`)
+);
+check("and the windowed answer is identical to the cold one", warmSummary === coldSummary);
+
+// A window runs to the end of the sheet, so a save lands inside it with no
+// invalidation anywhere — this is why appends need no cache busting at all.
+await handleTextMessage(env, lineUserId, "ค่าข้าว 80", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+const afterSaveSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "a row saved after the window was remembered still shows up in it",
+  afterSaveSummary.includes("450") && (await kv.get(`tx-month-start:fake-sheet-id:${thisMonth}`)) === String(CURRENT_MONTH_START_ROW)
+);
+
+// The commands that genuinely span months must keep spanning them.
+const allTimeBalance = await handleTextMessage(env, lineUserId, "เหลือเงินเท่าไหร่", origin);
+check(
+  "\"เหลือเงินเท่าไหร่\" still counts every month, not just the window",
+  allTimeBalance.includes("90,000") // three salaries, including the two above the window
+);
+const lastMonthSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนที่แล้ว", origin);
+check(
+  "\"สรุปเดือนที่แล้ว\" reads a window opening on that month",
+  lastMonthSummary.includes("30,000") && lastMonthSummary.includes("2,600")
+);
+const keywordSearch = await handleTextMessage(env, lineUserId, "ค้นหาเงินเดือน", origin);
+check(
+  "\"ค้นหา\" still searches all of history",
+  keywordSearch.includes("พบ 3 รายการ")
+);
+
+// The drift the boundary check exists for: a row removed from above the
+// window pulls this month's first row up into the boundary slot, so the
+// remembered number now points one row too far down. Nothing tells the bot —
+// this is what a hand-edit in Google Sheets looks like from here.
+sheetRows.splice(2, 1); // delete one of last month's rows
+sheetRangesRead.length = 0;
+sheetsValueReadRequests = 0;
+const afterDriftSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "a hand-deleted row above the window is caught, not silently under-counted",
+  afterDriftSummary === afterSaveSummary
+);
+check(
+  "catching it costs one extra read, and re-remembers the corrected row",
+  sheetsValueReadRequests === 2 &&
+    sheetRangesRead.includes("Transactions!A2:J") &&
+    (await kv.get(`tx-month-start:fake-sheet-id:${thisMonth}`)) === String(CURRENT_MONTH_START_ROW - 1)
+);
+sheetRangesRead.length = 0;
+sheetsValueReadRequests = 0;
+await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check("and it's back to a single windowed read straight after", sheetsValueReadRequests === 1);
+
+// readTransactionsFrom promises rows on or after the first of the month, and
+// has to keep that promise on both paths — the full read *and* the windowed
+// one. Checked directly because no command can tell the difference: every
+// caller filters by date again on its own, so a leak here would sit
+// unnoticed behind correct-looking answers.
+const { readTransactionsFrom } = await import("../src/sheets.ts");
+const coldRows = await readTransactionsFrom("fake-access-token", "fake-sheet-id", kv, thisMonth);
+check(
+  "the full-read path returns nothing dated before the month asked for",
+  coldRows.length > 0 && coldRows.every((r) => r.date >= `${thisMonth}-01`)
+);
+// A hint pointing too far up is allowed — it costs a bigger request, never a
+// wrong answer — so the window opens in an earlier month here on purpose.
+await kv.put(`tx-month-start:fake-sheet-id:${thisMonth}`, "2");
+sheetRangesRead.length = 0;
+const earlyWindowRows = await readTransactionsFrom("fake-access-token", "fake-sheet-id", kv, thisMonth);
+check(
+  "a window that opens too early still returns only the month asked for",
+  sheetRangesRead.includes("Transactions!A2:J") &&
+    earlyWindowRows.length === coldRows.length &&
+    earlyWindowRows.every((r) => r.date >= `${thisMonth}-01`)
+);
+await kv.delete(`tx-month-start:fake-sheet-id:${thisMonth}`);
+
+// A week beginning on a Monday spends about four days in thirty straddling
+// two months. Forced here rather than waited for: the window has to open on
+// the month the week *started* in, or those days vanish from the total.
+const { bangkokWeekdayIndex } = await import("../src/thaiDate.ts");
+const weekStart = addDaysToDateKey(bangkokDateKey(), -bangkokWeekdayIndex());
+if (weekStart.slice(0, 7) !== thisMonth) {
+  const weekSummary = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
+  check("a week that began last month reads from last month's window", weekSummary.includes("450"));
+} else {
+  // Simulate it: put a row on the week's start date, then re-ask with a week
+  // that reaches back before the 1st.
+  sheetRows.push(txRow(`${lastMonth}-28`, "expense", 55, "food", "ปลายเดือน"));
+  sheetRangesRead.length = 0;
+  const spanning = await readTransactionsFrom("fake-access-token", "fake-sheet-id", kv, lastMonth);
+  check(
+    "a window opened on last month still reaches today's rows, so a straddling week is one read",
+    spanning.some((r) => r.date === `${lastMonth}-28`) &&
+      spanning.some((r) => r.date === bangkokDateKey()) &&
+      sheetRangesRead.filter((r) => r.startsWith("Transactions!")).length <= 2
+  );
+  sheetRows.pop();
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

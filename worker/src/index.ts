@@ -809,7 +809,7 @@ async function dispatchLegacyCommands(
     return withFreshAccessToken(
       env,
       link.refreshToken,
-      (accessToken) => reportHandler(accessToken, link.spreadsheetId),
+      (accessToken) => reportHandler(accessToken, link.spreadsheetId, env.ACCOUNTS),
       tokenCache
     );
   }
