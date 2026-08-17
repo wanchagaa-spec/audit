@@ -13,7 +13,7 @@
 // seeing what's already set next to what's been spent.
 
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import { DEFAULT_CATEGORIES } from "./categories.ts";
 import type { Env } from "./index.ts";
 import { deleteBudget, readTransactionsAndBudgets, upsertBudget } from "./sheets.ts";
 import { bangkokMonthKey } from "./thaiDate.ts";

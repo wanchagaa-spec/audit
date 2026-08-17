@@ -1,5 +1,8 @@
-// Mirrors app/src/lib/sheetsService.ts column layout so a spreadsheet can
-// be written to from both the web app and the LINE bot interchangeably.
+// The column layout below was originally shared with the React PWA's
+// sheetsService.ts, so a book could be written to from either side. The PWA
+// is gone (PLAN.md 17.46) and this is now the only writer — but the layout
+// stays exactly as it was, because books created by the old app are still
+// real spreadsheets holding real money, and the bot has to keep reading them.
 
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const TRANSACTION_HEADERS = [
@@ -270,8 +273,10 @@ export async function readBudgets(accessToken: string, spreadsheetId: string): P
 // LINE user's budgets often lived in a different book from the one the bot
 // reads, and "งบเหลือเท่าไหร่" answered "ยังไม่ได้ตั้งงบไว้เลย" forever.
 //
-// The layout matches app/src/lib/sheetsService.ts exactly (same header, same
-// column order), so a book written by either side stays readable by both.
+// The layout matched the React PWA's sheetsService.ts exactly (same header,
+// same column order) so a book written by either side stayed readable by
+// both. The PWA is gone now (PLAN.md 17.46); the layout stays for the books
+// it left behind.
 
 const BUDGET_HEADERS = ["id", "categoryId", "month", "limitAmount"];
 

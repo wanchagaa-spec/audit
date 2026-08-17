@@ -1,6 +1,6 @@
-import { handleUserMessage, isGreeting, type PendingClarification } from "../../app/src/lib/chatEngine.ts";
-import { extractAmount } from "../../app/src/lib/parser.ts";
-import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import { handleUserMessage, isGreeting, type PendingClarification } from "./chatEngine.ts";
+import { extractAmount } from "./parser.ts";
+import { DEFAULT_CATEGORIES } from "./categories.ts";
 import { answerQuestion, matchAiCommand } from "./aiCommands.ts";
 import { interpretMessage, type InterpretedIntent } from "./aiInterpreter.ts";
 import { CalendarApiDisabledError, InsufficientCalendarScopeError } from "./calendar.ts";

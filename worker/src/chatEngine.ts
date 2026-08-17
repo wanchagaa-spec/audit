@@ -1,14 +1,11 @@
-// Explicit .ts extensions, unlike the rest of the app: this module is also
-// imported directly by the Cloudflare Worker (worker/src/index.ts), which
-// runs through loaders that resolve real file paths rather than a bundler's
-// extension guessing — Node's ESM loader refuses an extensionless specifier
-// outright, which is what made `node --experimental-strip-types
-// scripts/test-flow.mjs` (the command that harness documents at its own top)
-// fail to even load. Vite and tsc both accept the explicit form too
-// (allowImportingTsExtensions is on in tsconfig.app.json), so this costs the
-// web app nothing. Applies to every module the worker reaches: this file,
-// lib/parser.ts, and data/defaultCategories.ts.
-import type { Category, EntryType } from "../types.ts";
+// The multi-turn conversation around logging money: what to ask when a
+// message is missing an amount or a category, and when there's enough to
+// hand back a saveable draft.
+//
+// Moved here from the React PWA (app/src/lib/chatEngine.ts) when the PWA was
+// removed (PLAN.md 17.46). It was written for the web app's chat view first
+// and the LINE bot adopted it wholesale; the bot is now its only caller.
+import type { Category, EntryType } from "./categories.ts";
 import { detectType, extractAmount, matchCategory, parseMessage } from "./parser.ts";
 
 export type PendingClarification =

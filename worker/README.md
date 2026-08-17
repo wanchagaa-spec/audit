@@ -1,11 +1,15 @@
-# LINE Bot — Cloudflare Worker (Phase 5)
+# LINE Bot — Cloudflare Worker
 
-Lets you log expenses by chatting with a LINE Official Account instead of (or alongside)
-the web app. See [`../PLAN.md`](../PLAN.md) section 14 for the architecture and rationale.
+Log expenses by chatting with a LINE Official Account. See [`../PLAN.md`](../PLAN.md)
+section 14 for the architecture and rationale.
 
-It reuses the same parsing/clarification logic as the web app
-(`../app/src/lib/parser.ts`, `chatEngine.ts`) and writes to the **same Google Sheets
-layout**, so a spreadsheet stays compatible whichever interface you log from.
+This Worker is the whole product now. It started as a second front end beside a React
+PWA (`app/`), sharing that app's parsing and clarification logic and its Google Sheets
+layout so a spreadsheet stayed compatible whichever one you logged from. The PWA was
+removed once nobody was using it (PLAN.md 17.46); the three modules the bot depended on
+moved here as `src/parser.ts`, `src/chatEngine.ts` and `src/categories.ts`, and the sheet
+layout is unchanged — books the old app created are still real spreadsheets holding real
+money, and the bot still reads and writes them.
 
 ## What you need to set up yourself
 
@@ -28,12 +32,16 @@ Sign up at https://dash.cloudflare.com (no credit card needed for the Workers/KV
 Then create an API Token: **My Profile → API Tokens → Create Token → use the "Edit
 Cloudflare Workers" template → Create Token**. Copy it once (shown only that one time).
 
-### 3. Reuse the same Google OAuth client as the web app — plus a Client Secret
+### 3. A Google OAuth client — with a Client Secret
 
-The web app's Client ID (`VITE_GOOGLE_CLIENT_ID`) only supports the browser-side implicit
-flow. The bot needs a **refresh token** so it can write to Sheets when nobody has the app
-open, which requires the *authorization code* flow — and that needs a Client Secret that
-must never reach a browser.
+The bot needs a **refresh token** so it can write to Sheets with nobody watching, which
+requires the *authorization code* flow, and that needs a Client Secret that must never
+reach a browser.
+
+(The Client ID is still carried in a repository secret named `VITE_GOOGLE_CLIENT_ID` —
+a leftover name from the removed PWA, which used it for the browser-side implicit flow.
+It is deliberately not renamed: the deploy workflow reads that exact name, and renaming
+it would break deploys until the secret is re-added by hand.)
 
 1. In the same Google Cloud project as before, open the OAuth client you already created
    (APIs & Services → Credentials).
@@ -125,8 +133,8 @@ Optional, same flat-key shape as the two keys above — travel search ("หา�
 Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
 
 1. Add these as **repository secrets** (Settings → Secrets and variables → Actions →
-   New repository secret) — `VITE_GOOGLE_CLIENT_ID` already exists from the web app setup,
-   reused automatically:
+   New repository secret) — `VITE_GOOGLE_CLIENT_ID` keeps its name for the reason in
+   step 3:
 
    | Secret name | Value |
    |---|---|
@@ -228,7 +236,7 @@ brief-capability-list vs. exhaustive-usage-guide spectrum). See `WELCOME_MESSAGE
 - สรุปวันนี้ / สรุปสัปดาห์นี้ / สรุปเดือนนี้ / สรุปเดือนที่แล้ว
 - เหลือเงินเท่าไหร่ (all-time cumulative balance) / รายรับเดือนนี้เท่าไหร่ / รายจ่ายเดือนนี้เท่าไหร่
 - วันไหนใช้เงินเยอะที่สุด / หมวดไหนใช้เงินเยอะที่สุด / ซื้ออะไรบ่อยที่สุด (by count) / เฉลี่ยใช้เงินต่อวันเท่าไหร่
-- งบเหลือเท่าไหร่ (reads the Budgets tab, set from the web app's Settings)
+- งบเหลือเท่าไหร่ / ตั้งงบ &lt;หมวด&gt; &lt;จำนวน&gt; / ลบงบ &lt;หมวด&gt; — also settable at `/view/budgets`
 - ค้นหา &lt;คำ&gt; / รายการล่าสุด
 - ลบรายการล่าสุด (or ยกเลิกรายการล่าสุด) — undoes the most recent transaction, with a confirm
   step first (`src/transactionCommands.ts`). Checked ahead of the report commands above so
@@ -1023,7 +1031,7 @@ use `"question"`, never any `calendar_*` intent.
 cp .dev.vars.example .dev.vars   # fill in real or test values
 npm run dev                      # wrangler dev, local KV emulation
 npm run typecheck
-npx tsx scripts/test-flow.mjs    # logic smoke test, see below
+npm test                         # both suites below
 ```
 
 `scripts/test-flow.mjs` exercises the real linking/parsing/clarification/summary code
@@ -1034,6 +1042,11 @@ specifically checks that the signed `state` param on the generated Google auth l
 decodes back to the same LINE user id the webhook event carried, which is the exact bug
 class the LIFF removal above fixed.
 
+`scripts/chat-engine-check.mjs` covers `src/chatEngine.ts` on its own — the multi-turn
+money conversation with no webhook, Sheets or KV around it. `test-flow.mjs` drives the
+same engine through the whole Worker, but a wrong turn in the conversation is much
+easier to read at this level. It came over with the engine when the PWA was removed.
+
 To tweak the rich menu's design, edit `assets/generate-rich-menu.py` (needs
 `pip install pillow`) and run it — it writes `assets/rich-menu.png` from scratch every
 time, so it's always reproducible from source rather than being an opaque binary someone
@@ -1043,10 +1056,10 @@ above) to publish it.
 ## Known limitations (documented honestly, not blockers)
 
 - Account linking (`setAccountLink`) always creates a **new personal spreadsheet** the
-  first time a LINE userId links — it does not yet let you pick an *existing* book from
-  the web app to attach to. Fine for a fresh LINE-first user; if you already use the web
-  app and want the same sheet, note the spreadsheet ID from the web app's Settings and
-  wire it in manually for now (or ask to extend the linking flow to support this).
+  first time a LINE userId links — it does not let you attach an *existing* book. Fine
+  for a fresh user; if you have an older book (from the removed PWA, say) and want the
+  bot to use that one, its spreadsheet ID has to be wired in by hand for now, or the
+  linking flow extended to offer the choice.
 - Group books work through LINE group mode (PLAN.md 17) — add the bot to a LINE group and it
   keeps one shared book for the whole group. (This bullet used to claim group books weren't
   wired up at all; that was stale documentation from before phase 17 shipped.)

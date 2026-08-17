@@ -1,5 +1,14 @@
-import { handleUserMessage } from "../src/lib/chatEngine.ts";
-import { DEFAULT_CATEGORIES } from "../src/data/defaultCategories.ts";
+// Regression suite for chatEngine.ts on its own — the multi-turn money
+// conversation, with no LINE webhook, no Sheets and no KV around it.
+// test-flow.mjs drives the same engine through the whole Worker; this one
+// stays because a wrong turn in here is far easier to read at this level.
+//
+// Run with: node --experimental-strip-types scripts/chat-engine-check.mjs
+//
+// Came from the React PWA (app/scripts/chatEngine-check.mjs) when the PWA
+// was removed (PLAN.md 17.46), along with the engine it tests.
+import { handleUserMessage } from "../src/chatEngine.ts";
+import { DEFAULT_CATEGORIES } from "../src/categories.ts";
 
 let pass = 0, fail = 0;
 function check(label, cond) {

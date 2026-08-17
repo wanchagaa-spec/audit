@@ -6,7 +6,7 @@
 // instead and just showed a list, doing nothing. Checked ahead of that
 // report handler in index.ts so this always wins for these exact phrases.
 
-import type { TransactionDraft } from "../../app/src/lib/chatEngine.ts";
+import type { TransactionDraft } from "./chatEngine.ts";
 import { buildBudgetStatusLines } from "./budgetCommands.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { appendTransaction, deleteMostRecentTransaction, readAllTransactions } from "./sheets.ts";

@@ -1,4 +1,4 @@
-import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import { DEFAULT_CATEGORIES } from "./categories.ts";
 import { readAllTransactions, readTransactionsAndBudgets, type TransactionRow } from "./sheets.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokWeekdayIndex } from "./thaiDate.ts";
 

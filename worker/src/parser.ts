@@ -1,7 +1,7 @@
-// Explicit .ts extensions — shared with the Cloudflare Worker, see the note
-// at the top of lib/chatEngine.ts.
-import type { Category, EntryType } from "../types.ts";
-import { INCOME_SIGNAL_WORDS } from "../data/defaultCategories.ts";
+// Turns a line of Thai chat into an amount, a direction and a category.
+// Moved here from the React PWA (app/src/lib/parser.ts) when the PWA was
+// removed (PLAN.md 17.46); the Worker was always its main caller.
+import { INCOME_SIGNAL_WORDS, type Category, type EntryType } from "./categories.ts";
 
 const AMOUNT_PATTERN = /\d+(?:,\d{3})*(?:\.\d+)?/;
 

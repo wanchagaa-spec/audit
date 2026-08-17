@@ -1,4 +1,4 @@
-import type { PendingClarification, TransactionDraft } from "../../app/src/lib/chatEngine.ts";
+import type { PendingClarification, TransactionDraft } from "./chatEngine.ts";
 
 export interface AccountLink {
   spreadsheetId: string;

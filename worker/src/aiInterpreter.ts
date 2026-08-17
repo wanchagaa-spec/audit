@@ -22,8 +22,8 @@
 // just trust" pattern as persona.ts's quotedSpans check and aiCommands.ts's
 // guarded numbers.
 
-import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
-import type { EntryType } from "../../app/src/types.ts";
+import { DEFAULT_CATEGORIES } from "./categories.ts";
+import type { EntryType } from "./categories.ts";
 import { askGemini, GeminiError, INTERPRETER_MAX_OUTPUT_TOKENS } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
 import { BOT_NAME } from "./persona.ts";

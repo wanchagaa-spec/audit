@@ -12,7 +12,7 @@
 // (PLAN.md 17.9). The web page saves directly — pressing Save on a form is
 // itself the confirmation, the same call viewShiftsPage.ts makes.
 
-import { DEFAULT_CATEGORIES } from "../../app/src/data/defaultCategories.ts";
+import { DEFAULT_CATEGORIES } from "./categories.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { deleteBudget, readBudgets, readTransactionsAndBudgets, upsertBudget } from "./sheets.ts";
 import { setPendingConfirmation, type ActionCtx } from "./state.ts";
