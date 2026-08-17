@@ -356,7 +356,7 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
     // is unchanged: the whole answer goes straight into the chat, with no
     // page and no link, because there is nothing here Google requires be
     // displayed and nothing a page would add.
-    if (!result.grounding) return withSearchDebug(result.text, result.searchError);
+    if (!result.grounding) return result.text;
 
     return await buildGroundedReply(ctx, question, result.text, result.grounding);
   } catch (err) {
@@ -413,8 +413,19 @@ async function askQuestionModel(
 ): Promise<{
   text: string;
   grounding: Awaited<ReturnType<typeof askGeminiWithSearch>>["grounding"];
-  searchError?: string;
 }> {
+  // Switched off (the default — see isWebSearchEnabled): don't spend a call
+  // discovering what's already known. Before this flag existed every single
+  // question paid for a grounded request that was certain to 429, plus the
+  // latency of failing it, before falling back to exactly this.
+  if (!ctx.webSearchEnabled) {
+    const text = await askGemini(ctx.geminiApiKey, instructionFor(false), question, {
+      signal,
+      maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
+    });
+    return { text, grounding: null };
+  }
+
   try {
     return await askGeminiWithSearch(ctx.geminiApiKey, instructionFor(true), question, {
       signal,
@@ -430,32 +441,8 @@ async function askQuestionModel(
       signal,
       maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
     });
-    return { text, grounding: null, searchError: err instanceof Error ? err.message : String(err) };
+    return { text, grounding: null };
   }
-}
-
-// TEMPORARY, and meant to be deleted (PLAN.md 17.41).
-//
-// Same trick as the Places diagnosis in 17.33: this sandbox can't reach the
-// Gemini API, so the only way to see what Google actually says when it
-// refuses the search tool is to have the bot repeat it. Switching the
-// grounded call to the full Flash model is the fix being tested; if search
-// starts working, no debug line ever appears and this comes out. If it
-// doesn't, the exact error arrives in the chat instead of requiring a trip
-// through the Cloudflare dashboard.
-//
-// Flip to false (or delete this and its call site) once the question is
-// settled. Nothing else depends on it.
-const REVEAL_SEARCH_ERROR = true;
-
-function withSearchDebug(text: string, searchError: string | undefined): string {
-  if (!REVEAL_SEARCH_ERROR || !searchError) return text;
-  // 1,500, not the 400 this started at: the first real error came back as a
-  // 429 whose `details` array — the only part naming the quota that was
-  // actually exhausted, and the one thing needed to tell "this tier has no
-  // grounding at all" from "today's allowance is spent" — got cut off mid
-  // field. Still far short of LINE's own 5,000-character message cap.
-  return `${text}\n\n[debug] ค้นเว็บไม่สำเร็จ: ${searchError.slice(0, 1500)}`;
 }
 
 // Length decides where a grounded answer goes (PLAN.md 17.38). A short one

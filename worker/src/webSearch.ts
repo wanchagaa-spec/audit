@@ -16,6 +16,32 @@
 
 import type { GroundingSource } from "./gemini.ts";
 
+/**
+ * Whether to offer the Google Search tool at all (PLAN.md 17.42).
+ *
+ * Off unless explicitly switched on, because on this account it cannot work:
+ * Grounding with Google Search needs a billing-enabled Gemini project, and a
+ * free-tier key gets a 429 RESOURCE_EXHAUSTED on the very first grounded
+ * call — with no QuotaFailure detail attached, because there is no quota to
+ * have exceeded. (The widely quoted "5,000 free grounded prompts a month"
+ * is a paid-tier allowance, not a free-tier one. Missing that distinction is
+ * what made this feature look available when it wasn't.)
+ *
+ * Left switched off rather than deleted: everything downstream — the
+ * grounded call, the /view/search page, the storage, the tests — is written
+ * and working, and the day billing is enabled this becomes a one-line
+ * change. Meanwhile a question that would have searched simply answers from
+ * the account's own data and says honestly when it can't, which is where
+ * this bot was before the feature and is a perfectly good place to sit.
+ *
+ * Unset counts as off. Only the literal "true" turns it on — a var that
+ * exists but holds something unexpected should not quietly enable a feature
+ * that costs money.
+ */
+export function isWebSearchEnabled(enableWebSearch: string | undefined): boolean {
+  return enableWebSearch === "true";
+}
+
 // Matched to the view token's own hour-long lifetime (MAX_VIEW_TOKEN_AGE_MS
 // in signedState.ts) rather than picked independently: the link carries a
 // view token, so it stops working at the one-hour mark no matter how long

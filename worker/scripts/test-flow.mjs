@@ -989,6 +989,11 @@ const env = {
   LINE_CHANNEL_SECRET: "test-channel-secret",
   LINE_CHANNEL_ACCESS_TOKEN: "test-channel-access-token",
   GEMINI_API_KEY: "test-gemini-key",
+  // On for the suite, so the whole web-search path stays covered even though
+  // production runs with it off (PLAN.md 17.42 — grounding needs a
+  // billing-enabled Gemini project). The off state gets its own test, which
+  // flips this and puts it back.
+  ENABLE_WEB_SEARCH: "true",
   GOOGLE_MAPS_API_KEY: "test-maps-key",
   TRAVELPAYOUTS_TOKEN: "test-travelpayouts-token",
 };
@@ -1245,7 +1250,7 @@ check(
 );
 check(
   "every bullet in the guide survives onto the page",
-  helpPageHtml.match(/<li>/g)?.length === buildHelpText().split("\n").filter((l) => l.startsWith("• ")).length
+  helpPageHtml.match(/<li>/g)?.length === buildHelpText(true).split("\n").filter((l) => l.startsWith("• ")).length
 );
 // No token in the URL, unlike every other /view page: the guide is the same
 // for everyone and holds no account data, so it opens for anyone — including
@@ -3856,13 +3861,34 @@ check(
   "the retry also drops back to Lite — the full model was only for the search tool",
   retryRequest?.model === "gemini-3.5-flash-lite"
 );
-// TEMPORARY diagnostic (PLAN.md 17.41): while it's on, a refused search tool
-// appends Google's own error to the reply so it can be read from the chat
-// instead of the Cloudflare dashboard. Delete this check with the feature.
+// The diagnostic that lived here did its job — the real error turned out to
+// be a 429 with no quota attached, meaning grounding isn't on this tier at
+// all (PLAN.md 17.42) — and came back out with it. What has to keep holding
+// is that a rejected tool never leaks an API error into a user's chat.
 check(
-  "a refused search tool surfaces the real error in the reply for diagnosis",
-  toolRejectedReply.includes("[debug] ค้นเว็บไม่สำเร็จ") &&
-    toolRejectedReply.includes("Search Grounding is not supported for this model")
+  "a refused search tool leaves no API error in the reply",
+  !toolRejectedReply.includes("[debug]") && !toolRejectedReply.includes("Gemini API error")
+);
+
+// The switch itself (PLAN.md 17.42). Off is the production state, and off
+// has to mean "never even attempt it" — before the flag, every question paid
+// for a grounded call that was certain to fail before falling back.
+const geminiRequestsBeforeSwitchOff = geminiRequests.length;
+env.ENABLE_WEB_SEARCH = undefined;
+const switchedOffReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+const requestsWhileOff = geminiRequests.slice(geminiRequestsBeforeSwitchOff);
+env.ENABLE_WEB_SEARCH = "true";
+check(
+  "with the switch off the question is still answered, from the account's own data",
+  switchedOffReply.includes("[mock AI answer]") && !switchedOffReply.includes("/view/search")
+);
+check(
+  "and no request offers the search tool at all — not even one that gets rejected",
+  requestsWhileOff.length > 0 && requestsWhileOff.every((r) => r.hasGoogleSearchTool === false)
+);
+check(
+  "the guide drops the web-search line when the switch is off, so it can't promise what's disabled",
+  buildHelpText(false).includes("ถาม <คำถาม>") && !buildHelpText(false).includes("บอทไปค้น Google")
 );
 check(
   "the retry still carries the account's own data, and the pre-search rule about missing data",
@@ -4491,7 +4517,7 @@ const personalHelpReply = await handleTextMessage(env, lineUserId, "วิธี
 check("personal mode's help command hands over the guide link", personalHelpReply.includes(`${origin}/view/help`));
 const groupHelpReply = await handleGroupTextMessage(env, groupId, groupSenderA, "วิธีใช้", origin);
 check("group mode's help command hands over the same guide link", groupHelpReply.includes(`${origin}/view/help`));
-check("the guide it links to still advertises the web viewer, which works in both modes", buildHelpText().includes("เปิดเว็บดูข้อมูล"));
+check("the guide it links to still advertises the web viewer, which works in both modes", buildHelpText(true).includes("เปิดเว็บดูข้อมูล"));
 
 // "เปิดเว็บดูข้อมูล" (PLAN.md 17.7 second pass) works in group mode now,
 // after a user asked for it once they noticed calendar/diary/trip/province

@@ -83,6 +83,7 @@ import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
 import { answerFlightSearch, answerGroundSearch, answerHotelSearch, matchTravelCommand } from "./travelCommands.ts";
 import { endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
+import { isWebSearchEnabled } from "./webSearch.ts";
 // Safe to import as a runtime value (unlike the reverse direction): every
 // view file imports Env from here as a *type* only, which TypeScript
 // erases, so this doesn't create a real module cycle — see viewAuth.ts's
@@ -126,6 +127,12 @@ export interface Env {
   // chat. (Originally Amadeus credentials — swapped before ever going
   // live, see travel.ts's own comment on the Amadeus portal shutdown.)
   TRAVELPAYOUTS_TOKEN: string;
+  // Web search master switch (PLAN.md 17.42). Unset = off, which is the
+  // working state on a free-tier Gemini key: Grounding with Google Search
+  // needs billing enabled, and without it every grounded call 429s. Set to
+  // the literal "true" once the project has billing to turn the feature on
+  // without a code change.
+  ENABLE_WEB_SEARCH: string | undefined;
 }
 
 const WELCOME_MESSAGE = [
@@ -378,6 +385,7 @@ function makeActionCtxFactory(env: Env, subjectId: string, link: AccountLink, or
     geminiApiKey: env.GEMINI_API_KEY,
     origin,
     stateSigningSecret: env.STATE_SIGNING_SECRET,
+    webSearchEnabled: isWebSearchEnabled(env.ENABLE_WEB_SEARCH),
   });
 }
 
@@ -1695,7 +1703,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
   // No token, no env — the guide is the same for everyone and holds no
   // account data (see viewHelpPage.ts).
-  if (url.pathname === "/view/help") return handleViewHelpRequest();
+  if (url.pathname === "/view/help") return handleViewHelpRequest(env);
   if (url.pathname === "/view/search") return handleViewSearchRequest(request, env);
   if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);
   if (url.pathname === "/view/tasks") return handleViewTasksRequest(request, env);

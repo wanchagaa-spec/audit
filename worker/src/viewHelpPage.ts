@@ -22,7 +22,9 @@
 // account is linked at all.
 
 import { buildHelpText } from "./commands.ts";
+import type { Env } from "./index.ts";
 import { escapeHtml, html, pageShell } from "./viewAuth.ts";
+import { isWebSearchEnabled } from "./webSearch.ts";
 
 interface HelpSection {
   heading: string;
@@ -64,8 +66,8 @@ function renderHelpSection(section: HelpSection): string {
   return `<div class="card">${heading}${bullets}</div>`;
 }
 
-export function renderHelpPage(): string {
-  const sections = parseHelpSections(buildHelpText()).map(renderHelpSection).join("");
+export function renderHelpPage(webSearchEnabled: boolean): string {
+  const sections = parseHelpSections(buildHelpText(webSearchEnabled)).map(renderHelpSection).join("");
   return pageShell(
     "วิธีใช้",
     `<h1>วิธีใช้ทั้งหมด</h1>
@@ -75,6 +77,6 @@ ${sections}
   );
 }
 
-export async function handleViewHelpRequest(): Promise<Response> {
-  return html(renderHelpPage());
+export async function handleViewHelpRequest(env: Env): Promise<Response> {
+  return html(renderHelpPage(isWebSearchEnabled(env.ENABLE_WEB_SEARCH)));
 }

@@ -51,6 +51,15 @@ id = "18630d0859b24d9591cd9025ab557cfe"
 #                               "หา...ใกล้ฉัน" (see places.ts, PLAN.md 17.30/17.31). A flat key,
 #                               not OAuth — optional, same degrade-gracefully treatment as
 #                               GEMINI_API_KEY if left unset
+#
+# Plain vars (not secrets) can go under [vars] below.
+#   ENABLE_WEB_SEARCH         - "true" turns on Google Search grounding for the AI Q&A
+#                               call (PLAN.md 17.42). Left off because grounding requires
+#                               a billing-enabled Gemini project — on a free-tier key every
+#                               grounded call comes back 429 RESOURCE_EXHAUSTED with no
+#                               quota attached, since there is no quota to exceed. The code
+#                               is written and tested; flip this once billing is on.
+#
 #   TRAVELPAYOUTS_TOKEN       - Travelpayouts Data API token from https://www.travelpayouts.com
 #                               (free signup) — powers the real flight/hotel prices in travel
 #                               search (travel.ts, PLAN.md 17.37). Optional: without it the
