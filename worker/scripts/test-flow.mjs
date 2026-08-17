@@ -5913,6 +5913,72 @@ check(
 );
 check("and titles that section as the month rather than 'latest'", monthPageHtml.includes("รายการเดือนนี้"));
 
+// ---- "ตั้งค่า" as a chat command (PLAN.md 17.50) --------------------------
+// The rich menu shrank to three tiles and one of them is ตั้งค่า. A tap just
+// sends that text as an ordinary message, so the tile is worthless unless
+// the bot understands the word — the tile and the command are one feature,
+// not two.
+
+const settingsLinkReply = await handleTextMessage(env, lineUserId, "ตั้งค่า", origin);
+const settingsLinkUrl = settingsLinkReply.match(/https?:\/\/\S+/)?.[0] ?? "";
+check(
+  '"ตั้งค่า" hands back a signed link to the settings page',
+  settingsLinkUrl.startsWith(`${origin}/view/settings?token=`)
+);
+check(
+  "and says what the page can do, including the wipe",
+  settingsLinkReply.includes("คาแรคเตอร์") && settingsLinkReply.includes("ล้างข้อมูล")
+);
+// The token has to actually open the page, not just look like one.
+const openedFromLink = await worker.fetch(new Request(settingsLinkUrl), env, new FakeExecutionContext());
+check("the link it gives out actually opens", openedFromLink.status === 200);
+
+// The interpreter is asked before any matcher, so it needs the intent too —
+// the same trap 17.49 was about.
+simulateInterpreterResult = { intent: "settings_link" };
+const interpretedSettings = await handleTextMessage(env, lineUserId, "อยากเปลี่ยนชื่อบอทหน่อย", origin);
+check("the AI's settings_link intent reaches the same page", interpretedSettings.includes("/view/settings?token="));
+
+// "ตั้งค่า" must not swallow the two commands that start the same way.
+const stillBudget = await handleTextMessage(env, lineUserId, "ตั้งงบ อาหาร 5000", origin);
+check('"ตั้งงบ" is not mistaken for "ตั้งค่า"', stillBudget.includes("จะตั้งงบ"));
+await handleTextMessage(env, lineUserId, "ไม่ใช่", origin);
+const stillProvince = await handleTextMessage(env, lineUserId, "ตั้งจังหวัด เชียงใหม่", origin);
+check('"ตั้งจังหวัด" is not either', stillProvince.includes("เชียงใหม่") && !stillProvince.includes("/view/settings"));
+
+// The help text is the bot's own promise about what it can do, and the menu
+// is the first thing a new user touches.
+const helpText = (await import("../src/commands.ts")).buildHelpText(false);
+check(
+  "the guide describes the three-tile menu and the settings command",
+  helpText.includes("วิธีใช้ / เปิดเว็บดูข้อมูล / ตั้งค่า") && helpText.includes("⚙️ ตั้งค่า")
+);
+check(
+  "and no longer implies รายการล่าสุด/สรุปเดือนนี้ are on the menu",
+  !helpText.includes("แตะเมนูใต้ช่องพิมพ์ก็ได้")
+);
+
+// The menu definition and the drawn image have to agree, and the tap areas
+// have to tile the image exactly — LINE rejects a gap or an overlap.
+const { readFile } = await import("node:fs/promises");
+const menuSource = await readFile(new URL("./setup-rich-menu.mjs", import.meta.url), "utf8");
+const menuTexts = [...menuSource.matchAll(/type: "message", text: "([^"]+)"/g)].map((m) => m[1]);
+check("the rich menu holds exactly the three intended commands", menuTexts.join("|") === "วิธีใช้|เปิดเว็บดูข้อมูล|ตั้งค่า");
+const menuBounds = [...menuSource.matchAll(/bounds: \{ x: (\d+), y: 0, width: (\d+), height: 843 \}/g)].map((m) => [
+  Number(m[1]),
+  Number(m[2]),
+]);
+check(
+  "and its tap areas tile the 2500px image with no gap or overlap",
+  menuBounds.length === 3 && menuBounds.every(([x], i) => x === menuBounds.slice(0, i).reduce((sum, [, w]) => sum + w, 0)) &&
+    menuBounds.reduce((sum, [, w]) => sum + w, 0) === 2500
+);
+// Every tile's text must be a command that works with no argument.
+for (const text of menuTexts) {
+  const reply = await handleTextMessage(env, lineUserId, text, origin);
+  check(`the menu tile "${text}" sends something the bot understands`, reply.length > 0 && !reply.includes("ไม่เข้าใจ"));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);

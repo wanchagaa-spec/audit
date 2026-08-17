@@ -87,6 +87,7 @@ export type InterpretedIntent =
   | { intent: "help" }
   | { intent: "capabilities" }
   | { intent: "report" }
+  | { intent: "settings_link" }
   | { intent: "view_link" }
   | { intent: "chitchat"; reply: string }
   | { intent: "unclear"; reply: string };
@@ -335,6 +336,8 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       return { intent: "capabilities" };
     case "report":
       return { intent: "report" };
+    case "settings_link":
+      return { intent: "settings_link" };
     case "view_link":
       return { intent: "view_link" };
     case "chitchat": {
@@ -428,6 +431,9 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     // lumping them together meant "ทำอะไรได้บ้าง" got a link to a guide long
     // enough to need its own web page.
     '{"intent":"capabilities"} — ถามว่า**ทำอะไรได้บ้าง**/ช่วยอะไรได้บ้าง อยากรู้ความสามารถคร่าวๆ ไม่ได้ถามวิธีพิมพ์',
+    // Its own intent rather than a flavour of view_link (PLAN.md 17.50):
+    // they are different pages, and this one can wipe the book's money.
+    '{"intent":"settings_link"} — ขอตั้งค่าบอท: เปลี่ยนชื่อบอท/คาแรคเตอร์/ชื่อที่ให้เรียกผู้ใช้/จังหวัด หรือขอล้างข้อมูลรายรับ-รายจ่ายเริ่มใหม่ (เช่น "ตั้งค่า", "เปลี่ยนชื่อบอท", "อยากเปลี่ยนคาแรคเตอร์", "ล้างข้อมูลทั้งหมด") — มีหน้าตั้งค่าจริง อย่าตอบว่าทำไม่ได้',
     '{"intent":"view_link"} — ขอลิงก์เปิดดูข้อมูล/บัญชี/ปฏิทิน/ไดอารี่/รูปทริปผ่านเว็บเบราว์เซอร์ (เช่น "เปิดเว็บ", "ขอลิงก์เว็บ", "ดูเว็บไซต์หน่อย", "เปิดดูเว็บข้อมูล") — มีฟีเจอร์นี้จริง อย่าตอบว่าทำไม่ได้',
     '{"intent":"chitchat","reply":string} — พูดคุยทั่วไปที่ไม่ใช่คำสั่งอะไร (ทักทาย ชม คุยเล่น) ให้ตอบกลับตามธรรมชาติสั้นๆใน reply',
     '{"intent":"unclear","reply":string} — ข้อมูลสำคัญไม่ครบจะตัดสินใจ (เช่น มีจำนวนเงินแต่ไม่รู้ว่าซื้ออะไร, บอกจะนัดแต่ไม่มีวันที่/เวลา) ให้ reply เป็นคำถามกลับไปถามข้อมูลที่ขาดเท่านั้น',
