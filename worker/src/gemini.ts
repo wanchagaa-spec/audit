@@ -17,7 +17,25 @@
 const GEMINI_MODEL = "gemini-3.5-flash-lite";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-export class GeminiError extends Error {}
+/**
+ * `status` is set only when the API answered with an HTTP error — i.e. it
+ * refused the request as sent. It stays undefined for the failures where the
+ * call was served and the *response* was unusable (cut off at the token
+ * ceiling, empty, stopped for safety).
+ *
+ * The distinction matters to exactly one caller: aiCommands.ts retries
+ * without the Google Search tool when the API rejects a request carrying it,
+ * and must not do that when the request was fine and the answer simply came
+ * back truncated.
+ */
+export class GeminiError extends Error {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.status = status;
+  }
+}
 
 interface GeminiResponse {
   candidates?: Array<{
@@ -182,7 +200,7 @@ async function callGemini(
     signal,
   });
   if (!res.ok) {
-    throw new GeminiError(`Gemini API error (${res.status}): ${await res.text()}`);
+    throw new GeminiError(`Gemini API error (${res.status}): ${await res.text()}`, res.status);
   }
   const data = (await res.json()) as GeminiResponse;
   const candidate = data.candidates?.[0];
