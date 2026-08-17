@@ -166,15 +166,6 @@ export async function readTransactionsAndBudgets(
   return { transactions: parseTransactionRows(txRaw), budgets: parseBudgetRows(budgetRaw) };
 }
 
-export async function readTransactionsForMonth(
-  accessToken: string,
-  spreadsheetId: string,
-  month: string
-): Promise<TransactionRow[]> {
-  const all = await readAllTransactions(accessToken, spreadsheetId);
-  return all.filter((r) => r.date?.startsWith(month));
-}
-
 /** Shared by deleteMostRecentTransaction and deleteDiaryEntry — resolves
  * the tab's sheetId and deletes one data row. `dataRowIndex` is 0-based
  * within the raw A2:... values range (row 2 = index 0), so blank rows
