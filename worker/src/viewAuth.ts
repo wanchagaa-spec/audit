@@ -192,6 +192,10 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
      viewSearchPage.ts); this only gives it room and keeps it from forcing
      the page to scroll sideways on a phone. */
   .search-suggestions { overflow-x: auto; }
+  .help-lead { font-size: .88rem; color: #40444b; margin: 0 0 1rem; line-height: 1.5; }
+  .help-list { margin: 0; padding-left: 1.1rem; }
+  .help-list li { margin-bottom: .5rem; font-size: .85rem; line-height: 1.55; }
+  .help-list li:last-child { margin-bottom: 0; }
 </style>
 </head>
 <body>

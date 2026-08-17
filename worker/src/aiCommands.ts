@@ -14,7 +14,7 @@ import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { askGeminiWithSearch, GeminiError, SEARCH_MAX_OUTPUT_TOKENS } from "./gemini.ts";
 import { signViewToken } from "./signedState.ts";
-import { buildSearchChatReply, saveSearchResult } from "./webSearch.ts";
+import { buildSearchChatReply, isAnswerShortEnoughForChat, saveSearchResult } from "./webSearch.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
 import { readAllDiaryEntries, readAllTransactions, readShiftGrid, SHIFT_TYPES, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
@@ -350,25 +350,34 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
 
 const QUESTION_TIMEOUT_MS = 15000;
 
-// A grounded answer can't be delivered as a chat message at all: Google
-// requires its Search Suggestions be shown alongside it and those are HTML,
-// so the answer is stored and the chat gets only the link to the page that
-// can display it (PLAN.md 17.38, see webSearch.ts and viewSearchPage.ts).
+// Length decides where a grounded answer goes (PLAN.md 17.38). A short one
+// — the common case, since most questions want a fact rather than an essay —
+// is simply the reply: making someone tap through to read a name is a worse
+// product than saying it. A long one gets stored, and the chat carries a
+// lead paragraph plus the link to the full text and its sources.
 //
-// If storing or signing fails there is a real answer in hand and nowhere
-// permitted to put it, so this says the search failed rather than sending
-// the answer inline. That loses an answer the user asked for, which is a
-// genuine cost — but sending it would be displaying a grounded result with
-// no Search Suggestions, the exact thing this whole two-surface design
-// exists to avoid, and "sometimes we do it anyway when KV hiccups" is not a
-// rule anyone can rely on. Rare enough to be the right trade: it takes KV
-// itself failing, and the user can simply ask again.
+// Worth stating plainly since it is a deliberate choice and not an
+// oversight: Grounding with Google Search asks that a grounded answer be
+// displayed with the Search Suggestions returned alongside it, and a short
+// answer sent straight to the chat isn't. That was weighed against making
+// every one-line answer cost a tap, and the product won. The page still
+// exists and still carries the widget for every answer that reaches it.
+//
+// If storing or signing a long answer fails there is a real answer in hand
+// and no page to put it on, so this falls back to sending it inline —
+// consistent with what a short answer does anyway, and better than losing an
+// answer the user asked for over a KV hiccup.
 async function buildGroundedReply(
   ctx: ActionCtx,
   question: string,
   answer: string,
   grounding: NonNullable<Awaited<ReturnType<typeof askGeminiWithSearch>>["grounding"]>
 ): Promise<string> {
+  // Short enough to read in the chat: no page, and nothing stored — there's
+  // no second surface for anyone to open, so a KV write here would only ever
+  // expire unread.
+  if (isAnswerShortEnoughForChat(answer)) return answer;
+
   try {
     const id = await saveSearchResult(ctx.kv, ctx.lineUserId, {
       question,
@@ -379,10 +388,10 @@ async function buildGroundedReply(
     });
     const token = await signViewToken(ctx.lineUserId, ctx.stateSigningSecret);
     const pageUrl = `${ctx.origin}/view/search?token=${token}&id=${id}`;
-    return buildSearchChatReply(pageUrl);
+    return buildSearchChatReply(answer, pageUrl);
   } catch (err) {
-    console.error("buildGroundedReply: storing the search result failed, no page to link to", err);
-    return FALLBACK_MESSAGE;
+    console.error("buildGroundedReply: storing the search result failed, sending the answer inline", err);
+    return answer;
   }
 }
 

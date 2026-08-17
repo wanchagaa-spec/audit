@@ -62,24 +62,46 @@ export async function getSearchResult(
 }
 
 /**
- * The chat reply for a grounded answer: the link, and nothing of the answer
- * itself.
+ * How long an answer may be before it stops being a chat message.
  *
- * An earlier version led with a short preview of the answer. Chosen against
- * (by the user, and it's the better call on the merits too): a preview *is*
- * grounded output, and showing grounded output without the Search
- * Suggestions that came with it is exactly what Grounding with Google Search
- * doesn't allow. Keeping every word of the answer on the one surface that
- * can display the widget makes the rule easy to hold rather than something
- * to reason about case by case — and it removes the question of what a
- * half-shown answer does to a reader who never taps through.
+ * Most questions have short answers — "ใครเป็นนายกคนปัจจุบัน" wants a name,
+ * and making someone tap a link to read one word is a worse product than
+ * just saying it. Long answers are the opposite: a wall of text in a chat
+ * bubble is hard to read and buries its own sources. So the length decides,
+ * not the fact that a search happened.
  *
- * Nothing here is derived from the model's output, so there is nothing to
- * verify: the URL is built from an id this codebase generated.
+ * Chosen by what reads comfortably on a phone rather than by any platform
+ * limit — LINE's own cap is 5,000 characters, far above this.
  */
-export function buildSearchChatReply(pageUrl: string): string {
+const INLINE_ANSWER_MAX_CHARS = 700;
+
+export function isAnswerShortEnoughForChat(answer: string): boolean {
+  return answer.trim().length <= INLINE_ANSWER_MAX_CHARS;
+}
+
+// The lead paragraph of a long answer, capped, for the chat message that
+// links to the rest. The system instruction asks for a self-contained
+// opening paragraph; this caps it anyway rather than trusting that it was
+// followed — the same verify-don't-trust habit as persona.ts's quoted-span
+// and link checks.
+const CHAT_PREVIEW_MAX_CHARS = 300;
+
+export function buildAnswerPreview(answer: string): string {
+  const firstParagraph = answer.split(/\n\s*\n/)[0].trim() || answer.trim();
+  if (firstParagraph.length <= CHAT_PREVIEW_MAX_CHARS) return firstParagraph;
+  // A hard cut, not a word-boundary one: Thai doesn't put spaces between
+  // words, so there's no boundary to find in the text this mostly handles.
+  // The ellipsis and the link under it make the truncation obvious.
+  return `${firstParagraph.slice(0, CHAT_PREVIEW_MAX_CHARS).trimEnd()}…`;
+}
+
+/** The chat reply for a long grounded answer: enough of it to know whether
+ * the link is worth tapping, then the link to the whole thing plus its
+ * sources. */
+export function buildSearchChatReply(answer: string, pageUrl: string): string {
   return [
-    "🔎 ค้นหาให้แล้ว กดดูคำตอบพร้อมแหล่งอ้างอิงได้เลย (ลิงก์ใช้ได้ 1 ชั่วโมง):",
-    pageUrl,
+    `🔎 ${buildAnswerPreview(answer)}`,
+    "",
+    `อ่านคำตอบเต็มๆ พร้อมแหล่งอ้างอิงที่นี่ (ลิงก์ใช้ได้ 1 ชั่วโมง):\n${pageUrl}`,
   ].join("\n");
 }

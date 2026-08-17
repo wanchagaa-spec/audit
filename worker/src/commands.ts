@@ -148,7 +148,7 @@ export function buildHelpText(): string {
     "🎫 หาตั๋วเดินทาง/ที่พัก (เทียบราคา + ลิงก์กดจองเอง)",
     // PLAN.md 17.37 — read-only like Places: the bot never books anything,
     // it prices (best-effort, Amadeus) and links (always).
-    "• หาตั๋วเครื่องบิน <ต้นทาง> ไป <ปลายทาง> <วันที่> เช่น \"...กรุงเทพ ไป เชียงใหม่ 20/12/2569\" หรือพิมพ์ธรรมดา \"หาตั๋วไปเชียงใหม่พรุ่งนี้\" — โชว์ราคาจริงในแชท + ลิงก์ Google Flights/Skyscanner",
+    "• หาตั๋วเครื่องบิน <ต้นทาง> ไป <ปลายทาง> <วันที่> เช่น \"หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569\" หรือพิมพ์ธรรมดา เช่น \"หาตั๋วไปเชียงใหม่พรุ่งนี้\" — โชว์ราคาจริงในแชท + ลิงก์ Google Flights/Skyscanner",
     "• หาที่พัก <เมือง> <เช็คอิน> ถึง <เช็คเอาท์> เช่น \"หาที่พัก เชียงใหม่ 20/12/2569 ถึง 22/12/2569\" (ไม่ใส่วันเช็คเอาท์ = 1 คืน) — โชว์ราคาถูกสุดก่อน + ลิงก์ Agoda/Booking",
     "• หาตั๋วรถทัวร์ (หรือ หาตั๋วรถไฟ) <ต้นทาง> ไป <ปลายทาง> [วันที่] — ส่งลิงก์ 12Go ที่กรอกเส้นทางไว้แล้ว (เส้นทางภาคพื้นไม่มีราคาในแชท ดูในลิงก์)",
     "• บอทไม่จองให้เอง กดลิงก์ไปจองเองทุกกรณี ราคาจริงยึดตามหน้าเว็บตอนจอง",
@@ -158,7 +158,7 @@ export function buildHelpText(): string {
     // PLAN.md 17.38. Listed right after the personal-data line above because
     // that's the actual distinction: the bot decides per question which of
     // the two it is, and the user never has to say which one they want.
-    "• ถามเรื่องนอกข้อมูลของคุณก็ได้ เช่น \"ถาม รถไฟฟ้าสายสีส้มเปิดยัง\" — บอทค้น Google ให้ แล้วส่งลิงก์หน้าเว็บที่มีคำตอบพร้อมแหล่งอ้างอิง",
+    "• ถามเรื่องนอกข้อมูลของคุณก็ได้ เช่น \"ถาม รถไฟฟ้าสายสีส้มเปิดยัง\" — บอทไปค้น Google มาตอบให้เอง คำตอบสั้นๆ ตอบในแชทเลย ถ้ายาวจะส่งลิงก์หน้าเว็บที่มีคำตอบเต็มพร้อมแหล่งอ้างอิงให้แทน",
     "• ถาม ข่าวหุ้น (หรือบิตคอยน์/ทอง/การเงินสหรัฐ) — สรุปข่าวการเงินพร้อมราคาจริง / ถาม ข่าววันนี้ — สรุปข่าวในประเทศไทย",
     "• วิเคราะห์ (พิมพ์เฉยๆ ก็ได้) — สรุปพฤติกรรมการใช้จ่าย+ไดอารี่เดือนนี้แบบเจาะลึกให้",
     "",
@@ -346,9 +346,28 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
   },
 ];
 
-export async function matchCommand(text: string): Promise<Handler | null> {
+/**
+ * The chat reply for "วิธีใช้" — a link, not the guide itself (PLAN.md
+ * 17.39). buildHelpText above is still the single source of the content; it
+ * is just rendered by /view/help now instead of being pushed through a chat
+ * message that LINE silently truncates at 5,000 characters. That ceiling had
+ * started dictating what the guide was allowed to say, which is the wrong
+ * way round.
+ *
+ * No token in the URL, unlike every other /view link this bot hands out:
+ * the guide is identical for everyone and holds no account data, so the link
+ * needs no authorising and never expires (viewHelpPage.ts).
+ */
+export function buildHelpReply(origin: string): string {
+  return [
+    "📖 วิธีใช้ทั้งหมดอยู่ในหน้านี้เลย กดอ่านได้ (เปิดได้ตลอด ไม่มีวันหมดอายุ เก็บลิงก์ไว้ได้):",
+    `${origin}/view/help`,
+  ].join("\n");
+}
+
+export async function matchCommand(text: string, origin: string): Promise<Handler | null> {
   if (HELP_TEST(text)) {
-    return async () => buildHelpText();
+    return async () => buildHelpReply(origin);
   }
 
   const searchTerm = searchMatch(text);
