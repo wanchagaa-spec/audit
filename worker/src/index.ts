@@ -83,6 +83,12 @@ import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
 import { answerFlightSearch, answerGroundSearch, answerHotelSearch, matchTravelCommand } from "./travelCommands.ts";
 import { endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
+// Safe to import as a runtime value (unlike the reverse direction): every
+// view file imports Env from here as a *type* only, which TypeScript
+// erases, so this doesn't create a real module cycle — see viewAuth.ts's
+// own note on why it keeps a duplicate `html` helper rather than importing
+// this file's.
+import { renderErrorPage } from "./viewAuth.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildViewLinkReply, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
@@ -1602,15 +1608,20 @@ export async function drainUploadQueue(env: Env): Promise<void> {
     };
     try {
       const link = await getAccountLink(env.ACCOUNTS, job.lineUserId);
-      if (link) {
-        await withFreshAccessToken(
-          env,
-          link.refreshToken,
-          (accessToken) =>
-            uploadTripMedia(env, accessToken, job.tripFolderId, job.messageId, job.timestampMs, job.kind),
-          tokenCache
-        );
-      }
+      // A missing link means this file cannot be uploaded at all (the
+      // account was unlinked while the file sat in the queue) — it must
+      // count as a failure, not a success. Counting it as succeeded, as an
+      // earlier version did, told the user "✅ อัปโหลดเพิ่ม N ไฟล์แล้ว" while
+      // the `finally` below dropped the queue entry, silently losing the
+      // photo with no way to notice, let alone recover it.
+      if (!link) throw new Error(`no account link for ${job.lineUserId}, cannot upload ${job.messageId}`);
+      await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) =>
+          uploadTripMedia(env, accessToken, job.tripFolderId, job.messageId, job.timestampMs, job.kind),
+        tokenCache
+      );
       summary.succeeded++;
     } catch (err) {
       console.error("upload queue drain failed", key, err);
@@ -1644,42 +1655,23 @@ export async function drainUploadQueue(env: Env): Promise<void> {
   }
 }
 
+// Every route below already handles its own *expected* failures (an
+// unreadable spreadsheet, a Drive hiccup, an expired token) with a worded
+// Thai page. This is the net under the unexpected ones: without it any
+// escaping exception becomes Cloudflare's bare "Internal Server Error",
+// which a real user reads as "the whole bot is broken" rather than "that
+// one link didn't work". Kept deliberately generic — anything specific
+// enough to word better belongs in the route that knows what happened.
+const UNEXPECTED_ERROR_MESSAGE = "เกิดข้อผิดพลาดที่ไม่คาดคิด ลองใหม่อีกครั้งนะ ถ้ายังไม่ได้ให้แจ้งผู้ดูแลบอท";
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
-    if (url.pathname === "/view") return handleViewAccountsRequest(request, env);
-    if (url.pathname === "/view/calendar") return handleViewCalendarRequest(request, env);
-    if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
-    if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);
-    if (url.pathname === "/view/tasks") return handleViewTasksRequest(request, env);
-    if (url.pathname === "/view/trips" || url.pathname.startsWith("/view/trips/")) {
-      return handleViewTripsRequest(request, env);
+    try {
+      return await route(request, env, ctx);
+    } catch (err) {
+      console.error("unhandled error while routing request", new URL(request.url).pathname, err);
+      return html(renderErrorPage("เกิดข้อผิดพลาด", UNEXPECTED_ERROR_MESSAGE), 500);
     }
-    if (url.pathname.startsWith("/view/photo/")) return handleViewPhotoRequest(request, env);
-    if (url.pathname === "/webhook" && request.method === "POST") {
-      const body = await verifyAndParseWebhookBody(request, env);
-      if (!body) return new Response("invalid signature", { status: 401 });
-      // Acknowledge LINE's webhook delivery immediately instead of making it
-      // wait for the real processing (fetching media, uploading to Drive,
-      // sending replies) to finish. LINE — like most webhook senders — has
-      // its own timeout on how long it'll wait for a response; Cloudflare's
-      // own request logs confirmed a real invocation was cut short with
-      // outcome "canceled" after LINE gave up and disconnected only ~2
-      // seconds in, well under any CPU or subrequest limit this codebase had
-      // been tuning against. Every earlier fix made the processing itself
-      // more reliable, but none of them made the response come back fast
-      // enough to avoid the disconnect in the first place. ctx.waitUntil
-      // keeps processWebhookEvents running in the background after this
-      // response has already gone out, so LINE never has a reason to hang up
-      // on us mid-request again.
-      ctx.waitUntil(processWebhookEvents(body, env, url.origin));
-      return new Response("ok");
-    }
-    if (url.pathname === "/health") return new Response("ok");
-
-    return new Response("not found", { status: 404 });
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(drainUploadQueue(env));
@@ -1689,3 +1681,40 @@ export default {
     ctx.waitUntil(broadcastMorningBriefings(env, env.ACCOUNTS));
   },
 };
+
+async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
+  if (url.pathname === "/view") return handleViewAccountsRequest(request, env);
+  if (url.pathname === "/view/calendar") return handleViewCalendarRequest(request, env);
+  if (url.pathname === "/view/diary") return handleViewDiaryRequest(request, env);
+  if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);
+  if (url.pathname === "/view/tasks") return handleViewTasksRequest(request, env);
+  if (url.pathname === "/view/trips" || url.pathname.startsWith("/view/trips/")) {
+    return handleViewTripsRequest(request, env);
+  }
+  if (url.pathname.startsWith("/view/photo/")) return handleViewPhotoRequest(request, env);
+  if (url.pathname === "/webhook" && request.method === "POST") {
+    const body = await verifyAndParseWebhookBody(request, env);
+    if (!body) return new Response("invalid signature", { status: 401 });
+    // Acknowledge LINE's webhook delivery immediately instead of making it
+    // wait for the real processing (fetching media, uploading to Drive,
+    // sending replies) to finish. LINE — like most webhook senders — has
+    // its own timeout on how long it'll wait for a response; Cloudflare's
+    // own request logs confirmed a real invocation was cut short with
+    // outcome "canceled" after LINE gave up and disconnected only ~2
+    // seconds in, well under any CPU or subrequest limit this codebase had
+    // been tuning against. Every earlier fix made the processing itself
+    // more reliable, but none of them made the response come back fast
+    // enough to avoid the disconnect in the first place. ctx.waitUntil
+    // keeps processWebhookEvents running in the background after this
+    // response has already gone out, so LINE never has a reason to hang up
+    // on us mid-request again.
+    ctx.waitUntil(processWebhookEvents(body, env, url.origin));
+    return new Response("ok");
+  }
+  if (url.pathname === "/health") return new Response("ok");
+
+  return new Response("not found", { status: 404 });
+}

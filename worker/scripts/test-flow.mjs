@@ -120,6 +120,8 @@ let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to t
 let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
 let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling call (PLAN.md 17.9) return a recognizably different string instead of echoing, to verify styling actually happened
 let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
+let simulatePersonaDropLink = false; // one-shot: same idea for a URL — the travel/places replies carry no quoted spans at all, so links need their own coverage
+let simulateGeminiTruncation = false; // one-shot: makes the next non-interpreter Gemini call return a *successful* 200 whose text was cut off at the token ceiling (finishReason MAX_TOKENS), the failure that used to be indistinguishable from a complete answer
 let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 const geminiRequests = []; // captures {systemInstruction, question, apiKey} per call, so tests can assert the right data context was sent
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
@@ -134,6 +136,7 @@ const INTERPRETER_MARKER = "ระบบตีความข้อความ�
 // exercising that same deterministic path unless it explicitly opts in here.
 let simulateInterpreterResult = null;
 let simulateInterpreterFailure = false; // one-shot: fails the next AI-interpreter call specifically (a real network/API error, not just an unusable response), to exercise interpretMessage's own catch-and-fall-back path distinctly from a malformed-JSON response
+let simulateInterpreterTruncation = false; // one-shot: same as simulateGeminiTruncation but for the interpreter call, which is answered before that flag is ever consulted
 let simulateWeatherFetchFailure = false; // makes the next Open-Meteo forecast request fail, to exercise graceful degradation
 let simulateNewsFetchFailure = false; // makes the next Bangkok Post RSS request fail, to exercise graceful degradation
 let simulateFinanceNewsFetchFailure = false; // makes the next CNBC RSS request fail, to exercise graceful degradation
@@ -670,7 +673,21 @@ globalThis.fetch = async (url, init = {}) => {
     // own comment above for why the no-mock-configured default is
     // deliberately non-JSON.
     if (systemInstruction.includes(INTERPRETER_MARKER)) {
-      geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
+      geminiRequests.push({
+        systemInstruction,
+        question,
+        apiKey: init.headers?.["x-goog-api-key"],
+        maxOutputTokens: body.generationConfig?.maxOutputTokens,
+      });
+      if (simulateInterpreterTruncation) {
+        simulateInterpreterTruncation = false;
+        return new Response(
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: '{"intent":"chitch' }] }, finishReason: "MAX_TOKENS" }],
+          }),
+          { status: 200 }
+        );
+      }
       if (simulateInterpreterFailure) {
         simulateInterpreterFailure = false;
         return new Response(JSON.stringify({ error: { message: "simulated interpreter failure" } }), { status: 500 });
@@ -693,7 +710,27 @@ globalThis.fetch = async (url, init = {}) => {
       simulateGeminiFailure = false;
       return new Response(JSON.stringify({ error: { message: "simulated Gemini failure" } }), { status: 500 });
     }
-    geminiRequests.push({ systemInstruction, question, apiKey: init.headers?.["x-goog-api-key"] });
+    geminiRequests.push({
+      systemInstruction,
+      question,
+      apiKey: init.headers?.["x-goog-api-key"],
+      maxOutputTokens: body.generationConfig?.maxOutputTokens,
+    });
+
+    // A 200 carrying real-looking but incomplete text — exactly what the
+    // API returns when it hits maxOutputTokens. The first half of the input
+    // is echoed back so the truncation is visible in an assertion.
+    if (simulateGeminiTruncation) {
+      simulateGeminiTruncation = false;
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            { content: { parts: [{ text: question.slice(0, Math.floor(question.length / 2)) }] }, finishReason: "MAX_TOKENS" },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
 
     // Persona-styling calls (PLAN.md 17.9, persona.ts) are identified by a
     // marker phrase unique to that system instruction. By default they echo
@@ -710,6 +747,15 @@ globalThis.fetch = async (url, init = {}) => {
         // "styles" a quoted instruction like '"ใช่"' into something that no
         // longer contains it verbatim, e.g. dropping the quotes entirely.
         const mangled = question.replace(/"([^"]+)"/g, "$1");
+        return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: mangled }] } }] }), { status: 200 });
+      }
+      if (simulatePersonaDropLink) {
+        simulatePersonaDropLink = false;
+        // The travel/places failure mode: the reply keeps its shape and
+        // reads fine, but a booking link came back cut short — which, for a
+        // feature whose links are the entire product, is worse than not
+        // restyling at all.
+        const mangled = question.replace(/(https?:\/\/\S{12})\S+/g, "$1…");
         return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: mangled }] } }] }), { status: 200 });
       }
       if (simulatePersonaRewrite) {
@@ -1845,6 +1891,69 @@ await handleWebhook(
 check(
   "a persona call that drops a quoted confirmation instruction falls back to the original reply, keeping the exact \"ใช่\" instruction intact",
   replies.length === repliesBeforeQuoteDrop + 1 && replies.at(-1).includes('"ใช่"')
+);
+
+// Same guard, the case the quoted-span check could never see: travel and
+// nearby-place replies contain no quoted spans at all, but their whole
+// point is the booking/maps links. A restyling that shortens a URL leaves a
+// reply that still reads perfectly and is completely useless.
+simulatePersonaDropLink = true;
+const flightWebhookBody = JSON.stringify({
+  events: [personalTextEvent("หาตั๋วเครื่องบิน กรุงเทพ ไป เชียงใหม่ 20/12/2569", "reply-persona-4")],
+});
+const flightWebhookSignature = await signLineBody(flightWebhookBody, env.LINE_CHANNEL_SECRET);
+const repliesBeforeLinkDrop = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": flightWebhookSignature }, body: flightWebhookBody }),
+  env
+);
+check(
+  "a persona call that shortens a booking link falls back to the original reply, with every link intact",
+  replies.length === repliesBeforeLinkDrop + 1 &&
+    replies.at(-1).includes("https://www.skyscanner.co.th/transport/flights/bkk/cnx/261220/") &&
+    replies.at(-1).includes("https://www.google.com/travel/flights?q=") &&
+    !replies.at(-1).includes("…")
+);
+
+// Regression tests for a real bug found in review: a response cut off at
+// the token ceiling comes back as an ordinary 200 with text in it, and
+// askGemini used to read only `parts` — so a half-finished answer was
+// indistinguishable from a complete one and went straight out to the user.
+// finishReason is now checked, which turns each of these into the ordinary
+// failed-call path every caller already handles.
+// The interpreter was already covered by accident — truncated JSON fails
+// JSON.parse, which interpretMessage catches into the same fallback — so
+// this one passes with or without the finishReason check and proves
+// nothing about it. Kept as a behaviour lock (the fallback must stay
+// deterministic no matter which error shape gets it there); the check
+// itself is what the AI-answer case below actually exercises.
+simulateInterpreterTruncation = true;
+const interpreterTruncatedReply = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "a truncated interpreter response falls back to the deterministic matcher chain, not a half-parsed intent",
+  interpreterTruncatedReply === directPersonaReply
+);
+
+simulateGeminiTruncation = true;
+const answerTruncatedReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินหมวดไหนเยอะสุด", origin);
+check(
+  "a truncated AI answer shows the honest fallback message instead of a sentence that stops mid-thought",
+  answerTruncatedReply.includes("ระบบ AI ขัดข้อง")
+);
+
+// The ceilings differ per caller now (gemini.ts) — one shared number had to
+// suit a small JSON intent and a full reply restyling at once.
+const lastRequestWhere = (predicate) => [...geminiRequests].reverse().find(predicate);
+const lastInterpreterRequest = lastRequestWhere((r) => r.systemInstruction.includes(INTERPRETER_MARKER));
+const lastPersonaRequest = lastRequestWhere((r) => r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข"));
+const lastAnswerRequest = lastRequestWhere(
+  (r) => !r.systemInstruction.includes(INTERPRETER_MARKER) && !r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข")
+);
+check(
+  "each Gemini caller sends its own output ceiling rather than one shared value",
+  lastInterpreterRequest?.maxOutputTokens === 800 &&
+    lastPersonaRequest?.maxOutputTokens === 2000 &&
+    lastAnswerRequest?.maxOutputTokens === 1200
 );
 // Clean up the dangling pendingConfirmation this created directly (rather
 // than through a chat message, which would have side effects of its own),
@@ -3479,6 +3588,47 @@ const tamperedToken = viewToken.slice(0, -2) + "xx";
 const viewTamperedResponse = await worker.fetch(new Request(`${origin}/view?token=${tamperedToken}`), env, new FakeExecutionContext());
 check("a tampered view token is rejected", viewTamperedResponse.status === 400);
 
+// Regression test for a real bug caught in code review: a *tampered* token
+// (above) still decodes as base64 and so failed the signature check
+// cleanly, but a token that isn't valid base64 at all — a hand-edited or
+// truncated link, an easy thing for a user to produce — made `atob` throw
+// inside verifyPayload. Nothing caught it, so instead of the friendly
+// "ลิงก์หมดอายุหรือไม่ถูกต้อง" page this exact path already renders for every
+// other bad token, the whole request died as a bare 500. Every one of these
+// must come back as an ordinary rejection.
+for (const malformed of ["abc.!!!!", "abc.AAAAA", "%25%25.%25%25", "a.b", "."]) {
+  const malformedResponse = await worker.fetch(
+    new Request(`${origin}/view?token=${malformed}`),
+    env,
+    new FakeExecutionContext()
+  );
+  check(
+    `a malformed view token (${malformed}) is rejected with the friendly page, not a 500`,
+    malformedResponse.status === 400 && (await malformedResponse.text()).includes("ลิงก์หมดอายุหรือไม่ถูกต้อง")
+  );
+}
+
+// Same fix, the other caller of the same helper: /oauth/callback verifies
+// its `state` through verifyState, which shared verifyPayload's crash.
+const malformedStateResponse = await worker.fetch(
+  new Request(`${origin}/oauth/callback?code=abc&state=abc.!!!!`),
+  env,
+  new FakeExecutionContext()
+);
+check(
+  "a malformed OAuth state is rejected with the friendly page, not a 500",
+  malformedStateResponse.status === 400 && (await malformedStateResponse.text()).includes("ลิงก์หมดอายุหรือไม่ถูกต้อง")
+);
+
+// The token these pages authenticate with lives in the URL itself, so the
+// rendered page must not be cacheable and must not leak that URL onward as
+// a Referer.
+check(
+  "/view pages are served no-store with no referrer, so the tokenised URL doesn't travel",
+  viewPageResponse.headers.get("cache-control") === "no-store" &&
+    viewPageResponse.headers.get("referrer-policy") === "no-referrer"
+);
+
 const unlinkedViewToken = await signViewToken("Uneverlinkeduser", env.STATE_SIGNING_SECRET);
 const viewUnlinkedResponse = await worker.fetch(new Request(`${origin}/view?token=${unlinkedViewToken}`), env, new FakeExecutionContext());
 check(
@@ -4691,6 +4841,72 @@ check(
   driveUploads.length === driveUploadsBeforeLegacyDrain + 1 &&
     pushes.length === pushesBeforeLegacyDrain + 1 &&
     pushes.at(-1).to === lineUserId
+);
+
+// Regression test for a real bug caught in code review: when the account
+// link is gone by the time the queue drains (unlinked while the file was
+// waiting), drainUploadQueue skipped the upload but still counted the file
+// as succeeded — and the `finally` dropped the queue entry regardless. The
+// user was told "✅ อัปโหลดเพิ่ม 1 ไฟล์แล้ว" for a photo that was never
+// uploaded and no longer existed anywhere to retry from. It has to be
+// reported as a failure instead, in the same wording every other failed
+// upload uses.
+const orphanJob = {
+  lineUserId: "Unolongerlinked",
+  pushTarget: "Unolongerlinked",
+  kind: "image",
+  messageId: "orphan-msg-1",
+  timestampMs: Date.now(),
+  tripFolderId,
+  tripName: "ทริปที่บัญชีหลุด",
+};
+await env.ACCOUNTS.put(`upload-queue:orphan-msg-1`, JSON.stringify(orphanJob), {
+  metadata: { lineUserId: orphanJob.lineUserId },
+});
+const pushesBeforeOrphanDrain = pushes.length;
+const driveUploadsBeforeOrphanDrain = driveUploads.length;
+await drainUploadQueue(env);
+const orphanPush = pushes.at(-1);
+check(
+  "a queued file whose account is no longer linked is reported as failed, never as uploaded",
+  driveUploads.length === driveUploadsBeforeOrphanDrain &&
+    pushes.length === pushesBeforeOrphanDrain + 1 &&
+    orphanPush.text.includes("อัปโหลดเพิ่ม 0 ไฟล์") &&
+    orphanPush.text.includes("อีก 1 ไฟล์อัปโหลดไม่สำเร็จ")
+);
+check("the unuploadable entry is still cleared from the queue, not left to retry forever",
+  (await countQueuedForUser(kv, orphanJob.lineUserId)) === 0);
+
+// Regression test for a real bug caught in code review: LINE redelivers a
+// webhook it didn't get a timely "ok" for, and each queue entry used to get
+// a random UUID key — so a redelivery enqueued the same photo a second time
+// and the drain uploaded a duplicate into the trip folder. Keying by
+// messageId makes a redelivery overwrite its own entry instead.
+await handleTextMessage(env, lineUserId, "เริ่มทริป ทริปส่งซ้ำ", origin);
+const redeliveredBody = JSON.stringify({
+  events: [
+    {
+      type: "message",
+      message: { type: "image", id: "redelivered-img-1" },
+      source: { type: "user", userId: lineUserId },
+      replyToken: "reply-redelivered-1",
+      timestamp: Date.now(),
+    },
+  ],
+});
+const redeliveredRequest = () =>
+  signLineBody(redeliveredBody, env.LINE_CHANNEL_SECRET).then(
+    (sig) => new Request("http://localhost:8787/webhook", { method: "POST", headers: { "x-line-signature": sig }, body: redeliveredBody })
+  );
+await handleWebhook(await redeliveredRequest(), env);
+await handleWebhook(await redeliveredRequest(), env); // LINE delivers the very same event again
+check("a redelivered webhook queues the same photo only once", (await countQueuedForUser(kv, lineUserId)) === 1);
+const driveUploadsBeforeRedeliveryDrain = driveUploads.length;
+await drainUploadQueue(env);
+check(
+  "so the drain uploads it once, with no duplicate copy in the trip folder",
+  driveUploads.length === driveUploadsBeforeRedeliveryDrain + 1 &&
+    driveUploads.filter((u) => u.name.includes("redelivered-img-1")).length === 1
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

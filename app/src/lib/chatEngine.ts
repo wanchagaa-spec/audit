@@ -1,5 +1,15 @@
-import type { Category, EntryType } from "../types";
-import { detectType, extractAmount, matchCategory, parseMessage } from "./parser";
+// Explicit .ts extensions, unlike the rest of the app: this module is also
+// imported directly by the Cloudflare Worker (worker/src/index.ts), which
+// runs through loaders that resolve real file paths rather than a bundler's
+// extension guessing — Node's ESM loader refuses an extensionless specifier
+// outright, which is what made `node --experimental-strip-types
+// scripts/test-flow.mjs` (the command that harness documents at its own top)
+// fail to even load. Vite and tsc both accept the explicit form too
+// (allowImportingTsExtensions is on in tsconfig.app.json), so this costs the
+// web app nothing. Applies to every module the worker reaches: this file,
+// lib/parser.ts, and data/defaultCategories.ts.
+import type { Category, EntryType } from "../types.ts";
+import { detectType, extractAmount, matchCategory, parseMessage } from "./parser.ts";
 
 export type PendingClarification =
   | { kind: "amount"; type: EntryType; categoryId?: string; note: string }

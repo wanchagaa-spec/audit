@@ -58,15 +58,24 @@ export async function searchFlightOffers(
     limit: String(max),
   });
   const data = await travelFetch(`${AVIASALES_PRICES_URL}?${q}`, token);
-  return ((data.data ?? []) as any[]).map((offer) => {
-    const amount = Number(offer.price ?? 0);
-    return {
-      airline: (offer.airline as string | undefined) ?? "?",
-      departTime: String(offer.departure_at ?? "").slice(11, 16) || "--:--",
-      stops: Number(offer.transfers ?? 0),
-      priceLabel: `${amount.toLocaleString("th-TH", { maximumFractionDigits: 0 })} บาท`,
-    };
-  });
+  return ((data.data ?? []) as any[])
+    .map((offer) => {
+      const amount = Number(offer.price ?? 0);
+      return {
+        airline: (offer.airline as string | undefined) ?? "?",
+        departTime: String(offer.departure_at ?? "").slice(11, 16) || "--:--",
+        stops: Number(offer.transfers ?? 0),
+        amount,
+        priceLabel: `${amount.toLocaleString("th-TH", { maximumFractionDigits: 0 })} บาท`,
+      };
+    })
+    // Same guard searchHotelOffers already applies below, for the same
+    // reason: a cache entry with a missing or unparseable price would
+    // otherwise render as "0 บาท" and — since the API sorts by price —
+    // sit at the top of the list as the apparent cheapest fare. A price
+    // this reply can't state honestly is worse than one fewer option.
+    .filter((o) => o.amount > 0)
+    .map(({ airline, departTime, stops, priceLabel }) => ({ airline, departTime, stops, priceLabel }));
 }
 
 export interface HotelOfferSummary {

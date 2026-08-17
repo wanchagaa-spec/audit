@@ -12,7 +12,7 @@
 
 import { listCalendarEvents, type CalendarEventSummary } from "./calendar.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
-import { askGemini, GeminiError } from "./gemini.ts";
+import { ANSWER_MAX_OUTPUT_TOKENS, askGemini, GeminiError } from "./gemini.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
 import { readAllDiaryEntries, readAllTransactions, readShiftGrid, SHIFT_TYPES, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
@@ -75,13 +75,26 @@ function isFinanceNewsQuestion(question: string): boolean {
 // "ถาม ข่าววันนี้" also has nothing to do with the user's own data. Checked
 // after isFinanceNewsQuestion (below), so a more specific finance phrase
 // like "ข่าวหุ้น" is never shadowed by the generic "ข่าว" catch-all here.
-const DOMESTIC_NEWS_KEYWORDS = [
-  "ข่าววันนี้", "ข่าวประจำวัน", "ข่าวไทย", "ข่าวในประเทศ", "ข่าวสารวันนี้", "ข่าวล่าสุด", "ข่าว",
+const DOMESTIC_NEWS_PHRASES = ["ข่าววันนี้", "ข่าวประจำวัน", "ข่าวไทย", "ข่าวในประเทศ", "ข่าวสารวันนี้", "ข่าวล่าสุด"];
+
+// The bare "ข่าว" catch-all below is what makes "มีข่าวอะไรบ้าง" work without
+// enumerating every phrasing — but on its own it's substring-matched against
+// the whole question, so it also swallowed genuine personal-data questions
+// that merely happen to contain the word ("เดือนนี้จ่ายค่าหนังสือพิมพ์กับข่าวสาร
+// ไปเท่าไหร่"), answering with world news instead of the user's own numbers.
+// These are the markers that say a question is about this account's data, in
+// which case the catch-all stands down and the normal Q&A pipeline runs. The
+// specific phrases above are unambiguous enough to skip this check entirely.
+const PERSONAL_DATA_KEYWORDS = [
+  "เงิน", "จ่าย", "รายรับ", "รายจ่าย", "ยอด", "งบ", "หมวด",
+  "นัด", "ปฏิทิน", "ไดอารี่", "เวร", "สิ่งที่ต้องทำ", "ทริป",
 ];
 
 function isDomesticNewsQuestion(question: string): boolean {
   const lower = question.toLowerCase();
-  return DOMESTIC_NEWS_KEYWORDS.some((k) => lower.includes(k.toLowerCase()));
+  if (DOMESTIC_NEWS_PHRASES.some((k) => lower.includes(k))) return true;
+  if (!lower.includes("ข่าว")) return false;
+  return !PERSONAL_DATA_KEYWORDS.some((k) => lower.includes(k));
 }
 
 function totals(rows: TransactionRow[]): { income: number; expense: number } {
@@ -284,7 +297,9 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
   );
 
   try {
-    return await askGemini(ctx.geminiApiKey, systemInstruction, question);
+    return await askGemini(ctx.geminiApiKey, systemInstruction, question, {
+      maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
+    });
   } catch (err) {
     console.error("askGemini failed", err);
     if (err instanceof GeminiError) return FALLBACK_MESSAGE;

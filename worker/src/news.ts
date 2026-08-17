@@ -24,7 +24,7 @@
 // of those actually tends to move gold is a genuine judgment call, worth
 // delegating, but the events/times themselves are never invented.
 
-import { askGemini, GeminiError } from "./gemini.ts";
+import { ANSWER_MAX_OUTPUT_TOKENS, askGemini, GeminiError } from "./gemini.ts";
 import { fetchTodayUsEconomicEvents, type EconomicEvent } from "./forexCalendar.ts";
 import { buildMarketHeaderBlock, fetchMarketSnapshot } from "./marketData.ts";
 import { bangkokDateKey, formatThaiDateLabelFull } from "./thaiDate.ts";
@@ -73,7 +73,9 @@ async function summarizePrompt(
   systemInstruction: string
 ): Promise<string | null> {
   try {
-    return await askGemini(geminiApiKey, systemInstruction, prompt);
+    return await askGemini(geminiApiKey, systemInstruction, prompt, {
+      maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
+    });
   } catch (err) {
     if (err instanceof GeminiError) {
       console.error("summarizePrompt: Gemini summarization failed", err);

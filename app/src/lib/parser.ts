@@ -1,5 +1,7 @@
-import type { Category, EntryType } from "../types";
-import { INCOME_SIGNAL_WORDS } from "../data/defaultCategories";
+// Explicit .ts extensions — shared with the Cloudflare Worker, see the note
+// at the top of lib/chatEngine.ts.
+import type { Category, EntryType } from "../types.ts";
+import { INCOME_SIGNAL_WORDS } from "../data/defaultCategories.ts";
 
 const AMOUNT_PATTERN = /\d+(?:,\d{3})*(?:\.\d+)?/;
 
