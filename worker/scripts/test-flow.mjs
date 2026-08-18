@@ -6361,6 +6361,64 @@ simulateGeminiFailure = true;
 await handleTextMessage(env, lineUserId, "ค่าขนม 30", origin);
 check("a non-429 Gemini failure does not open the breaker", (await isGeminiPaused(kv)) === false);
 
+// ---- "I don't understand" beats "how much?" (PLAN.md 17.55) ---------------
+// Reported with a screenshot: the user asked for their email contacts and
+// the bot replied "เธออยากรู้ว่าจำนวนเงินเท่าไหร่คะ". Reproducing it showed
+// the problem was far wider than that one message — parseMessage returned
+// need_amount as its catch-all, so "how much?" was the bot's answer to every
+// sentence it did not otherwise understand, including "วันนี้อากาศเป็นยังไง".
+
+const { handleUserMessage: engine } = await import("../src/chatEngine.ts");
+const { DEFAULT_CATEGORIES: cats } = await import("../src/categories.ts");
+const engineReply = (t) => engine(t, null, cats);
+
+for (const notMoney of [
+  "ขอรายชื่ออีเมลที่มีหน่อย", // the reported one
+  "วันนี้อากาศเป็นยังไง",
+  "ช่วยแนะนำหนังหน่อย", // matches the entertainment category on "หนัง"
+  "อยากกินข้าว", // matches the food category on "ข้าว"
+  "เธอ หาค่าเฉลี่ยของ 4,5,9,3 ได้มั้ย", // has a number, and "ค่า" — still arithmetic
+  "ใครอยู่เวรวันนี้",
+]) {
+  const r = engineReply(notMoney);
+  check(
+    `"${notMoney}" is answered with "I don't understand", not a money question`,
+    r.botMessage.includes("ไม่เข้าใจ") && r.pending === null && !r.botMessage.includes("จำนวนเงิน")
+  );
+}
+check(
+  "and that answer points at the format and at ทำอะไรได้บ้าง rather than guessing",
+  engineReply("ขอบคุณนะ").botMessage.includes("ค่ากาแฟ 60") &&
+    engineReply("ขอบคุณนะ").botMessage.includes("ทำอะไรได้บ้าง")
+);
+
+// The other half of the change: genuine money messages must be untouched.
+// A guard that swallowed real entries would be a worse bug than the one it
+// fixes, so the cases that made the first attempt fail get their own checks.
+for (const [text, expected] of [
+  ["ซื้อกาแฟ 60", "draft"],
+  ["ค่าข้าว 120", "draft"],
+  ["เงินเดือนเข้า 25000", "draft"],
+  ["ค่ากาแฟ", "amount"], // category, no figure
+  ["ฝากเงิน", "amount"], // no category at all, but unmistakably money
+  ["ซื้อของ", "amount"],
+  ["โอนเงินให้แม่", "amount"],
+  ["ซื้ออะไรไม่รู้ 200", "category"], // "อะไร" is deliberately not a question marker
+]) {
+  const r = engineReply(text);
+  const got = r.transactionDraft ? "draft" : (r.pending?.kind ?? "none");
+  check(`"${text}" still behaves as money (${expected})`, got === expected);
+}
+
+// End to end, through the bot, with the interpreter failing so the
+// deterministic path is the one answering — which is exactly the situation
+// the screenshot captured.
+const unknownThroughBot = await handleTextMessage(env, lineUserId, "ขอรายชื่ออีเมลที่มีหน่อย", origin);
+check(
+  "and the whole bot says so too, leaving no pending question behind",
+  unknownThroughBot.includes("ไม่เข้าใจ") && (await kv.get(`pending:${lineUserId}`)) === null
+);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);

@@ -46,6 +46,18 @@ const GREETINGS = new Set([
 const HELP_MESSAGE =
   "สวัสดีค่ะ พิมพ์รายการที่เกิดขึ้นได้เลย เช่น \"ซื้อกาแฟ 60\" หรือ \"เงินเดือนเข้า 25000\" ฉันจะช่วยจดให้อัตโนมัติ";
 
+// Said when the message isn't a greeting, isn't a command any matcher
+// recognised, and doesn't look like money either (PLAN.md 17.55). Admitting
+// that plainly is the honest answer, and it points at the two things that
+// actually help — an example of the format, and the one command that lists
+// what the bot can do. It deliberately does not guess.
+const UNKNOWN_MESSAGE = [
+  "ขอโทษด้วย ไม่เข้าใจข้อความนี้นะ",
+  "",
+  'ถ้าจะจดรายจ่าย พิมพ์แบบ "ค่ากาแฟ 60" ได้เลย',
+  'อยากรู้ว่าช่วยอะไรได้บ้าง พิมพ์ "ทำอะไรได้บ้าง"',
+].join("\n");
+
 export function isGreeting(text: string): boolean {
   return GREETINGS.has(text.trim().toLowerCase());
 }
@@ -184,7 +196,11 @@ function parseMultilineTransactions(text: string, categories: Category[]): ChatE
   let uncategorizedCount = 0;
   for (const line of itemLines) {
     const result = parseMessage(line, categories);
-    if (result.status === "need_amount") continue; // can't happen — itemLines was filtered by extractAmount above
+    // Neither can happen: itemLines was filtered by extractAmount above, so
+    // every line here has a figure — which rules out both the no-amount
+    // statuses. Skipped rather than asserted, so a future parser change can
+    // only ever drop a line, never crash a whole multi-line save.
+    if (result.status === "need_amount" || result.status === "unknown") continue;
     if (result.status === "ok") {
       drafts.push({ amount: result.amount, type: result.type, categoryId: result.categoryId, note: result.note });
     } else {
@@ -242,6 +258,9 @@ function handleFreshMessage(text: string, categories: Category[]): ChatEngineRes
       },
       categories
     );
+  }
+  if (result.status === "unknown") {
+    return { botMessage: UNKNOWN_MESSAGE, pending: null };
   }
   if (result.status === "need_amount") {
     return askAmount(result.type, result.categoryId, result.note);
