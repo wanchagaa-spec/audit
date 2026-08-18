@@ -1,5 +1,5 @@
-// Short-lived storage for one movie result so /view/movies can render it
-// (PLAN.md 17.57). Same shape and the same reasoning as webSearch.ts's
+// Short-lived storage for one movie/series result so /view/movies can
+// render it (PLAN.md 17.57). Same shape and the same reasoning as webSearch.ts's
 // stored search results — see that file for why the id is scoped by subject
 // and why the TTL is what it is.
 //
@@ -9,7 +9,7 @@
 // (a "trending this week" list re-fetched an hour later need not match),
 // and opening the link costs no TMDb request at all.
 
-import type { Movie } from "./movies.ts";
+import type { Title } from "./movies.ts";
 
 /** Matched to the view token's own one-hour lifetime, exactly as
  * webSearch.ts's is: the link carries a view token, so a longer TTL would
@@ -18,7 +18,11 @@ const MOVIE_RESULT_TTL_SECONDS = 60 * 60;
 
 export interface StoredMovieResult {
   heading: string;
-  movies: Movie[];
+  /** Films or series — the page renders both the same way, and each Title
+   * carries its own `mediaType` for the links that need it. Still named
+   * `movies` because the stored blobs from before TV existed use that key
+   * and are still live for an hour after any deploy. */
+  movies: Title[];
   createdAtIso: string;
 }
 

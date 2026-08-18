@@ -539,11 +539,11 @@ async function runInterpretedIntent(
         return await promptPlaceSearch({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.placeKeyword);
       // Movies (PLAN.md 17.57) — TMDb only, so no Google token here either.
       case "movie_list":
-        return await answerMovieList(movieCtx(env, subjectId, origin), intent.movieListKind);
+        return await answerMovieList(movieCtx(env, subjectId, origin), intent.mediaType, intent.movieListKind);
       case "movie_search":
-        return await answerMovieSearch(movieCtx(env, subjectId, origin), intent.movieQuery);
+        return await answerMovieSearch(movieCtx(env, subjectId, origin), intent.mediaType, intent.movieQuery);
       case "movie_discover":
-        return await answerMovieDiscover(movieCtx(env, subjectId, origin), intent.movieDescription);
+        return await answerMovieDiscover(movieCtx(env, subjectId, origin), intent.mediaType, intent.movieDescription);
       // Travel search (PLAN.md 17.37) — read-only, no per-user Google auth
       // (an app-level Amadeus key at most), same no-withToken reasoning as
       // find_nearby_places above.

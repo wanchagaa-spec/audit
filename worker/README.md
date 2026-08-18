@@ -662,20 +662,49 @@ honest note — a search never comes back empty-handed just because the price AP
   there are no per-user re-link error classes; any Travelpayouts problem is admin-only and
   degrades to links.
 
-### Movies (PLAN.md 17.57)
+### Movies and series (PLAN.md 17.57, TV added in 17.58)
 
-Cinema listings and film search, from The Movie Database. Read-only, nothing is saved, and —
-like Places and Travelpayouts — it needs no per-user OAuth at all, just a flat
-`TMDB_READ_TOKEN`. Every answer comes in two halves: a five-film list in chat, and a link to
-`/view/movies` carrying the same films with posters, synopses and a per-film "where to watch
-in Thailand" link. That split is forced by the medium rather than chosen — `replyToLine`
-sends plain text, so a poster can only ever live on a page.
+Cinema listings, series listings and title search, from The Movie Database. Read-only,
+nothing is saved, and — like Places and Travelpayouts — it needs no per-user OAuth at all,
+just a flat `TMDB_READ_TOKEN`. Every answer comes in two halves: a five-title list in chat,
+and a link to `/view/movies` carrying the same titles with posters, synopses and a per-title
+"where to watch in Thailand" link. That split is forced by the medium rather than chosen —
+`replyToLine` sends plain text, so a poster can only ever live on a page.
 
-- `หนังใหม่` — in Thai cinemas now. `หนังกำลังจะเข้า` — dated but not open yet. `หนังมาแรง` —
-  this week's trending. `หนังสตรีมมิ่ง` — new on the subscription apps available in Thailand
-  (Netflix, Prime Video, Disney+, Apple TV+, Viu). Four separate TMDb endpoints, because they
-  are four different questions.
-- `หนังเรื่อง<ชื่อ>` / `ค้นหาหนัง<ชื่อ>` — search by title.
+Films and series run through the same code, parameterised by `MediaType`. TMDb mirrors its
+whole API across `/movie` and `/tv` — same shapes, same filters — so the only real
+differences are the paths and, the part that catches people, **the field names for the same
+things**: `title`/`name`, `original_title`/`original_name`, `release_date`/`first_air_date`.
+`parseTitles` in `movies.ts` is the one place that difference lives. Reading the wrong set
+does not error; every row is silently dropped for having no title, so the symptom is an empty
+list. Two asymmetries are real and not oversights: TV has no `/tv/upcoming` (not-yet-aired
+has to be discovered by `first_air_date`), and `/discover/tv` has no `include_adult`
+parameter — sending one is a 400.
+
+- `หนังใหม่` — in Thai cinemas now; `ซีรีส์ใหม่` — currently airing. `หนังกำลังจะเข้า` /
+  `ซีรีส์กำลังจะมา` — not started yet. `หนังมาแรง` / `ซีรีส์มาแรง` — this week's trending.
+  `หนังสตรีมมิ่ง` / `ซีรีส์สตรีมมิ่ง` — new on the subscription apps available in Thailand
+  (Netflix, Prime Video, Disney+, Apple TV+, Viu). Separate TMDb endpoints, because they are
+  different questions. `ซีรีย์` and `ซีรีส์` are both accepted — neither spelling is a typo.
+- `หนังเรื่อง<ชื่อ>` / `ซีรีส์เรื่อง<ชื่อ>` / `ค้นหาหนัง<ชื่อ>` — search by title.
+- **Bare qualifiers are not descriptions** (PLAN.md 17.58). `แนะนำหนังใหม่` leaves "ใหม่"
+  after the prefix and `แนะนำหนังมันๆ` leaves "มัน"; neither describes a genre or a plot, so
+  searching TMDb for them returns nonsense that looks like an answer. `DESCRIPTOR_LISTS` maps
+  those onto the list the user plainly meant instead. Anything not in that map is treated as
+  a genuine description.
+- **Where to watch is shown; dubbing is not, and the reply says so.** `/watch/providers`
+  gives the Thai subscription services carrying a title, and that is real data. Whether a
+  Thai dub or Thai subtitles exist is **not in TMDb at all** — not on that endpoint, not on
+  the detail endpoint, and not in `/translations`, which covers translated *metadata* (title
+  and synopsis text), nothing about the soundtrack. `originalLanguage` answers a different
+  question again: what language the thing was made in. So the answers show availability plus
+  the original language, and state outright that dub/subtitle info has to be checked in the
+  app, with a link straight to it.
+- `providers === undefined` (never looked up) and `providers === []` (looked up, nothing
+  there) are **different answers, and only the second may be stated**. Availability costs one
+  subrequest per title, so it is fetched only for the answers whose question it is — series,
+  streaming lists, and title searches — and only for the five rows shown in chat. A cinema
+  listing skips it entirely, and therefore claims nothing about it.
 - `หนังแนว<แนว>` / `หนังเกี่ยวกับ<เนื้อเรื่อง>` — **search by what a film is about**, which TMDb
   cannot do directly: `/search/movie` matches titles only. What it has is genres and a curated
   keyword vocabulary, both searchable, so Gemini turns the description into those and TMDb
@@ -687,8 +716,11 @@ sends plain text, so a poster can only ever live on a page.
   `/discover` with no filter at all would answer "the most popular films on TMDb", which looks
   like a result and answers nothing.
 - Natural phrasing works too via the AI interpreter's `movie_list` / `movie_search` /
-  `movie_discover` intents. `movieListKind` is validated against the real union, since it
-  picks an endpoint and an invented one would build a request to a path that does not exist.
+  `movie_discover` intents, each carrying `mediaType`. `movieListKind` is validated against
+  the real union, since it picks an endpoint and an invented one would build a request to a
+  path that does not exist; `mediaType` likewise, except that a *missing* one defaults to
+  `movie` rather than rejecting the intent — films are much the more common ask, and an
+  absent field is a far weaker signal of a confused model than a wrong one.
 - `/view/movies` stores the *result*, not the query (same pattern as `/view/search`): the page
   then shows exactly the films the chat message listed, and opening the link costs no TMDb
   request. One-hour TTL matching the view token, and the id is scoped by subject.

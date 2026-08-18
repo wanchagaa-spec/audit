@@ -26,7 +26,7 @@ import { DEFAULT_CATEGORIES } from "./categories.ts";
 import type { EntryType } from "./categories.ts";
 import { askGemini, GeminiError, INTERPRETER_MAX_OUTPUT_TOKENS } from "./gemini.ts";
 import { formatHistoryForPrompt, type ConversationTurn } from "./conversationHistory.ts";
-import type { MovieListKind } from "./movies.ts";
+import type { MediaType, MovieListKind } from "./movies.ts";
 import { DEFAULT_SETTINGS, type BotSettings } from "./settings.ts";
 import { addDaysToDateKey, bangkokDateKey } from "./thaiDate.ts";
 
@@ -41,6 +41,15 @@ export interface InterpretedTransaction {
  * model's answer against it — a type alone erases at compile time and would
  * check nothing. */
 const MOVIE_LIST_KINDS: MovieListKind[] = ["now_playing", "upcoming", "trending", "streaming"];
+const MEDIA_TYPES: MediaType[] = ["movie", "tv"];
+
+/** Defaults to "movie" when the model leaves it out, rather than rejecting
+ * the whole intent: films are much the more common ask, and a missing field
+ * is a far weaker signal of a confused model than a *wrong* one would be. */
+function readMediaType(raw: unknown): MediaType | null {
+  if (raw === undefined || raw === null) return "movie";
+  return MEDIA_TYPES.includes(raw as MediaType) ? (raw as MediaType) : null;
+}
 
 export type InterpretedIntent =
   | { intent: "transaction"; transactions: InterpretedTransaction[] }
@@ -61,13 +70,15 @@ export type InterpretedIntent =
   | { intent: "contact_lookup"; contactName: string }
   | { intent: "contact_list" }
   | { intent: "find_nearby_places"; placeKeyword: string }
-  // Movies (PLAN.md 17.57). Three intents rather than one, because TMDb
-  // answers them from three different endpoints and the model is the only
-  // thing that can tell "what's in cinemas" from "find me the film called
-  // X" from "find me something about Y".
-  | { intent: "movie_list"; movieListKind: MovieListKind }
-  | { intent: "movie_search"; movieQuery: string }
-  | { intent: "movie_discover"; movieDescription: string }
+  // Movies and series (PLAN.md 17.57/17.58). Three intents rather than one,
+  // because TMDb answers them from three different endpoints and the model
+  // is the only thing that can tell "what's in cinemas" from "find me the
+  // film called X" from "find me something about Y". Each carries
+  // `mediaType`, since that decides which half of TMDb's mirrored API the
+  // question belongs to and nothing downstream can infer it.
+  | { intent: "movie_list"; mediaType: MediaType; movieListKind: MovieListKind }
+  | { intent: "movie_search"; mediaType: MediaType; movieQuery: string }
+  | { intent: "movie_discover"; mediaType: MediaType; movieDescription: string }
   | {
       intent: "flight_search";
       flightOriginCode: string;
@@ -260,16 +271,22 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     // would build a request to a path that doesn't exist. Rejecting it here
     // sends the message to the deterministic matcher instead.
     case "movie_list": {
+      const mediaType = readMediaType(r.mediaType);
+      if (mediaType === null) return null;
       if (!MOVIE_LIST_KINDS.includes(r.movieListKind as MovieListKind)) return null;
-      return { intent: "movie_list", movieListKind: r.movieListKind as MovieListKind };
+      return { intent: "movie_list", mediaType, movieListKind: r.movieListKind as MovieListKind };
     }
     case "movie_search": {
+      const mediaType = readMediaType(r.mediaType);
+      if (mediaType === null) return null;
       if (!isNonEmptyString(r.movieQuery)) return null;
-      return { intent: "movie_search", movieQuery: r.movieQuery };
+      return { intent: "movie_search", mediaType, movieQuery: r.movieQuery };
     }
     case "movie_discover": {
+      const mediaType = readMediaType(r.mediaType);
+      if (mediaType === null) return null;
       if (!isNonEmptyString(r.movieDescription)) return null;
-      return { intent: "movie_discover", movieDescription: r.movieDescription };
+      return { intent: "movie_discover", mediaType, movieDescription: r.movieDescription };
     }
     // Travel search (PLAN.md 17.37): the codes/slugs the model produces
     // feed straight into API queries and URLs, so their *shape* is pinned
@@ -428,9 +445,10 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     // message fell through to "I don't understand".
     '{"intent":"contact_list"} — ขอดู**รายชื่อผู้ติดต่อทั้งหมด**ที่มีอีเมล ไม่ได้เจาะจงคนใดคนหนึ่ง (เช่น "ขอรายชื่ออีเมลที่มีหน่อย", "มีอีเมลใครบ้าง", "ผู้ติดต่อทั้งหมด")',
     '{"intent":"contact_lookup","contactName":string} — ถามหาอีเมลของผู้ติดต่อคนนี้โดยตรง ไม่ใช่ตอนจะส่งอีเมล เช่น "อีเมลของสมชาย", "ขออีเมลสมหญิงหน่อย" (contactName ต้องเป็นชื่อจริงที่ผู้ใช้พิมพ์มาเท่านั้น ห้ามเดา)',
-    '{"intent":"movie_list","movieListKind":"now_playing"|"upcoming"|"trending"|"streaming"} — อยากรู้ว่ามีหนังอะไร โดยไม่ได้เจาะจงเรื่องหรือเนื้อหา: now_playing = กำลังฉายในโรงตอนนี้ ("หนังใหม่", "โรงหนังมีอะไรฉายบ้าง"), upcoming = ยังไม่เข้าโรง ("หนังที่กำลังจะเข้า"), trending = กำลังฮิต/แนะนำอะไรก็ได้ ("มีหนังอะไรน่าดูบ้าง", "แนะนำหนังหน่อย"), streaming = ในแอปสตรีมมิ่ง ("หนังใหม่ใน Netflix", "มีอะไรดูใน Disney+ บ้าง") ห้ามตอบชื่อหนังเองเด็ดขาด เพราะข้อมูลหนังที่กำลังฉายเปลี่ยนทุกสัปดาห์และคุณไม่มีข้อมูลจริง',
-    '{"intent":"movie_search","movieQuery":string} — ถามถึงหนัง "เรื่องหนึ่ง" ที่รู้ชื่ออยู่แล้ว เช่น "หนังเรื่อง Dune เป็นยังไง", "Interstellar ฉายปีไหน" (movieQuery คือชื่อหนัง ตัดคำถามรอบๆ ออก) ห้ามตอบเรื่องย่อ/ปี/คะแนนเองเด็ดขาด ให้บอทไปดึงจากฐานข้อมูลจริง',
-    '{"intent":"movie_discover","movieDescription":string} — อยากดูหนังแต่บอกเป็น "แนว" หรือ "เนื้อเรื่อง" ไม่ได้บอกชื่อ เช่น "อยากดูหนังผีตลก", "หนังเกี่ยวกับเดินทางข้ามเวลา", "หนังแอ็คชั่นมันๆ ที่ดูใน Netflix ได้" (movieDescription คือคำบรรยายที่ผู้ใช้พิมพ์มา เก็บไว้ทั้งท่อน รวมส่วนที่บอกว่าอยากดูในแอปสตรีมมิ่งด้วย)',
+    'ทุก intent ที่ขึ้นต้นด้วย movie_ ใช้ได้ทั้งหนังและซีรีส์ ต้องใส่ "mediaType" ด้วยเสมอ: "movie" = หนัง/ภาพยนตร์, "tv" = ซีรีส์/ซีรีย์/รายการทีวี/อนิเมะที่เป็นตอนๆ ถ้าผู้ใช้ไม่ได้บอกชัดให้ใช้ "movie"',
+    '{"intent":"movie_list","mediaType":"movie"|"tv","movieListKind":"now_playing"|"upcoming"|"trending"|"streaming"} — อยากรู้ว่ามีหนัง/ซีรีส์อะไร โดยไม่ได้เจาะจงเรื่องหรือเนื้อหา: now_playing = กำลังฉายอยู่ตอนนี้ ("หนังใหม่", "ซีรีส์ใหม่", "โรงหนังมีอะไรฉายบ้าง"), upcoming = ยังไม่เริ่มฉาย ("หนังที่กำลังจะเข้า", "ซีรีส์ที่กำลังจะมา"), trending = กำลังฮิต/แนะนำอะไรก็ได้ ("มีอะไรน่าดูบ้าง", "แนะนำซีรีส์หน่อย", "แนะนำหนังมันๆ"), streaming = ในแอปสตรีมมิ่ง ("หนังใหม่ใน Netflix", "มีซีรีส์อะไรดูใน Disney+ บ้าง") ห้ามตอบชื่อเรื่องเองเด็ดขาด เพราะข้อมูลที่กำลังฉายเปลี่ยนทุกสัปดาห์และคุณไม่มีข้อมูลจริง',
+    '{"intent":"movie_search","mediaType":"movie"|"tv","movieQuery":string} — ถามถึงหนัง/ซีรีส์ "เรื่องหนึ่ง" ที่รู้ชื่ออยู่แล้ว เช่น "หนังเรื่อง Dune เป็นยังไง", "ซีรีส์ Squid Game มีกี่ซีซั่น" (movieQuery คือชื่อเรื่อง ตัดคำถามรอบๆ ออก) ห้ามตอบเรื่องย่อ/ปี/คะแนนเองเด็ดขาด ให้บอทไปดึงจากฐานข้อมูลจริง',
+    '{"intent":"movie_discover","mediaType":"movie"|"tv","movieDescription":string} — อยากดูแต่บอกเป็น "แนว" หรือ "เนื้อเรื่อง" ไม่ได้บอกชื่อ เช่น "อยากดูหนังผีตลก", "ซีรีส์เกี่ยวกับหมอ", "หนังแอ็คชั่นมันๆ ที่ดูใน Netflix ได้" (movieDescription คือคำบรรยายที่ผู้ใช้พิมพ์มา เก็บไว้ทั้งท่อน รวมส่วนที่บอกว่าอยากดูในแอปสตรีมมิ่งด้วย) — แต่ถ้าคำที่บรรยายมีแค่คำขยายลอยๆ อย่าง "ใหม่" "มันๆ" "สนุกๆ" ที่ไม่ได้บอกแนวหรือเนื้อเรื่องจริง ให้ใช้ movie_list แทน',
     '{"intent":"find_nearby_places","placeKeyword":string} — อยากหาสถานที่/ร้าน/บริการใกล้ตัว ไม่ว่าจะพิมพ์แบบไหนก็ตาม เช่น "ร้านกาแฟใกล้ฉัน", "แถวนี้มีร้านอาหารไหม", "หาปั๊มน้ำมันหน่อย" (placeKeyword คือสิ่งที่อยากหา ตัดคำว่า "ใกล้ฉัน/แถวนี้/ใกล้ๆ" ออก) — บอทจะขอตำแหน่ง GPS จริงจากผู้ใช้ต่อเอง ห้ามตอบชื่อร้าน/สถานที่จริงเองเด็ดขาดเพราะไม่มีข้อมูลตำแหน่งผู้ใช้ให้ค้นหาจริง',
     '{"intent":"flight_search","flightOriginCode":"IATA 3 ตัวใหญ่","flightDestinationCode":"IATA 3 ตัวใหญ่","flightOriginName":string,"flightDestinationName":string,"flightDateKey":"YYYY-MM-DD"} — หาตั๋วเครื่องบิน/เทียบราคาเที่ยวบิน เช่น "หาตั๋วไปเชียงใหม่พรุ่งนี้" (Code คือรหัสสนามบิน/เมืองมาตรฐาน IATA ที่ตรงกับเมืองนั้นจริงๆ เช่น กรุงเทพ=BKK เชียงใหม่=CNX ภูเก็ต=HKT — แปลงชื่อเมืองเป็นรหัสได้เลยเพราะเป็นข้อมูลมาตรฐานสากล ไม่ใช่การเดาข้อมูลส่วนตัว แต่ถ้าไม่แน่ใจรหัสของเมืองไหนจริงๆ ให้ใช้ unclear ถามกลับ; Name คือชื่อเมืองตามที่ผู้ใช้พิมพ์; ไม่บอกต้นทางให้ถือว่าออกจากกรุงเทพ/BKK ได้; ต้องรู้วันที่แน่ชัด ไม่รู้ให้ unclear)',
     '{"intent":"hotel_search","hotelCityName":string,"hotelCheckInDateKey":"YYYY-MM-DD","hotelCheckOutDateKey":"YYYY-MM-DD"} — หาที่พัก/โรงแรม/เทียบราคาที่พักในเมืองหนึ่งๆ เช่น "หาที่พักภูเก็ต ศุกร์นี้ 2 คืน" (hotelCityName คือชื่อเมืองตามที่ผู้ใช้พิมพ์; บอกจำนวนคืนมาก็คำนวณ checkOut จาก checkIn ได้; บอกแค่วันเดียวไม่บอกจำนวนคืน = พัก 1 คืน; ไม่รู้วันที่เลยให้ unclear)',
