@@ -92,6 +92,7 @@ import { isWebSearchEnabled } from "./webSearch.ts";
 // own note on why it keeps a duplicate `html` helper rather than importing
 // this file's.
 import { renderErrorPage } from "./viewAuth.ts";
+import { handlePrivacyRequest, handleTermsRequest } from "./legalPages.ts";
 import { handleViewBudgetsRequest } from "./viewBudgetsPage.ts";
 import { handleViewSettingsRequest } from "./viewSettingsPage.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
@@ -1771,6 +1772,15 @@ export default {
 
 async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+
+  // Public and tokenless, like /view/help — a LINE or Google reviewer has to
+  // be able to open these without a LINE account (PLAN.md 17.53). Kept at the
+  // root rather than under /view/ so the URLs are short enough to paste into
+  // a verification form and read back.
+  if (url.pathname === "/privacy") return handlePrivacyRequest(env);
+  if (url.pathname === "/privacy/en") return handlePrivacyRequest(env, "en");
+  if (url.pathname === "/terms") return handleTermsRequest(env);
+  if (url.pathname === "/terms/en") return handleTermsRequest(env, "en");
 
   if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
   if (url.pathname === "/view") return handleViewAccountsRequest(request, env);

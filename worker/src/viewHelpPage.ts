@@ -73,7 +73,8 @@ export function renderHelpPage(webSearchEnabled: boolean): string {
     `<h1>วิธีใช้ทั้งหมด</h1>
 <p class="subtitle">พิมพ์คำสั่งพวกนี้ในแชท LINE ได้เลย</p>
 ${sections}
-<p class="footnote">หน้านี้เปิดได้ตลอด ไม่มีวันหมดอายุ เก็บลิงก์ไว้ได้เลย</p>`
+<p class="footnote">หน้านี้เปิดได้ตลอด ไม่มีวันหมดอายุ เก็บลิงก์ไว้ได้เลย</p>
+<p class="footnote"><a href="/privacy">นโยบายความเป็นส่วนตัว</a> · <a href="/terms">ข้อกำหนดการใช้งาน</a></p>`
   );
 }
 

@@ -1074,6 +1074,24 @@ is destroyed after five wrong tries. The wipe clears the Transactions tab
 only — diary, budgets, calendar, tasks and trip photos are untouched, which
 the page states and a test enforces.
 
+### Public pages (`/privacy`, `/terms`)
+
+Both are tokenless and served from the root, so a LINE or Google reviewer can open them
+without a LINE account and a bookmarked URL never expires. `src/legalPages.ts` writes them
+from what the code actually does: the scope list comes from `googleAuth.ts`, the storage
+table from every KV prefix the Worker really writes, the retention figures from the real
+TTL constants, and the third-party list from the hosts it genuinely contacts (Skyscanner,
+Agoda, Booking and 12go appear only as links in replies and are never called).
+
+English versions live at `/privacy/en` and `/terms/en` for a Google OAuth reviewer who
+doesn't read Thai. Both languages sit in the same file, and a test compares their shape —
+section count, bullet count, table rows — so a translation can't quietly lose a row and
+leave the policy saying different things to different reviewers.
+
+A test reads `googleAuth.ts` and fails if a requested scope isn't explained in the policy.
+A document claiming the bot asks for less than it does is the one way a privacy policy can
+be actively harmful rather than merely stale.
+
 ### Network deadlines
 
 `src/timeouts.ts` gives Sheets, Calendar and the weather API a deadline, applied at their

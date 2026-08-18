@@ -6088,6 +6088,132 @@ check("and a request that answers in time is untouched", fineResponse.ok);
 
 Object.assign(NETWORK_TIMEOUTS, realTimeouts);
 
+// ---- /privacy and /terms (PLAN.md 17.53) ----------------------------------
+// A verification reviewer opens these with no LINE account and no token, so
+// the tokenless-ness is the feature and gets checked first.
+
+const privacyResponse = await worker.fetch(new Request(`${origin}/privacy`), env, new FakeExecutionContext());
+const privacyHtml = await privacyResponse.text();
+const termsResponse = await worker.fetch(new Request(`${origin}/terms`), env, new FakeExecutionContext());
+const termsHtml = await termsResponse.text();
+check(
+  "/privacy and /terms open with no token at all",
+  privacyResponse.status === 200 && termsResponse.status === 200
+);
+check(
+  "and each links to the other, so landing on either finds both",
+  privacyHtml.includes('href="/terms"') && termsHtml.includes('href="/privacy"')
+);
+check("the guide links to them too", (await (await worker.fetch(new Request(`${origin}/view/help`), env, new FakeExecutionContext())).text()).includes('href="/privacy"'));
+
+// The policy names the OAuth scopes it explains. If a scope is added to
+// googleAuth.ts and not to the policy, the document is claiming the bot asks
+// for less than it does — which is the one way a privacy policy can be
+// actively harmful rather than merely stale.
+const authSource = await readFile(new URL("../src/googleAuth.ts", import.meta.url), "utf8");
+const declaredScopes = [...authSource.matchAll(/auth\/([a-z.]+)"/g)].map((m) => m[1]);
+check(
+  "every OAuth scope the bot requests is explained in the privacy policy",
+  declaredScopes.length >= 6 && declaredScopes.every((scope) => privacyHtml.includes(scope))
+);
+
+// Same idea for retention: the policy quotes real durations, and a TTL that
+// changes without the policy changing makes it wrong about how long data is
+// kept.
+// Row by row, not "does this duration appear anywhere on the page". A first
+// version checked the latter and a mutation slipped through it: "24 ชั่วโมง"
+// is written twice (the retention row and the Gemini row), so corrupting one
+// left the other to satisfy the check. Pairing each figure with its own
+// subject is what makes the test about what the page actually claims.
+const privacyRows = [...privacyHtml.matchAll(/<tr>(.*?)<\/tr>/gs)].map((m) => m[1]);
+const rowSaying = (subject) => privacyRows.find((row) => row.includes(subject)) ?? "";
+check(
+  "each retention figure sits in the row for the data it describes",
+  rowSaying("ประวัติการสนทนาย้อนหลัง").includes("24 ชั่วโมง") &&
+    rowSaying("รอคุณพิมพ์").includes("10 นาที") &&
+    rowSaying("รหัสยืนยันการล้างข้อมูล").includes("15 นาที") &&
+    rowSaying("เลขแถวที่แต่ละเดือนเริ่ม").includes("90 วัน")
+);
+
+// The substance a reviewer is looking for, and the claims a user relies on.
+check(
+  "the policy covers deletion, third parties and what is never collected",
+  privacyHtml.includes("สิทธิของคุณ") &&
+    privacyHtml.includes("Gemini") &&
+    privacyHtml.includes("Cloudflare") &&
+    privacyHtml.includes("ไม่เก็บรหัสผ่าน Google")
+);
+check(
+  "the terms state it is free, as-is, and that confirmations precede writes",
+  termsHtml.includes("as-is") && termsHtml.includes('ยืนยันก่อนเสมอ')
+);
+
+// Everything user-facing here is escaped through the same helper as the rest
+// of the site — these pages are static, but a raw < in the source would still
+// be a broken page rather than a styled one.
+check("the pages render as complete HTML documents", privacyHtml.startsWith("<!doctype html>") && termsHtml.includes("</html>"));
+
+// English versions, for a Google OAuth reviewer who does not read Thai.
+const privacyEnResponse = await worker.fetch(new Request(`${origin}/privacy/en`), env, new FakeExecutionContext());
+const privacyEnHtml = await privacyEnResponse.text();
+const termsEnResponse = await worker.fetch(new Request(`${origin}/terms/en`), env, new FakeExecutionContext());
+const termsEnHtml = await termsEnResponse.text();
+check(
+  "/privacy/en and /terms/en serve the English versions",
+  privacyEnResponse.status === 200 &&
+    termsEnResponse.status === 200 &&
+    privacyEnHtml.includes("Privacy Policy") &&
+    termsEnHtml.includes("Terms of Use")
+);
+check(
+  "each language links to the same document in the other language",
+  privacyHtml.includes('href="/privacy/en"') && privacyEnHtml.includes('href="/privacy"')
+);
+
+// The two languages have to stay the same document. A translation that
+// quietly loses a section or a table row is a policy that tells different
+// things to different reviewers — which is exactly the failure mode a
+// bilingual policy invites, and nothing else would catch it.
+const { LEGAL_SECTIONS } = await import("../src/legalPages.ts");
+const shapeOf = (sections) =>
+  sections.map((sec) => [sec.paragraphs?.length ?? 0, sec.bullets?.length ?? 0, sec.table?.rows.length ?? 0].join("/")).join("|");
+check(
+  "the English privacy policy has the same sections and rows as the Thai",
+  shapeOf(LEGAL_SECTIONS.privacy.th) === shapeOf(LEGAL_SECTIONS.privacy.en)
+);
+check(
+  "and so do the terms",
+  shapeOf(LEGAL_SECTIONS.terms.th) === shapeOf(LEGAL_SECTIONS.terms.en)
+);
+
+// The scope and retention guarantees have to hold in English too, or the
+// reviewer most likely to read that version gets the weaker document.
+check(
+  "the English policy explains every scope as well",
+  declaredScopes.every((scope) => privacyEnHtml.includes(scope))
+);
+const privacyEnRows = [...privacyEnHtml.matchAll(/<tr>(.*?)<\/tr>/gs)].map((m) => m[1]);
+const enRowSaying = (subject) => privacyEnRows.find((row) => row.includes(subject)) ?? "";
+check(
+  "and quotes the same retention figures",
+  enRowSaying("last 6 exchanges").includes("24 hours") &&
+    enRowSaying("waiting for you to type").includes("10 minutes") &&
+    enRowSaying("confirmation code").includes("15 minutes")
+);
+
+// One contact address, named once in the code, so the two languages cannot
+// disagree about where to write.
+// In the "who operates this" section specifically, not merely somewhere on
+// the page — a first version checked the latter and a mutation removing it
+// from the English contact line slipped through, because the address also
+// appears further down under data-subject rights.
+const contactSection = (sections) => JSON.stringify(sections[0]);
+check(
+  "both languages name the contact address in the operator section",
+  contactSection(LEGAL_SECTIONS.privacy.th).includes("wanchagaa1999@gmail.com") &&
+    contactSection(LEGAL_SECTIONS.privacy.en).includes("wanchagaa1999@gmail.com")
+);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);
