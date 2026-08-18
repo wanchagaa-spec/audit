@@ -35,7 +35,7 @@ import {
   promptTaskDelete,
 } from "./taskCommands.ts";
 import { answerEmailCheck, matchGmailCommand, promptEmailSendResolved } from "./gmailCommands.ts";
-import { answerContactEmail, matchContactsCommand } from "./contactsCommands.ts";
+import { answerContactEmail, answerContactList, matchContactsCommand } from "./contactsCommands.ts";
 import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
 import {
   broadcastMorningBriefings,
@@ -513,6 +513,8 @@ async function runInterpretedIntent(
         return await withToken((ctx) =>
           promptEmailSendResolved(ctx, intent.emailTo, intent.emailSubject, intent.emailBody)
         );
+      case "contact_list":
+        return await withToken((ctx) => answerContactList(ctx));
       case "contact_lookup":
         return await withToken((ctx) => answerContactEmail(ctx, intent.contactName));
       case "find_nearby_places":
@@ -917,14 +919,22 @@ export async function handleTextMessage(
   // well-known phrase like "วิธีใช้" still resolves correctly either way,
   // since the AI interpreter's own "help" intent routes to the exact same
   // buildHelpText() the legacy path would have used (see runInterpretedIntent).
+  // Whether Gemini answered at all this turn (PLAN.md 17.56). Drives two
+  // things further down: whether the last-resort AI question is worth making,
+  // and whether an "I don't understand" reply should say the message wasn't
+  // understood or that the AI is unavailable — which are different problems
+  // with different fixes, and used to read identically.
+  let aiWasReachable = false;
+
   if (!effectivePending) {
     const history = await getConversationHistory(env.ACCOUNTS, lineUserId).catch((err) => {
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
-    if (intent) {
-      const reply = await runInterpretedIntent(env, lineUserId, link, intent, text, origin, tokenCache, async () => ({
+    const outcome = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
+    aiWasReachable = outcome.kind !== "unavailable";
+    if (outcome.kind === "intent") {
+      const reply = await runInterpretedIntent(env, lineUserId, link, outcome.intent, text, origin, tokenCache, async () => ({
         addedBy: lineUserId,
         addedByName: "LINE",
       }));
@@ -995,6 +1005,14 @@ export async function handleTextMessage(
     return reply;
   }
 
+  if (result.unknown) {
+    const reply = await answerUnrecognized(
+      env, lineUserId, link, text, origin, tokenCache, aiWasReachable, result.botMessage
+    );
+    await recordConversationTurn(env, lineUserId, text, reply);
+    return reply;
+  }
+
   await recordConversationTurn(env, lineUserId, text, result.botMessage);
   return result.botMessage;
 }
@@ -1055,14 +1073,18 @@ export async function handleGroupTextMessage(
   // resolved lazily (only inside runInterpretedIntent's "transaction" case)
   // so an ordinary non-money message in a group doesn't pay for a member
   // profile lookup it doesn't need.
+  // See handleTextMessage's own comment on this flag.
+  let aiWasReachable = false;
+
   if (!effectivePending) {
     const history = await getConversationHistory(env.ACCOUNTS, subjectId).catch((err) => {
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
-    if (intent) {
-      const reply = await runInterpretedIntent(env, subjectId, link, intent, text, origin, tokenCache, () =>
+    const outcome = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
+    aiWasReachable = outcome.kind !== "unavailable";
+    if (outcome.kind === "intent") {
+      const reply = await runInterpretedIntent(env, subjectId, link, outcome.intent, text, origin, tokenCache, () =>
         resolveGroupAttribution(env, groupId, senderUserId)
       );
       await recordConversationTurn(env, subjectId, text, reply);
@@ -1093,8 +1115,57 @@ export async function handleGroupTextMessage(
     return reply;
   }
 
+  if (result.unknown) {
+    const reply = await answerUnrecognized(
+      env, subjectId, link, text, origin, tokenCache, aiWasReachable, result.botMessage
+    );
+    await recordConversationTurn(env, subjectId, text, reply);
+    return reply;
+  }
+
   await recordConversationTurn(env, subjectId, text, result.botMessage);
   return result.botMessage;
+}
+
+
+// Last resort for a message nothing recognised (PLAN.md 17.56).
+//
+// The deterministic engine saying "I don't understand" is the end of the
+// line, but it isn't always the honest end: the AI interpreter runs first
+// and only hands over when it produced nothing usable, and *why* it produced
+// nothing matters. If Gemini answered with something that failed validation,
+// the model is up and worth asking in plain language — which is exactly the
+// case a real user hit, asking for their contacts and being told the bot
+// didn't understand. If Gemini wasn't reachable at all, a second call would
+// only spend a request to fail the same way, so this says so instead of
+// blaming the message.
+async function answerUnrecognized(
+  env: Env,
+  subjectId: string,
+  link: AccountLink,
+  text: string,
+  origin: string,
+  tokenCache: TokenCache | undefined,
+  aiWasReachable: boolean,
+  deterministicReply: string
+): Promise<string> {
+  if (!aiWasReachable) {
+    return "ตอนนี้ระบบ AI ตอบไม่ได้ชั่วคราว เลยเข้าใจข้อความนี้ไม่ได้นะ ลองใหม่อีกสักครู่ หรือพิมพ์คำสั่งตรงๆ ก็ได้ เช่น \"ค่ากาแฟ 60\" หรือ \"สรุปเดือนนี้\"";
+  }
+  const actionCtx = makeActionCtxFactory(env, subjectId, link, origin);
+  try {
+    return await withFreshAccessToken(
+      env,
+      link.refreshToken,
+      (accessToken) => answerQuestion(actionCtx(accessToken), text),
+      tokenCache
+    );
+  } catch (err) {
+    // Never let the last resort be the thing that breaks the reply — the
+    // deterministic answer was already good enough to send.
+    console.error("answerUnrecognized: the fallback AI question failed too", err);
+    return deterministicReply;
+  }
 }
 
 const UNKNOWN_GROUP_MEMBER_LABEL = "สมาชิกกลุ่ม";

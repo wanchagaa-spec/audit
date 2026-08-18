@@ -30,6 +30,11 @@ export interface ChatEngineResult {
   botMessage: string;
   pending: PendingClarification | null;
   quickReplyCategories?: Category[];
+  /** The message wasn't money and wasn't anything else this engine handles
+   * (PLAN.md 17.55/17.56). A flag rather than a string comparison against
+   * botMessage, so index.ts can offer it to the AI as a last resort without
+   * being coupled to the exact wording of the reply. */
+  unknown?: boolean;
 }
 
 const GREETINGS = new Set([
@@ -260,7 +265,7 @@ function handleFreshMessage(text: string, categories: Category[]): ChatEngineRes
     );
   }
   if (result.status === "unknown") {
-    return { botMessage: UNKNOWN_MESSAGE, pending: null };
+    return { botMessage: UNKNOWN_MESSAGE, pending: null, unknown: true };
   }
   if (result.status === "need_amount") {
     return askAmount(result.type, result.categoryId, result.note);

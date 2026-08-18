@@ -53,6 +53,7 @@ export type InterpretedIntent =
   | { intent: "email_check" }
   | { intent: "email_send"; emailTo: string; emailSubject: string; emailBody: string }
   | { intent: "contact_lookup"; contactName: string }
+  | { intent: "contact_list" }
   | { intent: "find_nearby_places"; placeKeyword: string }
   | {
       intent: "flight_search";
@@ -231,6 +232,8 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       if (!isNonEmptyString(r.emailSubject) || !isNonEmptyString(r.emailBody)) return null;
       return { intent: "email_send", emailTo: r.emailTo, emailSubject: r.emailSubject, emailBody: r.emailBody };
     }
+    case "contact_list":
+      return { intent: "contact_list" };
     case "contact_lookup": {
       if (!isNonEmptyString(r.contactName)) return null;
       return { intent: "contact_lookup", contactName: r.contactName };
@@ -390,6 +393,11 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     '{"intent":"task_list"} — ขอดูรายการสิ่งที่ต้องทำทั้งหมดที่ยังไม่เสร็จ',
     '{"intent":"email_check"} — ขอเช็คอีเมลใหม่ที่ยังไม่ได้อ่าน',
     '{"intent":"email_send","emailTo":string,"emailSubject":string,"emailBody":string} — ส่งอีเมลใหม่ emailTo เป็นได้ทั้งที่อยู่อีเมลเต็มๆ หรือชื่อผู้ติดต่อจริงที่ผู้ใช้พิมพ์มา (มีระบบค้นหาผู้ติดต่อแปลงชื่อเป็นอีเมลให้เองอีกที ไม่ต้องแปลงเอง) ต้องรู้หัวข้อและเนื้อหาแน่ชัดทั้งหมดด้วย (ดูกติกาด้านล่างเรื่องห้ามเดาที่อยู่อีเมล/ชื่อ)',
+    // Split from contact_lookup (PLAN.md 17.56). Without it the model had
+    // only the by-name intent available for "ขอรายชื่ออีเมลที่มีหน่อย", so it
+    // answered contact_lookup with no name, failed validation, and the
+    // message fell through to "I don't understand".
+    '{"intent":"contact_list"} — ขอดู**รายชื่อผู้ติดต่อทั้งหมด**ที่มีอีเมล ไม่ได้เจาะจงคนใดคนหนึ่ง (เช่น "ขอรายชื่ออีเมลที่มีหน่อย", "มีอีเมลใครบ้าง", "ผู้ติดต่อทั้งหมด")',
     '{"intent":"contact_lookup","contactName":string} — ถามหาอีเมลของผู้ติดต่อคนนี้โดยตรง ไม่ใช่ตอนจะส่งอีเมล เช่น "อีเมลของสมชาย", "ขออีเมลสมหญิงหน่อย" (contactName ต้องเป็นชื่อจริงที่ผู้ใช้พิมพ์มาเท่านั้น ห้ามเดา)',
     '{"intent":"find_nearby_places","placeKeyword":string} — อยากหาสถานที่/ร้าน/บริการใกล้ตัว ไม่ว่าจะพิมพ์แบบไหนก็ตาม เช่น "ร้านกาแฟใกล้ฉัน", "แถวนี้มีร้านอาหารไหม", "หาปั๊มน้ำมันหน่อย" (placeKeyword คือสิ่งที่อยากหา ตัดคำว่า "ใกล้ฉัน/แถวนี้/ใกล้ๆ" ออก) — บอทจะขอตำแหน่ง GPS จริงจากผู้ใช้ต่อเอง ห้ามตอบชื่อร้าน/สถานที่จริงเองเด็ดขาดเพราะไม่มีข้อมูลตำแหน่งผู้ใช้ให้ค้นหาจริง',
     '{"intent":"flight_search","flightOriginCode":"IATA 3 ตัวใหญ่","flightDestinationCode":"IATA 3 ตัวใหญ่","flightOriginName":string,"flightDestinationName":string,"flightDateKey":"YYYY-MM-DD"} — หาตั๋วเครื่องบิน/เทียบราคาเที่ยวบิน เช่น "หาตั๋วไปเชียงใหม่พรุ่งนี้" (Code คือรหัสสนามบิน/เมืองมาตรฐาน IATA ที่ตรงกับเมืองนั้นจริงๆ เช่น กรุงเทพ=BKK เชียงใหม่=CNX ภูเก็ต=HKT — แปลงชื่อเมืองเป็นรหัสได้เลยเพราะเป็นข้อมูลมาตรฐานสากล ไม่ใช่การเดาข้อมูลส่วนตัว แต่ถ้าไม่แน่ใจรหัสของเมืองไหนจริงๆ ให้ใช้ unclear ถามกลับ; Name คือชื่อเมืองตามที่ผู้ใช้พิมพ์; ไม่บอกต้นทางให้ถือว่าออกจากกรุงเทพ/BKK ได้; ต้องรู้วันที่แน่ชัด ไม่รู้ให้ unclear)',
@@ -502,13 +510,33 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
   ].join("\n");
 }
 
+/**
+ * Why the interpreter produced no intent (PLAN.md 17.56).
+ *
+ * These used to be one value — `null` — which made two very different
+ * situations indistinguishable to the caller: Gemini answering with
+ * something unusable, and Gemini not answering at all. That mattered once
+ * the fallback wanted to try a second AI call ("unusable" means the model is
+ * up and worth asking again; "unreachable" means don't waste the request)
+ * and once the "I don't understand" reply wanted to be honest about which
+ * had happened.
+ */
+export type InterpretOutcome =
+  | { kind: "intent"; intent: InterpretedIntent }
+  /** Gemini replied, but the reply wasn't valid JSON or didn't survive
+   * validateIntent. The model is reachable. */
+  | { kind: "unusable" }
+  /** The call failed, timed out, or was skipped because the circuit breaker
+   * is open. Nothing was heard from Gemini at all. */
+  | { kind: "unavailable" };
+
 export async function interpretMessage(
   geminiApiKey: string,
   text: string,
   history: ConversationTurn[],
   settings: BotSettings = DEFAULT_SETTINGS,
   kv?: KVNamespace
-): Promise<InterpretedIntent | null> {
+): Promise<InterpretOutcome> {
   const systemInstruction = buildSystemInstruction(bangkokDateKey(), history, settings);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), INTERPRETER_TIMEOUT_MS);
@@ -523,13 +551,20 @@ export async function interpretMessage(
     const intent = validateIntent(parsed);
     if (!intent) {
       console.error("interpretMessage: model returned a well-formed but invalid/unrecognized intent, falling back", raw);
+      return { kind: "unusable" };
     }
-    return intent;
+    return { kind: "intent", intent };
   } catch (err) {
-    if (!(err instanceof GeminiError) && !(err instanceof SyntaxError)) {
+    // A SyntaxError means Gemini did answer — with something that wasn't
+    // JSON. That is "unusable", not "unavailable": the model is up, it just
+    // said the wrong shape, and a plain-language question to it may still
+    // work. Everything else (GeminiError, an aborted fetch, the breaker)
+    // means nothing was heard.
+    if (err instanceof SyntaxError) return { kind: "unusable" };
+    if (!(err instanceof GeminiError)) {
       console.error("interpretMessage failed unexpectedly, falling back to deterministic parser", err);
     }
-    return null;
+    return { kind: "unavailable" };
   } finally {
     clearTimeout(timeout);
   }

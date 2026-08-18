@@ -6357,10 +6357,14 @@ await handleTextMessage(env, lineUserId, "ค่าน้ำ 20", origin);
 check("once the pause lifts, Gemini is used again", geminiRequests.length > 0);
 
 // A 500 is this one call's problem, not a reason to stop trying for everyone.
+// It has to be armed against a message that really reaches the answering
+// model: the interpreter's own call is served from its own mock branch
+// above and would leave the flag still armed, which is how an earlier
+// version of this test passed without the failure ever firing — and then
+// leaked the armed flag into the next test in the file.
 simulateGeminiFailure = true;
-await handleTextMessage(env, lineUserId, "ค่าขนม 30", origin);
-check("a non-429 Gemini failure does not open the breaker", (await isGeminiPaused(kv)) === false);
-
+await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
+check("a non-429 Gemini failure fires and does not open the breaker", simulateGeminiFailure === false && (await isGeminiPaused(kv)) === false);
 // ---- "I don't understand" beats "how much?" (PLAN.md 17.55) ---------------
 // Reported with a screenshot: the user asked for their email contacts and
 // the bot replied "เธออยากรู้ว่าจำนวนเงินเท่าไหร่คะ". Reproducing it showed
@@ -6373,7 +6377,6 @@ const { DEFAULT_CATEGORIES: cats } = await import("../src/categories.ts");
 const engineReply = (t) => engine(t, null, cats);
 
 for (const notMoney of [
-  "ขอรายชื่ออีเมลที่มีหน่อย", // the reported one
   "วันนี้อากาศเป็นยังไง",
   "ช่วยแนะนำหนังหน่อย", // matches the entertainment category on "หนัง"
   "อยากกินข้าว", // matches the food category on "ข้าว"
@@ -6410,14 +6413,66 @@ for (const [text, expected] of [
   check(`"${text}" still behaves as money (${expected})`, got === expected);
 }
 
-// End to end, through the bot, with the interpreter failing so the
-// deterministic path is the one answering — which is exactly the situation
-// the screenshot captured.
-const unknownThroughBot = await handleTextMessage(env, lineUserId, "ขอรายชื่ออีเมลที่มีหน่อย", origin);
+// ---- What happens after "I don't understand" (PLAN.md 17.56) -------------
+// The deterministic engine giving up isn't always the honest end of the
+// line: the AI interpreter runs first and only hands over when it produced
+// nothing usable, and *why* decides what should happen next.
+
+// Gemini answered, just not with a usable intent (the default mock returns
+// non-JSON, which is exactly that case). The message is worth asking it in
+// plain language — this is the situation the reported screenshot captured.
+geminiRequests.length = 0;
+simulateInterpreterResult = null;
+const unusableThenAsked = await handleTextMessage(env, lineUserId, "เล่าเรื่องตลกให้ฟังหน่อยสิ", origin);
 check(
-  "and the whole bot says so too, leaving no pending question behind",
-  unknownThroughBot.includes("ไม่เข้าใจ") && (await kv.get(`pending:${lineUserId}`)) === null
+  "when Gemini answered but unusably, the message is put to it as a question",
+  geminiRequests.some((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน")) &&
+    !unusableThenAsked.includes("ไม่เข้าใจ")
 );
+
+// Gemini unreachable: a second call would only spend a request to fail the
+// same way, and blaming the message would be wrong — it was never read.
+simulateInterpreterFailure = true;
+geminiRequests.length = 0;
+const unreachableReply = await handleTextMessage(env, lineUserId, "เล่าเรื่องตลกให้ฟังหน่อยสิ", origin);
+check(
+  "when Gemini was unreachable it says so, instead of blaming the message",
+  unreachableReply.includes("AI ตอบไม่ได้ชั่วคราว") && !unreachableReply.includes("ไม่เข้าใจข้อความ")
+);
+check(
+  // The interpreter's own attempt is still made and still recorded — what
+  // must not happen is a *second*, question-flavoured call behind it.
+  "and makes no further Gemini call while it is down",
+  !geminiRequests.some((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน"))
+);
+check("nothing is left pending either way", (await kv.get(`pending:${lineUserId}`)) === null);
+
+// ---- Listing contacts (PLAN.md 17.56) -------------------------------------
+// The reported message had nowhere to land: the only contacts command needed
+// a specific name, so the AI's contact_lookup intent came back without one
+// and failed validation.
+googleContacts.length = 0;
+googleContacts.push(
+  { name: "สมชาย ใจดี", email: "somchai@example.com" },
+  { name: "สมหญิง รักเรียน", email: "somying@example.com" },
+  { name: "ไม่มีเมล", email: undefined }
+);
+const contactListReply = await handleTextMessage(env, lineUserId, "ขอรายชื่ออีเมลที่มีหน่อย", origin);
+check(
+  "the reported message now lists the contacts that have an email",
+  contactListReply.includes("somchai@example.com") &&
+    contactListReply.includes("somying@example.com") &&
+    contactListReply.includes("2 คน")
+);
+check("and leaves out the one with no email", !contactListReply.includes("ไม่มีเมล"));
+
+simulateInterpreterResult = { intent: "contact_list" };
+const contactListViaAi = await handleTextMessage(env, lineUserId, "มีอีเมลของใครเก็บไว้บ้างเอ่ย", origin);
+check("the AI's contact_list intent reaches the same answer", contactListViaAi.includes("somchai@example.com"));
+
+googleContacts.length = 0;
+const emptyContactsReply = await handleTextMessage(env, lineUserId, "รายชื่อผู้ติดต่อ", origin);
+check("an empty address book says so plainly", emptyContactsReply.includes("ไม่มีรายชื่อผู้ติดต่อ"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

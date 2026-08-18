@@ -28,10 +28,64 @@ export async function answerContactEmail(ctx: ActionCtx, nameQuery: string): Pro
   return `อีเมลของ ${contact.name}: ${contact.email}`;
 }
 
+// Listing the whole address book (PLAN.md 17.56). Asked for by a real user
+// — "ขอรายชื่ออีเมลที่มีหน่อย" — which had nowhere to land: the only contacts
+// command needed a specific name, so the AI's contact_lookup intent came
+// back without one, failed validation, and the message fell all the way
+// through to "I don't understand".
+//
+// Capped because a Google account can carry hundreds of contacts and LINE
+// truncates at 5,000 characters: better to show a readable page of them and
+// say how many there are than to send a wall that gets cut mid-name.
+const MAX_CONTACTS_LISTED = 30;
+
+export async function answerContactList(ctx: ActionCtx): Promise<string> {
+  const contacts = await listContacts(ctx.accessToken);
+  // Contacts with no email are dropped: this answers "which email addresses
+  // do I have", and a name on its own doesn't.
+  const withEmail = contacts.filter((c): c is { name: string; email: string } => Boolean(c.email));
+  if (withEmail.length === 0) {
+    return contacts.length === 0
+      ? "ไม่มีรายชื่อผู้ติดต่อในบัญชี Google นี้เลยนะ"
+      : `มีผู้ติดต่อ ${contacts.length} คน แต่ไม่มีใครบันทึกอีเมลไว้เลยนะ`;
+  }
+
+  const shown = withEmail.slice(0, MAX_CONTACTS_LISTED);
+  const lines = shown.map((c) => `• ${c.name} — ${c.email}`);
+  const header =
+    withEmail.length > shown.length
+      ? `ผู้ติดต่อที่มีอีเมล ${withEmail.length} คน แสดง ${shown.length} คนแรก:`
+      : `ผู้ติดต่อที่มีอีเมล ${withEmail.length} คน:`;
+  const footer =
+    withEmail.length > shown.length
+      ? '\n\nหาคนใดคนหนึ่งพิมพ์ "อีเมลของ<ชื่อ>" ได้เลย'
+      : "";
+  return [header, ...lines].join("\n") + footer;
+}
+
 const EMAIL_LOOKUP_RE = /^อีเมลของ(.+)$/;
+
+// Whole phrases, not a substring test — "รายชื่อ" and "ผู้ติดต่อ" are common
+// enough words that a loose match would swallow unrelated messages, the
+// mistake this codebase has made four times now.
+const CONTACT_LIST_PHRASES = [
+  "ขอรายชื่ออีเมลที่มีหน่อย",
+  "ขอรายชื่ออีเมล",
+  "รายชื่ออีเมล",
+  "รายชื่อผู้ติดต่อ",
+  "ขอรายชื่อผู้ติดต่อ",
+  "ดูรายชื่อผู้ติดต่อ",
+  "มีอีเมลใครบ้าง",
+  "ผู้ติดต่อทั้งหมด",
+];
 
 export async function matchContactsCommand(text: string): Promise<Handler | null> {
   const trimmed = text.trim();
+
+  if (CONTACT_LIST_PHRASES.includes(trimmed.replace(/[?？!]/g, "").trim())) {
+    return (ctx) => answerContactList(ctx);
+  }
+
   const m = trimmed.match(EMAIL_LOOKUP_RE);
   if (!m) return null;
   const nameQuery = m[1].trim();

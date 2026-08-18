@@ -586,6 +586,11 @@ Gmail: so "ส่งอีเมล ถึง <ชื่อ>" doesn't require ty
 - If more than one contact's name contains the search term, it lists them and asks you to be
   more specific instead of guessing which one you meant. If a matching contact has no email on
   file, it says so instead of erroring.
+- `ขอรายชื่ออีเมล` / `มีอีเมลใครบ้าง` — lists every contact that has an email on file (PLAN.md
+  17.56). Contacts *without* one are left out on purpose: the question is which addresses you
+  have, and a bare name isn't an answer to it. Capped at 30 entries with a count of the rest,
+  so a large address book can't blow past LINE's message limit. Matched on the whole phrase
+  rather than as a substring, so it can't swallow `อีเมลของ<ชื่อ>`.
 - Feeds directly into `ส่งอีเมล ถึง <ชื่อ>` (see the Gmail section above) — the same lookup, the
   same "found exactly one, or ask" behavior, and the confirm-before-send step always shows the
   address it actually resolved to before anything sends.
@@ -965,6 +970,15 @@ safety net (17.9) is what stays in place to bound the risk:
   apply/prompt/answer functions (e.g. `promptCalendarDeleteByKeyword`, `answerDiarySearch`,
   `promptOrStartTrip`, `setProvinceByName`) so both the regex matchers and the AI interpreter call
   the same code — no duplicated logic to keep in sync by hand.
+- **When nothing recognises the message, *why* decides what happens next** (PLAN.md 17.56).
+  `interpretMessage` returns a discriminated result rather than a bare `null`: `unusable` (Gemini
+  answered, but with non-JSON or an intent that failed `validateIntent`) means the model is up and
+  merely misread the sentence, so `answerUnrecognized` in `index.ts` puts the original message to
+  it again as a plain question via `answerQuestion` — and falls back to the deterministic
+  "I don't understand" text if even that fails. `unavailable` (a `GeminiError`, an aborted fetch,
+  or the 17.54 breaker already open) means nothing was heard at all, so the bot says the AI is
+  temporarily unavailable instead of blaming a message nobody read, and makes no second call that
+  would only fail the same way.
 - **Cost tradeoff, accepted knowingly**: a message can now trigger up to two sequential Gemini
   calls (interpret, then persona-style the reply) — real additional quota usage and latency on top
   of 17.9's already-accepted persona cost. `INTERPRETER_TIMEOUT_MS` (3s) keeps a slow/hanging call
