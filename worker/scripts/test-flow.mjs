@@ -1509,8 +1509,19 @@ check("last month summary doesn't error", lastMonthReply.length > 0);
 
 const greetingReply = await handleTextMessage(env, lineUserId, "สวัสดีค่ะ", origin);
 check(
-  "a plain greeting gets the 4-area welcome message, not the detailed help",
-  greetingReply.includes("12 เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+  "a plain greeting gets the welcome message, not the detailed help",
+  greetingReply.includes("เรื่องหลักๆ") && !greetingReply.includes("💰 จดเงิน")
+);
+// Derived rather than hard-coded: the count used to be written into this
+// test as a literal, so adding a feature to the welcome list turned a
+// correct change into a failing test and told you nothing about the real
+// mistake — which is shipping a list of thirteen things under a heading
+// that says twelve.
+const welcomeClaimed = Number(greetingReply.match(/ช่วยได้ (\d+) เรื่องหลักๆ/)[1]);
+const welcomeListed = greetingReply.split("\n").filter((l) => /^\p{Extended_Pictographic}/u.test(l)).length;
+check(
+  `the welcome message's count matches the list it introduces (${welcomeClaimed})`,
+  welcomeClaimed === welcomeListed
 );
 
 // A greeting sent mid-clarification must still cancel the pending question
@@ -7040,6 +7051,40 @@ const cinemaPageHtml = await (await worker.fetch(new Request(cinemaPageUrl), env
 check(
   "a page whose answer never checked availability claims nothing about it",
   !cinemaPageHtml.includes("ยังไม่มีในแอปสตรีมมิ่งไทย") && !cinemaPageHtml.includes("ดูได้ที่ <span")
+);
+
+// ---- Every surface that lists what the bot does (PLAN.md 17.58) ----------
+// There are five of them and they drift apart silently: a feature ships,
+// "วิธีใช้" gets updated because that is the one you think of, and the
+// welcome message, the short capability list and both Terms pages quietly
+// keep describing a bot that no longer exists. Movies/series shipped that
+// way and had to be backfilled, so each surface now gets a check.
+const surfaceCapabilityText = await handleTextMessage(env, lineUserId, "ทำอะไรได้บ้าง", origin);
+// "วิธีใช้" answers with a link, not the guide itself (PLAN.md 17.39) — the
+// text is far past what belongs in a chat bubble — so the page is what has
+// to carry the feature.
+const surfaceHelpText = await (await worker.fetch(new Request(`${origin}/view/help`), env, new FakeExecutionContext())).text();
+const surfaceTermsThHtml = await (await worker.fetch(new Request(`${origin}/terms`), env, new FakeExecutionContext())).text();
+const surfaceTermsEnHtml = await (await worker.fetch(new Request(`${origin}/terms/en`), env, new FakeExecutionContext())).text();
+const surfacePrivacyThHtml = await (await worker.fetch(new Request(`${origin}/privacy`), env, new FakeExecutionContext())).text();
+const surfacePrivacyEnHtml = await (await worker.fetch(new Request(`${origin}/privacy/en`), env, new FakeExecutionContext())).text();
+
+for (const [surface, text, needles] of [
+  ["the short capability list", surfaceCapabilityText, ["หนัง", "ซีรีส์"]],
+  ["the how-to guide page", surfaceHelpText, ["หนัง", "ซีรีส์"]],
+  ["the welcome message", greetingReply, ["หนัง", "ซีรีส์"]],
+  ["the Thai terms page", surfaceTermsThHtml, ["หนัง", "ซีรีส์"]],
+  ["the English terms page", surfaceTermsEnHtml, ["movie", "series"]],
+]) {
+  check(`${surface} mentions both movies and series`, needles.every((n) => text.includes(n)));
+}
+
+// TMDb is a third party the bot sends the user's own typed search terms to,
+// so it belongs in the data-sharing table on both privacy pages — the same
+// treatment Places, Open-Meteo and Travelpayouts already get.
+check(
+  "both privacy pages list TMDB among the services data is sent to",
+  surfacePrivacyThHtml.includes("TMDB") && surfacePrivacyEnHtml.includes("TMDB")
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);
