@@ -30,6 +30,12 @@ export const NETWORK_TIMEOUTS = {
   /** Lowest of the three: the weather line is decorative, and its callers
    * already drop it silently when it fails. */
   weather: 5_000,
+  /** TMDb (PLAN.md 17.57). Between weather and calendar: a movie list is
+   * never the only thing a reply is carrying, but a description search
+   * makes several of these back to back (genres, then a keyword lookup per
+   * term, then discover), so the per-call budget has to leave room for the
+   * whole chain inside one reply. */
+  tmdb: 6_000,
 };
 
 export class NetworkTimeoutError extends Error {}

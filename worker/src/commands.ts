@@ -212,6 +212,18 @@ export function buildHelpText(webSearchEnabled: boolean): string {
     "• หา<สิ่งที่จะหา>ใกล้ฉัน เช่น \"หาร้านกาแฟใกล้ฉัน\" แล้วแชร์ตำแหน่งปัจจุบันตามที่บอทขอ (กดไอคอน + ข้างช่องพิมพ์ในไลน์ > ตำแหน่งที่ตั้ง)",
     "• ได้รายชื่อร้าน/สถานที่จริงใกล้ตำแหน่งที่แชร์ พร้อมคะแนนรีวิว (ถ้ามี) และลิงก์เปิดดูใน Google Maps",
     "",
+    "🎬 หนัง (ข้อมูลจาก TMDB)",
+    // The four ready-made lists plus the two searches (PLAN.md 17.57).
+    // Deliberately shows the exact trigger phrases: natural phrasing works
+    // too via the AI interpreter, but the phrases are what always works.
+    "• หนังใหม่ — หนังที่กำลังฉายในโรงหนังไทยตอนนี้",
+    "• หนังกำลังจะเข้า — หนังที่ยังไม่เข้าโรง",
+    "• หนังมาแรง — หนังฮิตประจำสัปดาห์",
+    "• หนังสตรีมมิ่ง — หนังใหม่ใน Netflix / Prime Video / Disney+ / Apple TV+ / Viu",
+    "• หนังเรื่อง<ชื่อหนัง> — ค้นหาจากชื่อ",
+    "• หนังแนว<แนว> หรือ หนังเกี่ยวกับ<เนื้อเรื่อง> เช่น \"หนังเกี่ยวกับเดินทางข้ามเวลา\" — ค้นจากแนวหรือเนื้อเรื่องได้เลย",
+    "• ทุกคำสั่งจะแนบลิงก์หน้าเว็บที่มีโปสเตอร์ เรื่องย่อ และดูได้ที่แอปไหนบ้าง",
+    "",
     "🎫 หาตั๋วเดินทาง/ที่พัก (เทียบราคา + ลิงก์กดจองเอง)",
     // PLAN.md 17.37 — read-only like Places: the bot never books anything,
     // it prices (best-effort, Amadeus) and links (always).

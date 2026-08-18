@@ -65,6 +65,13 @@ import {
   type LineWebhookBody,
 } from "./line.ts";
 import { answerNearbySearch, matchPlacesCommand, promptPlaceSearch } from "./placesCommands.ts";
+import {
+  answerMovieDiscover,
+  answerMovieList,
+  answerMovieSearch,
+  matchMovieCommand,
+  type MovieCtx,
+} from "./movieCommands.ts";
 import { canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
 import { signState, verifyState } from "./signedState.ts";
 import {
@@ -99,6 +106,7 @@ import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewHelpRequest } from "./viewHelpPage.ts";
+import { handleViewMoviesRequest } from "./viewMoviesPage.ts";
 import { handleViewSearchRequest } from "./viewSearchPage.ts";
 import { handleViewShiftsRequest } from "./viewShiftsPage.ts";
 import { handleViewAccountsRequest } from "./viewPages.ts";
@@ -138,6 +146,11 @@ export interface Env {
   // the literal "true" once the project has billing to turn the feature on
   // without a code change.
   ENABLE_WEB_SEARCH: string | undefined;
+  // TMDb API key (PLAN.md 17.57) — optional, same degrade-gracefully
+  // treatment as GOOGLE_MAPS_API_KEY and TRAVELPAYOUTS_TOKEN: a flat
+  // project-level key for public data, tied to no account. Without it the
+  // movie commands say the feature isn't set up yet; nothing else changes.
+  TMDB_API_KEY: string;
 }
 
 // A function rather than a constant since PLAN.md 17.48 — the bot's name is
@@ -522,6 +535,13 @@ async function runInterpretedIntent(
         // set_province/matchPlacesCommand below — place search only needs
         // the flat Maps API key, never a per-user Google access token.
         return await promptPlaceSearch({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.placeKeyword);
+      // Movies (PLAN.md 17.57) — TMDb only, so no Google token here either.
+      case "movie_list":
+        return await answerMovieList(movieCtx(env, subjectId, origin), intent.movieListKind);
+      case "movie_search":
+        return await answerMovieSearch(movieCtx(env, subjectId, origin), intent.movieQuery);
+      case "movie_discover":
+        return await answerMovieDiscover(movieCtx(env, subjectId, origin), intent.movieDescription);
       // Travel search (PLAN.md 17.37) — read-only, no per-user Google auth
       // (an app-level Amadeus key at most), same no-withToken reasoning as
       // find_nearby_places above.
@@ -636,6 +656,20 @@ async function recordConversationTurn(env: Env, subjectId: string, userText: str
 // to the chatEngine handling", which is genuinely different between the two
 // modes and stays in each caller rather than being forced into this shared
 // shape.
+/** The narrow context the movie commands take (PLAN.md 17.57). A plain
+ * function rather than a factory-of-factories like makeActionCtxFactory,
+ * because none of these fields depends on a Google access token. */
+function movieCtx(env: Env, subjectId: string, origin: string): MovieCtx {
+  return {
+    kv: env.ACCOUNTS,
+    subjectId,
+    origin,
+    tmdbApiKey: env.TMDB_API_KEY,
+    geminiApiKey: env.GEMINI_API_KEY,
+    signingSecret: env.STATE_SIGNING_SECRET,
+  };
+}
+
 async function dispatchLegacyCommands(
   env: Env,
   subjectId: string,
@@ -767,6 +801,16 @@ async function dispatchLegacyCommands(
     const travelHandler = await matchTravelCommand(text);
     if (travelHandler) {
       return await travelHandler(env);
+    }
+
+    // Movies (PLAN.md 17.57) — TMDb only, no Google auth, so no
+    // withFreshAccessToken here either. Placed before matchCommand's report
+    // handler for the same reason travel is: "ค้นหาหนัง..." and
+    // "หาหนังเรื่อง..." both start with that handler's search prefix and
+    // would otherwise be read as a search of the user's own spending notes.
+    const movieHandler = matchMovieCommand(text);
+    if (movieHandler) {
+      return await movieHandler(movieCtx(env, subjectId, origin));
     }
 
     // Works in both modes (PLAN.md 17.7) — resolveViewSession (viewAuth.ts)
@@ -1861,6 +1905,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   // No token, no env — the guide is the same for everyone and holds no
   // account data (see viewHelpPage.ts).
   if (url.pathname === "/view/help") return handleViewHelpRequest(env);
+  if (url.pathname === "/view/movies") return handleViewMoviesRequest(request, env);
   if (url.pathname === "/view/search") return handleViewSearchRequest(request, env);
   if (url.pathname === "/view/settings") return handleViewSettingsRequest(request, env);
   if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);

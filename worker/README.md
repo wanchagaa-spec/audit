@@ -146,6 +146,7 @@ Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
    | `GEMINI_API_KEY` | from step 4 (optional — omit and "ถาม"/"วิเคราะห์" just always reply with the fallback message) |
    | `GOOGLE_MAPS_API_KEY` | from step 4.5 (optional — omit and "หา...ใกล้ฉัน" just replies that the feature isn't set up) |
    | `TRAVELPAYOUTS_TOKEN` | from step 4.6 (optional — omit and travel search sends booking links without in-chat prices) |
+   | `TMDB_API_KEY` | a TMDb API key (v3 auth) from https://www.themoviedb.org/settings/api, free for non-commercial use (optional — omit and the movie commands reply that the feature isn't set up) |
 
 2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
    **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
@@ -660,6 +661,45 @@ honest note — a search never comes back empty-handed just because the price AP
   Amadeus before this ever went live) — an app-level token like `GOOGLE_MAPS_API_KEY`, so
   there are no per-user re-link error classes; any Travelpayouts problem is admin-only and
   degrades to links.
+
+### Movies (PLAN.md 17.57)
+
+Cinema listings and film search, from The Movie Database. Read-only, nothing is saved, and —
+like Places and Travelpayouts — it needs no per-user OAuth at all, just a flat
+`TMDB_API_KEY`. Every answer comes in two halves: a five-film list in chat, and a link to
+`/view/movies` carrying the same films with posters, synopses and a per-film "where to watch
+in Thailand" link. That split is forced by the medium rather than chosen — `replyToLine`
+sends plain text, so a poster can only ever live on a page.
+
+- `หนังใหม่` — in Thai cinemas now. `หนังกำลังจะเข้า` — dated but not open yet. `หนังมาแรง` —
+  this week's trending. `หนังสตรีมมิ่ง` — new on the subscription apps available in Thailand
+  (Netflix, Prime Video, Disney+, Apple TV+, Viu). Four separate TMDb endpoints, because they
+  are four different questions.
+- `หนังเรื่อง<ชื่อ>` / `ค้นหาหนัง<ชื่อ>` — search by title.
+- `หนังแนว<แนว>` / `หนังเกี่ยวกับ<เนื้อเรื่อง>` — **search by what a film is about**, which TMDb
+  cannot do directly: `/search/movie` matches titles only. What it has is genres and a curated
+  keyword vocabulary, both searchable, so Gemini turns the description into those and TMDb
+  resolves every one against its own catalogue before use. A safe use of the model by this
+  codebase's own rule (see `news.ts`): it supplies search *terms*, never facts — the films
+  that come back are TMDb's answer. Genres are ANDed (a horror-comedy is both at once),
+  keywords ORed (they are alternative phrasings of one idea). With Gemini unavailable, or when
+  nothing resolves to a real id, it degrades to a title search rather than refusing —
+  `/discover` with no filter at all would answer "the most popular films on TMDb", which looks
+  like a result and answers nothing.
+- Natural phrasing works too via the AI interpreter's `movie_list` / `movie_search` /
+  `movie_discover` intents. `movieListKind` is validated against the real union, since it
+  picks an endpoint and an invented one would build a request to a path that does not exist.
+- `/view/movies` stores the *result*, not the query (same pattern as `/view/search`): the page
+  then shows exactly the films the chat message listed, and opening the link costs no TMDb
+  request. One-hour TTL matching the view token, and the id is scoped by subject.
+- **TMDb's attribution requirement is a licence condition, not a courtesy** — the page carries
+  it and a test enforces it. Don't remove it.
+- **Not verified against the live API.** The environment this was built in blocks
+  `api.themoviedb.org` at the egress proxy, so no call here has ever run for real; the tests
+  drive a mock encoding the same assumptions as the code and therefore cannot catch a wrong
+  path or parameter name. Check it against a real key before relying on it. Provider ids for
+  the smaller Thai services (WeTV, iQIYI, TrueID) are left out for the same reason — a wrong
+  id fails silently, filtering out a catalogue with no error.
 
 ### Diary (PLAN.md 15.4)
 
