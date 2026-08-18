@@ -205,6 +205,8 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
   .help-list { margin: 0; padding-left: 1.1rem; }
   .help-list li { margin-bottom: .5rem; font-size: .85rem; line-height: 1.55; }
   .help-list li:last-child { margin-bottom: 0; }
+  .locale-switch { text-align: right; font-size: .78rem; margin: 0 0 .4rem; }
+  .locale-switch a { color: #16a34a; text-decoration: none; }
   .legal-lead { font-size: .88rem; color: #40444b; line-height: 1.6; margin: 0 0 1.1rem; }
   .legal-p { font-size: .85rem; color: #40444b; line-height: 1.65; margin: 0 0 .7rem; }
   .legal-p:last-child { margin-bottom: 0; }

@@ -6153,6 +6153,67 @@ check(
 // be a broken page rather than a styled one.
 check("the pages render as complete HTML documents", privacyHtml.startsWith("<!doctype html>") && termsHtml.includes("</html>"));
 
+// English versions, for a Google OAuth reviewer who does not read Thai.
+const privacyEnResponse = await worker.fetch(new Request(`${origin}/privacy/en`), env, new FakeExecutionContext());
+const privacyEnHtml = await privacyEnResponse.text();
+const termsEnResponse = await worker.fetch(new Request(`${origin}/terms/en`), env, new FakeExecutionContext());
+const termsEnHtml = await termsEnResponse.text();
+check(
+  "/privacy/en and /terms/en serve the English versions",
+  privacyEnResponse.status === 200 &&
+    termsEnResponse.status === 200 &&
+    privacyEnHtml.includes("Privacy Policy") &&
+    termsEnHtml.includes("Terms of Use")
+);
+check(
+  "each language links to the same document in the other language",
+  privacyHtml.includes('href="/privacy/en"') && privacyEnHtml.includes('href="/privacy"')
+);
+
+// The two languages have to stay the same document. A translation that
+// quietly loses a section or a table row is a policy that tells different
+// things to different reviewers — which is exactly the failure mode a
+// bilingual policy invites, and nothing else would catch it.
+const { LEGAL_SECTIONS } = await import("../src/legalPages.ts");
+const shapeOf = (sections) =>
+  sections.map((sec) => [sec.paragraphs?.length ?? 0, sec.bullets?.length ?? 0, sec.table?.rows.length ?? 0].join("/")).join("|");
+check(
+  "the English privacy policy has the same sections and rows as the Thai",
+  shapeOf(LEGAL_SECTIONS.privacy.th) === shapeOf(LEGAL_SECTIONS.privacy.en)
+);
+check(
+  "and so do the terms",
+  shapeOf(LEGAL_SECTIONS.terms.th) === shapeOf(LEGAL_SECTIONS.terms.en)
+);
+
+// The scope and retention guarantees have to hold in English too, or the
+// reviewer most likely to read that version gets the weaker document.
+check(
+  "the English policy explains every scope as well",
+  declaredScopes.every((scope) => privacyEnHtml.includes(scope))
+);
+const privacyEnRows = [...privacyEnHtml.matchAll(/<tr>(.*?)<\/tr>/gs)].map((m) => m[1]);
+const enRowSaying = (subject) => privacyEnRows.find((row) => row.includes(subject)) ?? "";
+check(
+  "and quotes the same retention figures",
+  enRowSaying("last 6 exchanges").includes("24 hours") &&
+    enRowSaying("waiting for you to type").includes("10 minutes") &&
+    enRowSaying("confirmation code").includes("15 minutes")
+);
+
+// One contact address, named once in the code, so the two languages cannot
+// disagree about where to write.
+// In the "who operates this" section specifically, not merely somewhere on
+// the page — a first version checked the latter and a mutation removing it
+// from the English contact line slipped through, because the address also
+// appears further down under data-subject rights.
+const contactSection = (sections) => JSON.stringify(sections[0]);
+check(
+  "both languages name the contact address in the operator section",
+  contactSection(LEGAL_SECTIONS.privacy.th).includes("wanchagaa1999@gmail.com") &&
+    contactSection(LEGAL_SECTIONS.privacy.en).includes("wanchagaa1999@gmail.com")
+);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);

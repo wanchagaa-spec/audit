@@ -1083,6 +1083,11 @@ table from every KV prefix the Worker really writes, the retention figures from 
 TTL constants, and the third-party list from the hosts it genuinely contacts (Skyscanner,
 Agoda, Booking and 12go appear only as links in replies and are never called).
 
+English versions live at `/privacy/en` and `/terms/en` for a Google OAuth reviewer who
+doesn't read Thai. Both languages sit in the same file, and a test compares their shape —
+section count, bullet count, table rows — so a translation can't quietly lose a row and
+leave the policy saying different things to different reviewers.
+
 A test reads `googleAuth.ts` and fails if a requested scope isn't explained in the policy.
 A document claiming the bot asks for less than it does is the one way a privacy policy can
 be actively harmful rather than merely stale.

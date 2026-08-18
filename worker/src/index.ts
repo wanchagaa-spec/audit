@@ -1778,7 +1778,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   // root rather than under /view/ so the URLs are short enough to paste into
   // a verification form and read back.
   if (url.pathname === "/privacy") return handlePrivacyRequest(env);
+  if (url.pathname === "/privacy/en") return handlePrivacyRequest(env, "en");
   if (url.pathname === "/terms") return handleTermsRequest(env);
+  if (url.pathname === "/terms/en") return handleTermsRequest(env, "en");
 
   if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
   if (url.pathname === "/view") return handleViewAccountsRequest(request, env);
