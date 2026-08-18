@@ -109,6 +109,9 @@ let tmdbGenres = [
   { id: 27, name: "สยองขวัญ" },
 ];
 let tmdbKeywordIdByQuery = { "time travel": 4379, robot: 310 };
+// Where-to-watch, keyed by "<mediaType>:<id>". Absent means TMDb has no Thai
+// availability for it, which the bot renders differently from "never asked".
+let tmdbWatchProviders = {};
 let simulateTmdbFailure = false; // one-shot: next TMDb call answers 500
 // The description-search plan (movieCommands.ts): what Gemini "decides" the
 // user's description means, in TMDb's own vocabulary. One-shot, so a test
@@ -760,12 +763,40 @@ globalThis.fetch = async (url, init = {}) => {
       simulateTmdbFailure = false;
       return new Response(JSON.stringify({ status_message: "simulated TMDb failure" }), { status: 500 });
     }
-    if (path === "/genre/movie/list") {
+    // Films and series have separate genre lists in TMDb; several ids happen
+    // to agree, which is exactly why reading the wrong one fails quietly.
+    if (path === "/genre/movie/list" || path === "/genre/tv/list") {
       return new Response(JSON.stringify({ genres: tmdbGenres }), { status: 200 });
     }
     if (path === "/search/keyword") {
       const id = tmdbKeywordIdByQuery[params.query];
       return new Response(JSON.stringify({ results: id ? [{ id, name: params.query }] : [] }), { status: 200 });
+    }
+    const providerMatch = path.match(/^\/(movie|tv)\/(\d+)\/watch\/providers$/);
+    if (providerMatch) {
+      const names = tmdbWatchProviders[`${providerMatch[1]}:${providerMatch[2]}`];
+      return new Response(
+        JSON.stringify(
+          names ? { results: { TH: { flatrate: names.map((provider_name) => ({ provider_name })) } } } : { results: {} }
+        ),
+        { status: 200 }
+      );
+    }
+    // Films and series carry the same data under different field names, so
+    // the mock answers whichever set the endpoint implies — the split
+    // parseTitles exists to handle.
+    if (path.startsWith("/tv/") || path.startsWith("/discover/tv") || path.startsWith("/search/tv") || path.startsWith("/trending/tv")) {
+      return new Response(
+        JSON.stringify({
+          results: tmdbResults.map(({ title, original_title, release_date, ...rest }) => ({
+            ...rest,
+            name: title,
+            original_name: original_title,
+            first_air_date: release_date,
+          })),
+        }),
+        { status: 200 }
+      );
     }
     return new Response(JSON.stringify({ results: tmdbResults }), { status: 200 });
   }
@@ -6797,6 +6828,218 @@ const emptyMoviesReply = await handleTextMessage(env, lineUserId, "หนัง�
 check(
   "an empty result says so and sends no link",
   emptyMoviesReply.includes("ยังไม่มีข้อมูล") && !emptyMoviesReply.includes("/view/movies")
+);
+
+
+// ---- Series, availability, and bare descriptors (PLAN.md 17.58) -----------
+// Series run through the exact same code as films, parameterised by
+// mediaType — TMDb mirrors its whole API across /movie and /tv, and the one
+// place the difference lives is parseTitles' field-name split.
+
+tmdbResults = [
+  {
+    id: 1396,
+    title: "ซีรีส์ทดสอบ",
+    original_title: "Test Series",
+    overview: "เรื่องย่อซีรีส์",
+    poster_path: "/tv1.jpg",
+    release_date: "2025-03-10",
+    vote_average: 8.4,
+    original_language: "ko",
+  },
+  {
+    id: 99,
+    title: "เรื่องที่ไม่มีในแอป",
+    original_title: "Not Streaming",
+    overview: "ย่อ",
+    poster_path: "/tv2.jpg",
+    release_date: "2024-01-02",
+    vote_average: 6.5,
+    original_language: "en",
+  },
+];
+tmdbWatchProviders = { "tv:1396": ["Netflix", "Viu"], "movie:1011985": ["Disney Plus"] };
+
+for (const [phrase, expectedPath] of [
+  ["ซีรีส์ใหม่", "/tv/on_the_air"],
+  ["ซีรีส์มาแรง", "/trending/tv/week"],
+  ["ซีรีส์กำลังจะมา", "/discover/tv"],
+  ["ซีรีส์สตรีมมิ่ง", "/discover/tv"],
+]) {
+  tmdbRequests.length = 0;
+  await handleTextMessage(env, lineUserId, phrase, origin);
+  check(`"${phrase}" asks TMDb for ${expectedPath}`, tmdbRequests[0]?.path === expectedPath);
+}
+
+// TMDb calls the same thing `name`/`first_air_date` on a series. Getting
+// that wrong drops every row on the floor, since a title-less entry is
+// skipped — so the visible symptom would be an empty list, not an error.
+tmdbRequests.length = 0;
+const seriesReply = await handleTextMessage(env, lineUserId, "ซีรีส์ใหม่", origin);
+check(
+  "a series list reads TMDb's name/first_air_date fields, not a film's",
+  seriesReply.includes("ซีรีส์ทดสอบ") && seriesReply.includes("2025")
+);
+
+// The half of "ดูที่ไหน มีพากย์ไทยไหม" that TMDb can actually answer.
+check(
+  "a series says which Thai services carry it, and what language it was made in",
+  seriesReply.includes("ดูได้ที่: Netflix, Viu") && seriesReply.includes("เสียงต้นฉบับ: เกาหลี")
+);
+check(
+  "a title no Thai service carries says so, rather than being left blank",
+  seriesReply.includes("ยังไม่มีในแอปสตรีมมิ่งไทย")
+);
+// The half it cannot: there is no dub or subtitle field anywhere in TMDb,
+// so the answer says so instead of quietly dropping the question.
+check(
+  "and it says outright that dub/subtitle info is not TMDb data",
+  seriesReply.includes("ไม่มีข้อมูลพากย์ไทย")
+);
+check(
+  "availability is looked up once per shown row, no more",
+  tmdbRequests.filter((r) => r.path.includes("/watch/providers")).length === 2
+);
+
+// Not looked up for a cinema listing: the answer to "where do I watch this"
+// is "a cinema", and it would cost a subrequest per row to say nothing.
+tmdbResults = [
+  { id: 1011985, title: "หนังโรง", original_title: "In Cinemas", overview: "ย่อ", poster_path: "/m.jpg", release_date: "2026-07-01", vote_average: 7.2, original_language: "en" },
+];
+tmdbRequests.length = 0;
+const cinemaReply = await handleTextMessage(env, lineUserId, "หนังใหม่", origin);
+check(
+  "a cinema listing skips the availability lookups entirely",
+  !tmdbRequests.some((r) => r.path.includes("/watch/providers")) &&
+    !cinemaReply.includes("ดูได้ที่:") &&
+    !cinemaReply.includes("ไม่มีข้อมูลพากย์ไทย")
+);
+// The distinction that matters most, and the one a mutation slipped through
+// until this was written: "we never asked" is not "TMDb says nowhere". Only
+// the second may be stated, and the film above was never looked up.
+check(
+  "and it never claims a film is unavailable when nothing checked",
+  !cinemaReply.includes("ยังไม่มีในแอปสตรีมมิ่งไทย")
+);
+// ...but the streaming list is exactly the question, so it does.
+tmdbRequests.length = 0;
+const streamingReply = await handleTextMessage(env, lineUserId, "หนังสตรีมมิ่ง", origin);
+check(
+  "the streaming list does look availability up",
+  tmdbRequests.some((r) => r.path === "/movie/1011985/watch/providers") &&
+    streamingReply.includes("ดูได้ที่: Disney Plus")
+);
+
+// "ซีรีย์" and "ซีรีส์" are both in everyday use; neither is a typo.
+tmdbRequests.length = 0;
+await handleTextMessage(env, lineUserId, "ซีรีย์มาแรง", origin);
+check('the "ซีรีย์" spelling reaches the same place as "ซีรีส์"', tmdbRequests[0]?.path === "/trending/tv/week");
+
+tmdbRequests.length = 0;
+await handleTextMessage(env, lineUserId, "ซีรีส์เรื่อง Squid Game", origin);
+check(
+  "searching a series by name goes to /search/tv",
+  tmdbRequests[0].path === "/search/tv" && tmdbRequests[0].params.query === "Squid Game"
+);
+
+// Series have their own genre list, which mostly but not entirely agrees
+// with the film one — reading the wrong one resolves to the wrong ids.
+tmdbRequests.length = 0;
+simulateMovieSearchPlan = { genres: ["ตลก"], keywords: [], streamingOnly: false };
+await handleTextMessage(env, lineUserId, "ซีรีส์แนวตลก", origin);
+check(
+  "a series description search reads the TV genre list and discovers on /discover/tv",
+  tmdbRequests.some((r) => r.path === "/genre/tv/list") &&
+    tmdbRequests.find((r) => r.path === "/discover/tv")?.params.with_genres === "35"
+);
+// /discover/tv rejects include_adult; sending it is a 400, not a filter.
+check(
+  "and does not send include_adult, which /discover/tv has no parameter for",
+  !("include_adult" in tmdbRequests.find((r) => r.path === "/discover/tv").params)
+);
+
+// ---- Qualifiers that describe nothing -------------------------------------
+// "แนะนำหนังใหม่" leaves "ใหม่" after the prefix and "แนะนำหนังมันๆ" leaves
+// "มัน" — neither describes a plot or a genre, so searching TMDb for them
+// returns nonsense that looks like an answer. They do carry a clear intent,
+// and it maps onto a list this bot already has.
+simulateMovieSearchPlan = null;
+for (const [phrase, expectedPath] of [
+  ["แนะนำหนังใหม่", "/movie/now_playing"],
+  ["แนะนำหนังมันๆ", "/trending/movie/week"],
+  ["อยากดูหนังสนุกๆ", "/trending/movie/week"],
+  ["แนะนำหนังหน่อย", "/trending/movie/week"],
+  ["แนะนำซีรีส์ใหม่", "/tv/on_the_air"],
+  ["แนะนำซีรีส์หน่อย", "/trending/tv/week"],
+]) {
+  tmdbRequests.length = 0;
+  await handleTextMessage(env, lineUserId, phrase, origin);
+  check(
+    `"${phrase}" is answered with a list, not a search for the qualifier`,
+    tmdbRequests[0]?.path === expectedPath && !tmdbRequests.some((r) => r.path === "/search/movie" || r.path === "/search/tv")
+  );
+}
+
+// A real description must still be treated as one — the qualifier list is
+// not allowed to swallow the feature it sits in front of.
+tmdbRequests.length = 0;
+simulateMovieSearchPlan = { genres: [], keywords: ["time travel"], streamingOnly: false };
+await handleTextMessage(env, lineUserId, "แนะนำหนังเกี่ยวกับเดินทางข้ามเวลา", origin);
+check(
+  "a genuine description still goes to the AI-planned search",
+  tmdbRequests.some((r) => r.path === "/discover/movie")
+);
+
+// The AI reaches series through the same intents, via mediaType.
+simulateMovieSearchPlan = null;
+tmdbRequests.length = 0;
+simulateInterpreterResult = { intent: "movie_list", mediaType: "tv", movieListKind: "trending" };
+await handleTextMessage(env, lineUserId, "มีอะไรน่าดูบ้างช่วงนี้", origin);
+check("the AI can ask for series by setting mediaType", tmdbRequests[0]?.path === "/trending/tv/week");
+
+// Left out entirely, films are the safe default — a missing field is a much
+// weaker signal of a confused model than a wrong one.
+tmdbRequests.length = 0;
+simulateInterpreterResult = { intent: "movie_list", movieListKind: "trending" };
+await handleTextMessage(env, lineUserId, "มีอะไรน่าดูบ้าง", origin);
+check("an intent with no mediaType is treated as a film, not rejected", tmdbRequests[0]?.path === "/trending/movie/week");
+
+// A wrong one is a different matter: it would build a request to a path
+// that does not exist.
+tmdbRequests.length = 0;
+simulateInterpreterResult = { intent: "movie_list", mediaType: "podcast", movieListKind: "trending" };
+const bogusMediaReply = await handleTextMessage(env, lineUserId, "อยากฟังอะไรสักอย่าง", origin);
+check(
+  "a mediaType TMDb has no API for is rejected, not requested",
+  !tmdbRequests.some((r) => r.path.includes("podcast")) && bogusMediaReply.length > 0
+);
+
+// ---- The page carries the same information --------------------------------
+simulateInterpreterResult = null;
+tmdbResults = [
+  { id: 1396, title: "ซีรีส์ทดสอบ", original_title: "Test Series", overview: "เรื่องย่อซีรีส์", poster_path: "/tv1.jpg", release_date: "2025-03-10", vote_average: 8.4, original_language: "ko" },
+];
+const seriesPageReply = await handleTextMessage(env, lineUserId, "ซีรีส์ใหม่", origin);
+const seriesPageUrl = seriesPageReply.match(/http:\/\/localhost:8787\/view\/movies\?token=[^\s]+/)[0];
+const seriesPageHtml = await (await worker.fetch(new Request(seriesPageUrl), env, new FakeExecutionContext())).text();
+check(
+  "the page labels a series as one and links to TMDb's TV watch page, not the film one",
+  seriesPageHtml.includes("ซีรีส์") && seriesPageHtml.includes("https://www.themoviedb.org/tv/1396/watch?locale=TH")
+);
+check(
+  "and it repeats where to watch, the original language, and the dub caveat",
+  seriesPageHtml.includes("Netflix") && seriesPageHtml.includes("เกาหลี") && seriesPageHtml.includes("ไม่มีข้อมูลพากย์ไทย")
+);
+
+// "never looked up" and "looked up, nothing there" are different answers,
+// and only the second may be stated as fact.
+tmdbRequests.length = 0;
+const cinemaPageReply = await handleTextMessage(env, lineUserId, "หนังใหม่", origin);
+const cinemaPageUrl = cinemaPageReply.match(/http:\/\/localhost:8787\/view\/movies\?token=[^\s]+/)[0];
+const cinemaPageHtml = await (await worker.fetch(new Request(cinemaPageUrl), env, new FakeExecutionContext())).text();
+check(
+  "a page whose answer never checked availability claims nothing about it",
+  !cinemaPageHtml.includes("ยังไม่มีในแอปสตรีมมิ่งไทย") && !cinemaPageHtml.includes("ดูได้ที่ <span")
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

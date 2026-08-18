@@ -199,6 +199,9 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
   .movie-overview { font-size: .82rem; line-height: 1.5; margin: 0 0 .5rem; color: #40444b; }
   .movie-overview-empty { color: #9aa0a6; font-style: italic; }
   .movie-watch { font-size: .8rem; color: #16a34a; text-decoration: none; }
+  .movie-providers { font-size: .78rem; color: #40444b; margin-bottom: .45rem; display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; }
+  .movie-providers .provider { background: #e8f5ee; color: #15803d; border-radius: 999px; padding: .12rem .5rem; font-size: .72rem; }
+  .movie-providers-none { color: #9aa0a6; }
   .search-answer p { margin: 0 0 .7rem; font-size: .92rem; line-height: 1.6; }
   .search-answer p:last-child { margin-bottom: 0; }
   .source-list { margin: 0; padding-left: 1.1rem; }
