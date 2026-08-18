@@ -1074,6 +1074,18 @@ is destroyed after five wrong tries. The wipe clears the Transactions tab
 only — diary, budgets, calendar, tasks and trip photos are untouched, which
 the page states and a test enforces.
 
+### Network deadlines
+
+`src/timeouts.ts` gives Sheets, Calendar and the weather API a deadline, applied at their
+low-level fetch wrappers so every caller is covered rather than just the path that happened
+to reveal the gap. Before that, the only timeouts in the codebase were on the three Gemini
+calls — the wrong way round, since the Google APIs were the ones nothing else was watching,
+and one hung request could hold a reply open long past the LINE token meant to answer it.
+
+They are hang guards, not latency targets: 10s/8s/5s, far beyond how long these take when
+anything is working. A timeout names the dependency that ran out of time, because "the
+request was aborted" in a log is useless when half a dozen Google APIs are equally suspect.
+
 ### How much of the sheet a command reads
 
 Reports about a single month don't read the whole `Transactions` tab. The
