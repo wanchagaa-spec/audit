@@ -20,6 +20,12 @@ jobs:
           cache: npm
           cache-dependency-path: worker/package-lock.json
       - run: npm ci
+      # This list is what actually delivers secrets to the Worker — a name in
+      # wrangler.toml's comments or in Env (worker/src/index.ts) does nothing
+      # on its own. A secret added to the repository but not added here is
+      # simply never uploaded, and the Worker sees an empty string with no
+      # error anywhere: that is how TMDB_READ_TOKEN shipped unset. Adding a
+      # new secret means editing this list too.
       - name: Set Worker secrets
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -32,6 +38,7 @@ jobs:
           echo "${{ secrets.GEMINI_API_KEY }}" | npx wrangler secret put GEMINI_API_KEY
           echo "${{ secrets.GOOGLE_MAPS_API_KEY }}" | npx wrangler secret put GOOGLE_MAPS_API_KEY
           echo "${{ secrets.TRAVELPAYOUTS_TOKEN }}" | npx wrangler secret put TRAVELPAYOUTS_TOKEN
+          echo "${{ secrets.TMDB_READ_TOKEN }}" | npx wrangler secret put TMDB_READ_TOKEN
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
