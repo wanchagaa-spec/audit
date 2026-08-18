@@ -133,6 +133,7 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
   .grid-caption { text-align: center; color: #9aa0a6; font-size: .68rem; margin-top: .25rem; }
   .empty { text-align: center; color: #6b6f76; padding: 1.5rem 0; font-size: .9rem; }
   .footnote { text-align: center; color: #9aa0a6; font-size: .75rem; margin-top: 1.5rem; }
+  .footnote a { color: #16a34a; }
   .table-scroll { overflow-x: auto; }
   .data-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
   .data-table th, .data-table td { padding: .5rem .5rem; text-align: left; border-bottom: 1px solid #eee; white-space: nowrap; }
@@ -204,6 +205,14 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
   .help-list { margin: 0; padding-left: 1.1rem; }
   .help-list li { margin-bottom: .5rem; font-size: .85rem; line-height: 1.55; }
   .help-list li:last-child { margin-bottom: 0; }
+  .legal-lead { font-size: .88rem; color: #40444b; line-height: 1.6; margin: 0 0 1.1rem; }
+  .legal-p { font-size: .85rem; color: #40444b; line-height: 1.65; margin: 0 0 .7rem; }
+  .legal-p:last-child { margin-bottom: 0; }
+  .legal-list { margin: .2rem 0 0; padding-left: 1.1rem; }
+  .legal-list li { font-size: .85rem; line-height: 1.6; margin-bottom: .5rem; }
+  .legal-list li:last-child { margin-bottom: 0; }
+  .legal-table td { white-space: normal; vertical-align: top; line-height: 1.55; }
+  .legal-table td:first-child { font-weight: 600; }
   .field { display: block; margin-bottom: .9rem; }
   .field:last-child { margin-bottom: 0; }
   .field > span { display: block; font-size: .8rem; color: #40444b; font-weight: 600; margin-bottom: .3rem; }

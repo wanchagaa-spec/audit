@@ -257,6 +257,10 @@ export function buildHelpText(webSearchEnabled: boolean): string {
     "",
     "❓ ไม่แน่ใจว่าถามอะไรได้",
     "• พิมพ์ \"ทำอะไรได้บ้าง\" ได้ลิสต์สั้นๆ ว่าฉันช่วยอะไรได้บ้าง",
+    "",
+    "🔒 ความเป็นส่วนตัว",
+    "• ข้อมูลทุกอย่างบันทึกลงบัญชี Google ของคุณเอง ผู้พัฒนาไม่มีสำเนาและเข้าถึงไม่ได้",
+    "• อ่านนโยบายความเป็นส่วนตัวและข้อกำหนดฉบับเต็มได้ที่ท้ายหน้าคู่มือนี้",
   ];
   // The menu holds three of these now (วิธีใช้ / เปิดเว็บดูข้อมูล / ตั้งค่า),
   // so it's worth saying what a tap actually reaches rather than just that

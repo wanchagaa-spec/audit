@@ -6088,6 +6088,71 @@ check("and a request that answers in time is untouched", fineResponse.ok);
 
 Object.assign(NETWORK_TIMEOUTS, realTimeouts);
 
+// ---- /privacy and /terms (PLAN.md 17.53) ----------------------------------
+// A verification reviewer opens these with no LINE account and no token, so
+// the tokenless-ness is the feature and gets checked first.
+
+const privacyResponse = await worker.fetch(new Request(`${origin}/privacy`), env, new FakeExecutionContext());
+const privacyHtml = await privacyResponse.text();
+const termsResponse = await worker.fetch(new Request(`${origin}/terms`), env, new FakeExecutionContext());
+const termsHtml = await termsResponse.text();
+check(
+  "/privacy and /terms open with no token at all",
+  privacyResponse.status === 200 && termsResponse.status === 200
+);
+check(
+  "and each links to the other, so landing on either finds both",
+  privacyHtml.includes('href="/terms"') && termsHtml.includes('href="/privacy"')
+);
+check("the guide links to them too", (await (await worker.fetch(new Request(`${origin}/view/help`), env, new FakeExecutionContext())).text()).includes('href="/privacy"'));
+
+// The policy names the OAuth scopes it explains. If a scope is added to
+// googleAuth.ts and not to the policy, the document is claiming the bot asks
+// for less than it does — which is the one way a privacy policy can be
+// actively harmful rather than merely stale.
+const authSource = await readFile(new URL("../src/googleAuth.ts", import.meta.url), "utf8");
+const declaredScopes = [...authSource.matchAll(/auth\/([a-z.]+)"/g)].map((m) => m[1]);
+check(
+  "every OAuth scope the bot requests is explained in the privacy policy",
+  declaredScopes.length >= 6 && declaredScopes.every((scope) => privacyHtml.includes(scope))
+);
+
+// Same idea for retention: the policy quotes real durations, and a TTL that
+// changes without the policy changing makes it wrong about how long data is
+// kept.
+// Row by row, not "does this duration appear anywhere on the page". A first
+// version checked the latter and a mutation slipped through it: "24 ชั่วโมง"
+// is written twice (the retention row and the Gemini row), so corrupting one
+// left the other to satisfy the check. Pairing each figure with its own
+// subject is what makes the test about what the page actually claims.
+const privacyRows = [...privacyHtml.matchAll(/<tr>(.*?)<\/tr>/gs)].map((m) => m[1]);
+const rowSaying = (subject) => privacyRows.find((row) => row.includes(subject)) ?? "";
+check(
+  "each retention figure sits in the row for the data it describes",
+  rowSaying("ประวัติการสนทนาย้อนหลัง").includes("24 ชั่วโมง") &&
+    rowSaying("รอคุณพิมพ์").includes("10 นาที") &&
+    rowSaying("รหัสยืนยันการล้างข้อมูล").includes("15 นาที") &&
+    rowSaying("เลขแถวที่แต่ละเดือนเริ่ม").includes("90 วัน")
+);
+
+// The substance a reviewer is looking for, and the claims a user relies on.
+check(
+  "the policy covers deletion, third parties and what is never collected",
+  privacyHtml.includes("สิทธิของคุณ") &&
+    privacyHtml.includes("Gemini") &&
+    privacyHtml.includes("Cloudflare") &&
+    privacyHtml.includes("ไม่เก็บรหัสผ่าน Google")
+);
+check(
+  "the terms state it is free, as-is, and that confirmations precede writes",
+  termsHtml.includes("as-is") && termsHtml.includes('ยืนยันก่อนเสมอ')
+);
+
+// Everything user-facing here is escaped through the same helper as the rest
+// of the site — these pages are static, but a raw < in the source would still
+// be a broken page rather than a styled one.
+check("the pages render as complete HTML documents", privacyHtml.startsWith("<!doctype html>") && termsHtml.includes("</html>"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;
 process.exit(fail > 0 ? 1 : 0);
