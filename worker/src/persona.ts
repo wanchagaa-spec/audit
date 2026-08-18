@@ -113,13 +113,15 @@ function urlSpans(text: string): string[] {
 export async function applyPersona(
   text: string,
   geminiApiKey: string,
-  settings: BotSettings = DEFAULT_SETTINGS
+  settings: BotSettings = DEFAULT_SETTINGS,
+  kv?: KVNamespace
 ): Promise<string> {
   if (!text.trim()) return text;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PERSONA_TIMEOUT_MS);
   try {
     const styled = await askGemini(geminiApiKey, buildPersonaSystemInstruction(settings), text, {
+      kv,
       signal: controller.signal,
       maxOutputTokens: PERSONA_MAX_OUTPUT_TOKENS,
     });

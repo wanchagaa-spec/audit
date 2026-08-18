@@ -222,6 +222,9 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
     width: 100%; padding: .55rem .7rem; border-radius: 10px; border: 1px solid #d8dade;
     font-size: .9rem; font-family: inherit; resize: vertical;
   }
+  .check-field { display: flex; align-items: center; gap: .55rem; font-size: .88rem; }
+  .check-field input[type="checkbox"] { width: 1.15rem; height: 1.15rem; flex: none; }
+  .field-note { display: block; color: #6b6f76; font-size: .72rem; margin-top: .45rem; line-height: 1.5; }
   .field small { display: block; color: #6b6f76; font-size: .72rem; margin-top: .3rem; line-height: 1.45; }
   .danger-card { border: 1px solid #f6c9c0; }
   .danger-card h2 { color: #de350b; }

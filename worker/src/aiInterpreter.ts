@@ -506,13 +506,15 @@ export async function interpretMessage(
   geminiApiKey: string,
   text: string,
   history: ConversationTurn[],
-  settings: BotSettings = DEFAULT_SETTINGS
+  settings: BotSettings = DEFAULT_SETTINGS,
+  kv?: KVNamespace
 ): Promise<InterpretedIntent | null> {
   const systemInstruction = buildSystemInstruction(bangkokDateKey(), history, settings);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), INTERPRETER_TIMEOUT_MS);
   try {
     const raw = await askGemini(geminiApiKey, systemInstruction, text, {
+      kv,
       signal: controller.signal,
       jsonMode: true,
       maxOutputTokens: INTERPRETER_MAX_OUTPUT_TOKENS,

@@ -922,7 +922,7 @@ export async function handleTextMessage(
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings);
+    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
     if (intent) {
       const reply = await runInterpretedIntent(env, lineUserId, link, intent, text, origin, tokenCache, async () => ({
         addedBy: lineUserId,
@@ -1060,7 +1060,7 @@ export async function handleGroupTextMessage(
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings);
+    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
     if (intent) {
       const reply = await runInterpretedIntent(env, subjectId, link, intent, text, origin, tokenCache, () =>
         resolveGroupAttribution(env, groupId, senderUserId)
@@ -1274,7 +1274,7 @@ async function replyOrPush(
   env: Env
 ): Promise<void> {
   const settings = await getBotSettings(env.ACCOUNTS, subjectIdForSource(event.source));
-  const styledText = await applyPersona(text, env.GEMINI_API_KEY, settings);
+  const styledText = await applyPersona(text, env.GEMINI_API_KEY, settings, env.ACCOUNTS);
   try {
     await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
   } catch (err) {
@@ -1736,7 +1736,7 @@ export async function drainUploadQueue(env: Env): Promise<void> {
     // groupId, not the synthesized "group:<groupId>" subject id lineUserId
     // holds in that case (see QueuedUpload's own comment).
     const summarySettings = await getBotSettings(env.ACCOUNTS, summary.lineUserId);
-    const styledSummary = await applyPersona(parts.join(" "), env.GEMINI_API_KEY, summarySettings);
+    const styledSummary = await applyPersona(parts.join(" "), env.GEMINI_API_KEY, summarySettings, env.ACCOUNTS);
     await pushToLine(summary.pushTarget, styledSummary, env.LINE_CHANNEL_ACCESS_TOKEN).catch((err) =>
       console.error("drain summary push failed", err)
     );
