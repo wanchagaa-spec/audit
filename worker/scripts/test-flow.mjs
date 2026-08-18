@@ -98,6 +98,24 @@ let simulateInsufficientContactsScope = false;
 let simulateContactsApiDisabled = false;
 
 // Travelpayouts travel-search mocks (PLAN.md 17.37)
+// TMDb (PLAN.md 17.57). One results array serves every list/search endpoint
+// — which endpoint was asked for is asserted from tmdbRequests instead, so a
+// test can seed one catalogue and check the routing separately from the
+// rendering. `tmdbGenres`/`tmdbKeywordIds` back the description search.
+let tmdbResults = [];
+let tmdbGenres = [
+  { id: 878, name: "นิยายวิทยาศาสตร์" },
+  { id: 35, name: "ตลก" },
+  { id: 27, name: "สยองขวัญ" },
+];
+let tmdbKeywordIdByQuery = { "time travel": 4379, robot: 310 };
+let simulateTmdbFailure = false; // one-shot: next TMDb call answers 500
+// The description-search plan (movieCommands.ts): what Gemini "decides" the
+// user's description means, in TMDb's own vocabulary. One-shot, so a test
+// that forgets to set it gets an empty plan rather than a stale one.
+let simulateMovieSearchPlan = null;
+const MOVIE_PLAN_MARKER = "แปลงคำอธิบายหนัง";
+const tmdbRequests = []; // {path, params} per call, so tests can assert the endpoint and filters
 let travelpayoutsFlightOffers = []; // raw prices_for_dates `data` entries for the next call
 let travelpayoutsHotelOffers = []; // raw Hotellook cache entries (bare array) for the next call
 const travelpayoutsFlightSearchCalls = []; // records the query params + token of each flight search
@@ -733,6 +751,24 @@ globalThis.fetch = async (url, init = {}) => {
     }));
     return new Response(JSON.stringify({ connections }), { status: 200 });
   }
+  if (u.startsWith("https://api.themoviedb.org/3")) {
+    const parsed = new URL(u);
+    const params = Object.fromEntries(parsed.searchParams.entries());
+    const path = parsed.pathname.replace(/^\/3/, "");
+    tmdbRequests.push({ path, params, auth: init.headers?.Authorization });
+    if (simulateTmdbFailure) {
+      simulateTmdbFailure = false;
+      return new Response(JSON.stringify({ status_message: "simulated TMDb failure" }), { status: 500 });
+    }
+    if (path === "/genre/movie/list") {
+      return new Response(JSON.stringify({ genres: tmdbGenres }), { status: 200 });
+    }
+    if (path === "/search/keyword") {
+      const id = tmdbKeywordIdByQuery[params.query];
+      return new Response(JSON.stringify({ results: id ? [{ id, name: params.query }] : [] }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ results: tmdbResults }), { status: 200 });
+  }
   if (u.startsWith("https://api.travelpayouts.com/") || u.startsWith("https://engine.hotellook.com/")) {
     if (simulateTravelpayoutsFailure) {
       simulateTravelpayoutsFailure = false;
@@ -942,6 +978,17 @@ globalThis.fetch = async (url, init = {}) => {
         );
       }
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: question }] } }] }), { status: 200 });
+    }
+
+    // The movie description-search plan (PLAN.md 17.57), identified by its
+    // own marker phrase the same way the interpreter and persona calls are.
+    if (systemInstruction.includes(MOVIE_PLAN_MARKER)) {
+      const plan = simulateMovieSearchPlan;
+      simulateMovieSearchPlan = null;
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(plan ?? {}) }] } }] }),
+        { status: 200 }
+      );
     }
 
     // Cleared as soon as it fires, so the retry that follows — which sends
@@ -1161,6 +1208,7 @@ const env = {
   ENABLE_WEB_SEARCH: "true",
   GOOGLE_MAPS_API_KEY: "test-maps-key",
   TRAVELPAYOUTS_TOKEN: "test-travelpayouts-token",
+  TMDB_READ_TOKEN: "test-tmdb-read-token",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -6357,9 +6405,399 @@ await handleTextMessage(env, lineUserId, "ค่าน้ำ 20", origin);
 check("once the pause lifts, Gemini is used again", geminiRequests.length > 0);
 
 // A 500 is this one call's problem, not a reason to stop trying for everyone.
+// It has to be armed against a message that really reaches the answering
+// model: the interpreter's own call is served from its own mock branch
+// above and would leave the flag still armed, which is how an earlier
+// version of this test passed without the failure ever firing — and then
+// leaked the armed flag into the next test in the file.
 simulateGeminiFailure = true;
-await handleTextMessage(env, lineUserId, "ค่าขนม 30", origin);
-check("a non-429 Gemini failure does not open the breaker", (await isGeminiPaused(kv)) === false);
+await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
+check("a non-429 Gemini failure fires and does not open the breaker", simulateGeminiFailure === false && (await isGeminiPaused(kv)) === false);
+// ---- "I don't understand" beats "how much?" (PLAN.md 17.55) ---------------
+// Reported with a screenshot: the user asked for their email contacts and
+// the bot replied "เธออยากรู้ว่าจำนวนเงินเท่าไหร่คะ". Reproducing it showed
+// the problem was far wider than that one message — parseMessage returned
+// need_amount as its catch-all, so "how much?" was the bot's answer to every
+// sentence it did not otherwise understand, including "วันนี้อากาศเป็นยังไง".
+
+const { handleUserMessage: engine } = await import("../src/chatEngine.ts");
+const { DEFAULT_CATEGORIES: cats } = await import("../src/categories.ts");
+const engineReply = (t) => engine(t, null, cats);
+
+for (const notMoney of [
+  "วันนี้อากาศเป็นยังไง",
+  "ช่วยแนะนำหนังหน่อย", // matches the entertainment category on "หนัง"
+  "อยากกินข้าว", // matches the food category on "ข้าว"
+  "เธอ หาค่าเฉลี่ยของ 4,5,9,3 ได้มั้ย", // has a number, and "ค่า" — still arithmetic
+  "ใครอยู่เวรวันนี้",
+]) {
+  const r = engineReply(notMoney);
+  check(
+    `"${notMoney}" is answered with "I don't understand", not a money question`,
+    r.botMessage.includes("ไม่เข้าใจ") && r.pending === null && !r.botMessage.includes("จำนวนเงิน")
+  );
+}
+check(
+  "and that answer points at the format and at ทำอะไรได้บ้าง rather than guessing",
+  engineReply("ขอบคุณนะ").botMessage.includes("ค่ากาแฟ 60") &&
+    engineReply("ขอบคุณนะ").botMessage.includes("ทำอะไรได้บ้าง")
+);
+
+// The other half of the change: genuine money messages must be untouched.
+// A guard that swallowed real entries would be a worse bug than the one it
+// fixes, so the cases that made the first attempt fail get their own checks.
+for (const [text, expected] of [
+  ["ซื้อกาแฟ 60", "draft"],
+  ["ค่าข้าว 120", "draft"],
+  ["เงินเดือนเข้า 25000", "draft"],
+  ["ค่ากาแฟ", "amount"], // category, no figure
+  ["ฝากเงิน", "amount"], // no category at all, but unmistakably money
+  ["ซื้อของ", "amount"],
+  ["โอนเงินให้แม่", "amount"],
+  ["ซื้ออะไรไม่รู้ 200", "category"], // "อะไร" is deliberately not a question marker
+]) {
+  const r = engineReply(text);
+  const got = r.transactionDraft ? "draft" : (r.pending?.kind ?? "none");
+  check(`"${text}" still behaves as money (${expected})`, got === expected);
+}
+
+// ---- What happens after "I don't understand" (PLAN.md 17.56) -------------
+// The deterministic engine giving up isn't always the honest end of the
+// line: the AI interpreter runs first and only hands over when it produced
+// nothing usable, and *why* decides what should happen next.
+
+// Gemini answered, just not with a usable intent (the default mock returns
+// non-JSON, which is exactly that case). The message is worth asking it in
+// plain language — this is the situation the reported screenshot captured.
+geminiRequests.length = 0;
+simulateInterpreterResult = null;
+const unusableThenAsked = await handleTextMessage(env, lineUserId, "เล่าเรื่องตลกให้ฟังหน่อยสิ", origin);
+check(
+  "when Gemini answered but unusably, the message is put to it as a question",
+  geminiRequests.some((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน")) &&
+    !unusableThenAsked.includes("ไม่เข้าใจ")
+);
+
+// Gemini unreachable: a second call would only spend a request to fail the
+// same way, and blaming the message would be wrong — it was never read.
+simulateInterpreterFailure = true;
+geminiRequests.length = 0;
+const unreachableReply = await handleTextMessage(env, lineUserId, "เล่าเรื่องตลกให้ฟังหน่อยสิ", origin);
+check(
+  "when Gemini was unreachable it says so, instead of blaming the message",
+  unreachableReply.includes("AI ตอบไม่ได้ชั่วคราว") && !unreachableReply.includes("ไม่เข้าใจข้อความ")
+);
+check(
+  // The interpreter's own attempt is still made and still recorded — what
+  // must not happen is a *second*, question-flavoured call behind it.
+  "and makes no further Gemini call while it is down",
+  !geminiRequests.some((r) => r.systemInstruction.includes("ช่วยตอบคำถามเกี่ยวกับการเงิน"))
+);
+check("nothing is left pending either way", (await kv.get(`pending:${lineUserId}`)) === null);
+
+// ---- Listing contacts (PLAN.md 17.56) -------------------------------------
+// The reported message had nowhere to land: the only contacts command needed
+// a specific name, so the AI's contact_lookup intent came back without one
+// and failed validation.
+googleContacts.length = 0;
+googleContacts.push(
+  { name: "สมชาย ใจดี", email: "somchai@example.com" },
+  { name: "สมหญิง รักเรียน", email: "somying@example.com" },
+  { name: "ไม่มีเมล", email: undefined }
+);
+const contactListReply = await handleTextMessage(env, lineUserId, "ขอรายชื่ออีเมลที่มีหน่อย", origin);
+check(
+  "the reported message now lists the contacts that have an email",
+  contactListReply.includes("somchai@example.com") &&
+    contactListReply.includes("somying@example.com") &&
+    contactListReply.includes("2 คน")
+);
+check("and leaves out the one with no email", !contactListReply.includes("ไม่มีเมล"));
+
+simulateInterpreterResult = { intent: "contact_list" };
+const contactListViaAi = await handleTextMessage(env, lineUserId, "มีอีเมลของใครเก็บไว้บ้างเอ่ย", origin);
+check("the AI's contact_list intent reaches the same answer", contactListViaAi.includes("somchai@example.com"));
+
+googleContacts.length = 0;
+const emptyContactsReply = await handleTextMessage(env, lineUserId, "รายชื่อผู้ติดต่อ", origin);
+check("an empty address book says so plainly", emptyContactsReply.includes("ไม่มีรายชื่อผู้ติดต่อ"));
+
+
+// ---- Movies via TMDb (PLAN.md 17.57) --------------------------------------
+// Read-only, no Google auth, and answered on two surfaces at once: a short
+// list in chat plus a link to /view/movies for the posters.
+//
+// Worth stating plainly, because these tests cannot tell you otherwise: the
+// mock below encodes what this codebase *believes* TMDb's paths and
+// parameters are. api.themoviedb.org is blocked by the egress proxy in the
+// environment this was written in, so no call has ever been made against the
+// real service. These prove the routing, the filters and the rendering are
+// what the code intends — not that TMDb agrees.
+
+tmdbRequests.length = 0;
+tmdbResults = [
+  {
+    id: 1011985,
+    title: "คนเหล็ก ภาค 7",
+    original_title: "Terminator 7",
+    overview: "หุ่นยนต์กลับมาอีกครั้ง",
+    poster_path: "/poster1.jpg",
+    release_date: "2026-07-01",
+    vote_average: 7.85,
+  },
+  { id: 42, title: "หนังไม่มีโปสเตอร์", original_title: "No Poster", overview: "", poster_path: null, release_date: "2026-08-20", vote_average: 0 },
+  { id: 7, title: "เรื่องที่สาม", original_title: "Third", overview: "ย่อ", poster_path: "/p3.jpg", release_date: "2025-01-05", vote_average: 6.2 },
+  { id: 8, title: "เรื่องที่สี่", original_title: "Fourth", overview: "ย่อ", poster_path: "/p4.jpg", release_date: "2025-02-05", vote_average: 6.1 },
+  { id: 9, title: "เรื่องที่ห้า", original_title: "Fifth", overview: "ย่อ", poster_path: "/p5.jpg", release_date: "2025-03-05", vote_average: 6.0 },
+  { id: 10, title: "เรื่องที่หก", original_title: "Sixth", overview: "ย่อ", poster_path: "/p6.jpg", release_date: "2025-04-05", vote_average: 5.9 },
+];
+
+const nowPlayingReply = await handleTextMessage(env, lineUserId, "หนังใหม่", origin);
+check(
+  '"หนังใหม่" lists what is in cinemas now, with year and rating',
+  nowPlayingReply.includes("คนเหล็ก ภาค 7") && nowPlayingReply.includes("2026") && nowPlayingReply.includes("⭐7.8")
+);
+check(
+  "it asks TMDb for Thai cinemas specifically, in Thai",
+  tmdbRequests[0].path === "/movie/now_playing" &&
+    tmdbRequests[0].params.region === "TH" &&
+    tmdbRequests[0].params.language === "th-TH"
+);
+// The credential travels in a header, and — the half that matters — never
+// in the URL, which is the part that ends up in proxy and CDN logs.
+check(
+  "the read token is sent as a bearer header, never as a query parameter",
+  tmdbRequests[0].auth === "Bearer test-tmdb-read-token" &&
+    !("api_key" in tmdbRequests[0].params) &&
+    !Object.values(tmdbRequests[0].params).includes("test-tmdb-read-token")
+);
+// Five in chat, the rest behind the link — the whole point of the split.
+check(
+  "only five make it into the chat message, and it says how many more there are",
+  nowPlayingReply.includes("เรื่องที่ห้า") && !nowPlayingReply.includes("เรื่องที่หก") && nowPlayingReply.includes("มีอีก 1 เรื่อง")
+);
+check("a film TMDb has not rated shows no rating rather than ⭐0.0", !nowPlayingReply.includes("⭐0.0"));
+
+const moviePageMatch = nowPlayingReply.match(/http:\/\/localhost:8787\/view\/movies\?token=[^\s]+/);
+check("the reply carries a link to the poster page", moviePageMatch !== null);
+
+const moviePageResponse = await worker.fetch(new Request(moviePageMatch[0]), env, new FakeExecutionContext());
+const moviePageHtml = await moviePageResponse.text();
+check("the /view/movies page opens", moviePageResponse.status === 200);
+check(
+  "it shows posters from TMDb's CDN, the synopsis, and a where-to-watch link for Thailand",
+  moviePageHtml.includes("https://image.tmdb.org/t/p/w342/poster1.jpg") &&
+    moviePageHtml.includes("หุ่นยนต์กลับมาอีกครั้ง") &&
+    moviePageHtml.includes("https://www.themoviedb.org/movie/1011985/watch?locale=TH")
+);
+check(
+  "a film with no poster gets a placeholder tile instead of a broken image",
+  moviePageHtml.includes("ไม่มีโปสเตอร์")
+);
+// The licence condition, not a nicety — TMDb requires the statement and
+// requires that it not imply endorsement.
+check(
+  "the page carries TMDb's required attribution",
+  moviePageHtml.includes("TMDB") && moviePageHtml.includes("ไม่ได้รับการรับรอง")
+);
+check("the page holds all six, not just the five from chat", moviePageHtml.includes("เรื่องที่หก"));
+
+// Same subject-scoping as the stored search results: an id is worthless
+// without that account's own token.
+const movieResultId = new URL(moviePageMatch[0]).searchParams.get("id");
+const foreignMovieToken = await signViewToken("Usomeoneelse", env.STATE_SIGNING_SECRET);
+const foreignMovieResponse = await worker.fetch(
+  new Request(`${origin}/view/movies?token=${foreignMovieToken}&id=${movieResultId}`),
+  env,
+  new FakeExecutionContext()
+);
+check("another account's token cannot open this movie list", foreignMovieResponse.status === 404);
+
+// Each list phrase has to reach its own endpoint — they are four different
+// questions and TMDb answers them in four different places.
+for (const [phrase, expectedPath] of [
+  ["หนังกำลังจะเข้า", "/movie/upcoming"],
+  ["หนังมาแรง", "/trending/movie/week"],
+  ["หนังสตรีมมิ่ง", "/discover/movie"],
+]) {
+  tmdbRequests.length = 0;
+  await handleTextMessage(env, lineUserId, phrase, origin);
+  check(`"${phrase}" asks TMDb for ${expectedPath}`, tmdbRequests[0]?.path === expectedPath);
+}
+
+// The streaming list is the one with real filters on it, and each one is
+// load-bearing: without the monetization type it would include rentals, and
+// with a comma instead of a pipe it would demand a film be on every service
+// at once.
+tmdbRequests.length = 0;
+await handleTextMessage(env, lineUserId, "หนังสตรีมมิ่ง", origin);
+const streamingParams = tmdbRequests[0].params;
+check(
+  "the streaming list is restricted to Thai subscription catalogues, ORed across services",
+  streamingParams.watch_region === "TH" &&
+    streamingParams.with_watch_monetization_types === "flatrate" &&
+    streamingParams.with_watch_providers.includes("|") &&
+    streamingParams.with_watch_providers.split("|").includes("8")
+);
+check("and to the last year, so it stays recognisably new", typeof streamingParams["primary_release_date.gte"] === "string");
+
+tmdbRequests.length = 0;
+const titleSearchReply = await handleTextMessage(env, lineUserId, "หนังเรื่อง Terminator", origin);
+check(
+  "searching by title goes to /search/movie with the typed title",
+  tmdbRequests[0].path === "/search/movie" && tmdbRequests[0].params.query === "Terminator"
+);
+check("and answers with the film", titleSearchReply.includes("คนเหล็ก ภาค 7"));
+
+// The ordering hazard this dispatch position exists for: matchCommand's own
+// transaction-search regex takes anything starting with "ค้นหา"/"หา", so a
+// movie matcher placed after it would never see these two phrasings — they
+// would come back as a search of the user's own spending notes.
+for (const phrase of ["ค้นหาหนัง Terminator", "หาหนังเรื่อง Terminator"]) {
+  tmdbRequests.length = 0;
+  await handleTextMessage(env, lineUserId, phrase, origin);
+  check(`"${phrase}" reaches TMDb, not the transaction search`, tmdbRequests[0]?.path === "/search/movie");
+}
+
+// ---- Searching by what a film is about ------------------------------------
+// TMDb cannot search plots, so Gemini turns the description into genres and
+// keywords and TMDb resolves both against its own vocabulary. Every id used
+// is TMDb's; the model only ever supplies search terms.
+tmdbRequests.length = 0;
+geminiRequests.length = 0;
+simulateInterpreterResult = null;
+simulateMovieSearchPlan = { genres: ["นิยายวิทยาศาสตร์"], keywords: ["time travel"], streamingOnly: false };
+const discoverReply = await handleTextMessage(env, lineUserId, "หนังเกี่ยวกับเดินทางข้ามเวลา", origin);
+const discoverCall = tmdbRequests.find((r) => r.path === "/discover/movie");
+check(
+  "a description search resolves the genre and the keyword against TMDb, then discovers on both",
+  tmdbRequests.some((r) => r.path === "/genre/movie/list") &&
+    tmdbRequests.some((r) => r.path === "/search/keyword" && r.params.query === "time travel") &&
+    discoverCall?.params.with_genres === "878" &&
+    discoverCall?.params.with_keywords === "4379"
+);
+check("and answers with films", discoverReply.includes("คนเหล็ก ภาค 7"));
+
+// Genres are ANDed (a horror-comedy is both at once); keywords are ORed
+// (they are alternative phrasings of one idea, and ANDing them finds
+// nothing).
+tmdbRequests.length = 0;
+simulateMovieSearchPlan = { genres: ["ตลก", "สยองขวัญ"], keywords: ["robot", "time travel"], streamingOnly: true };
+await handleTextMessage(env, lineUserId, "หนังแนวผีตลกที่ดูใน Netflix ได้", origin);
+const bothCall = tmdbRequests.find((r) => r.path === "/discover/movie");
+check(
+  "several genres are required together, several keywords are alternatives",
+  bothCall.params.with_genres === "35,27" && bothCall.params.with_keywords.includes("|")
+);
+check(
+  "and asking for streaming inside the description restricts the search to it",
+  bothCall.params.with_watch_monetization_types === "flatrate"
+);
+
+// The model naming a genre TMDb spells differently must not silently widen
+// the search to "everything".
+tmdbRequests.length = 0;
+simulateMovieSearchPlan = { genres: ["ไซไฟ"], keywords: [], streamingOnly: false };
+await handleTextMessage(env, lineUserId, "หนังแนวไซไฟ", origin);
+check(
+  "a genre named loosely still resolves to TMDb's own id",
+  tmdbRequests.find((r) => r.path === "/discover/movie")?.params.with_genres === "878"
+);
+
+// Nothing resolved at all is the dangerous case: /discover with no filter
+// answers "the most popular films on TMDb", which looks like a result.
+tmdbRequests.length = 0;
+simulateMovieSearchPlan = { genres: ["แนวที่ไม่มีจริง"], keywords: [], streamingOnly: false };
+await handleTextMessage(env, lineUserId, "หนังแนวอะไรก็ไม่รู้", origin);
+check(
+  "when nothing resolves it falls back to a title search rather than discovering with no filter",
+  !tmdbRequests.some((r) => r.path === "/discover/movie") &&
+    tmdbRequests.some((r) => r.path === "/search/movie")
+);
+
+// Gemini down: the description search is the one movie feature that needs
+// it, and a title search is a worse but real answer — better than refusing.
+tmdbRequests.length = 0;
+simulateMovieSearchPlan = null;
+simulateGeminiFailure = true;
+const discoverWithoutAi = await handleTextMessage(env, lineUserId, "หนังเกี่ยวกับหุ่นยนต์", origin);
+check(
+  "with Gemini unavailable it degrades to a title search instead of refusing",
+  simulateGeminiFailure === false &&
+    tmdbRequests.some((r) => r.path === "/search/movie") &&
+    !tmdbRequests.some((r) => r.path === "/discover/movie") &&
+    discoverWithoutAi.length > 0
+);
+
+// "แนะนำหนังหน่อย" is a real request whose words after the prefix describe
+// no film at all — searching TMDb for "หน่อย" returns nonsense that looks
+// like an answer.
+tmdbRequests.length = 0;
+await handleTextMessage(env, lineUserId, "แนะนำหนังหน่อย", origin);
+check(
+  '"แนะนำหนังหน่อย" answers with trending rather than searching for "หน่อย"',
+  tmdbRequests[0].path === "/trending/movie/week"
+);
+
+// The AI interpreter reaches the same three answers, for the phrasings the
+// exact-phrase matcher will never catch.
+for (const [intent, expectedPath] of [
+  [{ intent: "movie_list", movieListKind: "upcoming" }, "/movie/upcoming"],
+  [{ intent: "movie_search", movieQuery: "Dune" }, "/search/movie"],
+]) {
+  tmdbRequests.length = 0;
+  simulateInterpreterResult = intent;
+  await handleTextMessage(env, lineUserId, "ถามอะไรสักอย่างเกี่ยวกับหนัง", origin);
+  check(`the AI's ${intent.intent} intent reaches ${expectedPath}`, tmdbRequests[0]?.path === expectedPath);
+}
+
+// An invented list kind would build a request to a path that does not exist,
+// so it is rejected and the message falls through to the deterministic
+// matcher instead.
+tmdbRequests.length = 0;
+simulateInterpreterResult = { intent: "movie_list", movieListKind: "in_cinemas" };
+const bogusKindReply = await handleTextMessage(env, lineUserId, "อยากดูอะไรสักอย่าง", origin);
+check(
+  "a movie_list kind TMDb has no endpoint for is rejected, not requested",
+  !tmdbRequests.some((r) => r.path.includes("in_cinemas")) && bogusKindReply.length > 0
+);
+
+// Ordinary money notes containing the word "หนัง" must be untouched — the
+// reason the phrase list is exact rather than a substring test.
+simulateInterpreterResult = null;
+tmdbRequests.length = 0;
+const movieTicketExpense = await handleTextMessage(env, lineUserId, "ค่าตั๋วหนัง 300", origin);
+check(
+  'the word "หนัง" inside a spending note is still an expense, not a movie search',
+  movieTicketExpense.includes("300") && movieTicketExpense.includes("ใช่ไหม") && tmdbRequests.length === 0
+);
+
+// TMDb failing is the bot's problem to report, not to crash on.
+tmdbRequests.length = 0;
+simulateTmdbFailure = true;
+const tmdbFailureReply = await handleTextMessage(env, lineUserId, "หนังใหม่", origin);
+check("a TMDb failure answers with an apology rather than silence", tmdbFailureReply.includes("ไม่สำเร็จ"));
+
+// Same optional-secret treatment as GOOGLE_MAPS_API_KEY and
+// TRAVELPAYOUTS_TOKEN: an unset key is a setup problem, said plainly.
+const realTmdbToken = env.TMDB_READ_TOKEN;
+env.TMDB_READ_TOKEN = "";
+tmdbRequests.length = 0;
+const noTmdbKeyReply = await handleTextMessage(env, lineUserId, "หนังใหม่", origin);
+check(
+  "without a TMDb key it says the feature isn't set up, and calls nothing",
+  noTmdbKeyReply.includes("ยังไม่ได้ตั้งค่า") && tmdbRequests.length === 0
+);
+env.TMDB_READ_TOKEN = realTmdbToken;
+
+// An empty catalogue is an answer, not an error — and there is no page to
+// link to, because there is nothing on it.
+tmdbResults = [];
+const emptyMoviesReply = await handleTextMessage(env, lineUserId, "หนังใหม่", origin);
+check(
+  "an empty result says so and sends no link",
+  emptyMoviesReply.includes("ยังไม่มีข้อมูล") && !emptyMoviesReply.includes("/view/movies")
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

@@ -35,7 +35,7 @@ import {
   promptTaskDelete,
 } from "./taskCommands.ts";
 import { answerEmailCheck, matchGmailCommand, promptEmailSendResolved } from "./gmailCommands.ts";
-import { answerContactEmail, matchContactsCommand } from "./contactsCommands.ts";
+import { answerContactEmail, answerContactList, matchContactsCommand } from "./contactsCommands.ts";
 import { groupIdFromSubject, groupSubjectId } from "./groupSubject.ts";
 import {
   broadcastMorningBriefings,
@@ -65,6 +65,13 @@ import {
   type LineWebhookBody,
 } from "./line.ts";
 import { answerNearbySearch, matchPlacesCommand, promptPlaceSearch } from "./placesCommands.ts";
+import {
+  answerMovieDiscover,
+  answerMovieList,
+  answerMovieSearch,
+  matchMovieCommand,
+  type MovieCtx,
+} from "./movieCommands.ts";
 import { canAccessSpreadsheet, createBookSpreadsheet } from "./sheets.ts";
 import { signState, verifyState } from "./signedState.ts";
 import {
@@ -99,6 +106,7 @@ import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, matchViewLinkCommand } from "./viewCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewHelpRequest } from "./viewHelpPage.ts";
+import { handleViewMoviesRequest } from "./viewMoviesPage.ts";
 import { handleViewSearchRequest } from "./viewSearchPage.ts";
 import { handleViewShiftsRequest } from "./viewShiftsPage.ts";
 import { handleViewAccountsRequest } from "./viewPages.ts";
@@ -138,6 +146,13 @@ export interface Env {
   // the literal "true" once the project has billing to turn the feature on
   // without a code change.
   ENABLE_WEB_SEARCH: string | undefined;
+  // TMDb API Read Access Token (PLAN.md 17.57) — optional, same
+  // degrade-gracefully treatment as GOOGLE_MAPS_API_KEY and
+  // TRAVELPAYOUTS_TOKEN: a flat project-level credential for public data,
+  // tied to no account. The bearer token rather than the v3 `api_key`
+  // query parameter — see movies.ts's tmdbFetch for why. Without it the
+  // movie commands say the feature isn't set up yet; nothing else changes.
+  TMDB_READ_TOKEN: string;
 }
 
 // A function rather than a constant since PLAN.md 17.48 — the bot's name is
@@ -513,6 +528,8 @@ async function runInterpretedIntent(
         return await withToken((ctx) =>
           promptEmailSendResolved(ctx, intent.emailTo, intent.emailSubject, intent.emailBody)
         );
+      case "contact_list":
+        return await withToken((ctx) => answerContactList(ctx));
       case "contact_lookup":
         return await withToken((ctx) => answerContactEmail(ctx, intent.contactName));
       case "find_nearby_places":
@@ -520,6 +537,13 @@ async function runInterpretedIntent(
         // set_province/matchPlacesCommand below — place search only needs
         // the flat Maps API key, never a per-user Google access token.
         return await promptPlaceSearch({ kv: env.ACCOUNTS, lineUserId: subjectId }, intent.placeKeyword);
+      // Movies (PLAN.md 17.57) — TMDb only, so no Google token here either.
+      case "movie_list":
+        return await answerMovieList(movieCtx(env, subjectId, origin), intent.movieListKind);
+      case "movie_search":
+        return await answerMovieSearch(movieCtx(env, subjectId, origin), intent.movieQuery);
+      case "movie_discover":
+        return await answerMovieDiscover(movieCtx(env, subjectId, origin), intent.movieDescription);
       // Travel search (PLAN.md 17.37) — read-only, no per-user Google auth
       // (an app-level Amadeus key at most), same no-withToken reasoning as
       // find_nearby_places above.
@@ -634,6 +658,20 @@ async function recordConversationTurn(env: Env, subjectId: string, userText: str
 // to the chatEngine handling", which is genuinely different between the two
 // modes and stays in each caller rather than being forced into this shared
 // shape.
+/** The narrow context the movie commands take (PLAN.md 17.57). A plain
+ * function rather than a factory-of-factories like makeActionCtxFactory,
+ * because none of these fields depends on a Google access token. */
+function movieCtx(env: Env, subjectId: string, origin: string): MovieCtx {
+  return {
+    kv: env.ACCOUNTS,
+    subjectId,
+    origin,
+    tmdbReadToken: env.TMDB_READ_TOKEN,
+    geminiApiKey: env.GEMINI_API_KEY,
+    signingSecret: env.STATE_SIGNING_SECRET,
+  };
+}
+
 async function dispatchLegacyCommands(
   env: Env,
   subjectId: string,
@@ -765,6 +803,16 @@ async function dispatchLegacyCommands(
     const travelHandler = await matchTravelCommand(text);
     if (travelHandler) {
       return await travelHandler(env);
+    }
+
+    // Movies (PLAN.md 17.57) — TMDb only, no Google auth, so no
+    // withFreshAccessToken here either. Placed before matchCommand's report
+    // handler for the same reason travel is: "ค้นหาหนัง..." and
+    // "หาหนังเรื่อง..." both start with that handler's search prefix and
+    // would otherwise be read as a search of the user's own spending notes.
+    const movieHandler = matchMovieCommand(text);
+    if (movieHandler) {
+      return await movieHandler(movieCtx(env, subjectId, origin));
     }
 
     // Works in both modes (PLAN.md 17.7) — resolveViewSession (viewAuth.ts)
@@ -917,14 +965,22 @@ export async function handleTextMessage(
   // well-known phrase like "วิธีใช้" still resolves correctly either way,
   // since the AI interpreter's own "help" intent routes to the exact same
   // buildHelpText() the legacy path would have used (see runInterpretedIntent).
+  // Whether Gemini answered at all this turn (PLAN.md 17.56). Drives two
+  // things further down: whether the last-resort AI question is worth making,
+  // and whether an "I don't understand" reply should say the message wasn't
+  // understood or that the AI is unavailable — which are different problems
+  // with different fixes, and used to read identically.
+  let aiWasReachable = false;
+
   if (!effectivePending) {
     const history = await getConversationHistory(env.ACCOUNTS, lineUserId).catch((err) => {
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
-    if (intent) {
-      const reply = await runInterpretedIntent(env, lineUserId, link, intent, text, origin, tokenCache, async () => ({
+    const outcome = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
+    aiWasReachable = outcome.kind !== "unavailable";
+    if (outcome.kind === "intent") {
+      const reply = await runInterpretedIntent(env, lineUserId, link, outcome.intent, text, origin, tokenCache, async () => ({
         addedBy: lineUserId,
         addedByName: "LINE",
       }));
@@ -995,6 +1051,14 @@ export async function handleTextMessage(
     return reply;
   }
 
+  if (result.unknown) {
+    const reply = await answerUnrecognized(
+      env, lineUserId, link, text, origin, tokenCache, aiWasReachable, result.botMessage
+    );
+    await recordConversationTurn(env, lineUserId, text, reply);
+    return reply;
+  }
+
   await recordConversationTurn(env, lineUserId, text, result.botMessage);
   return result.botMessage;
 }
@@ -1055,14 +1119,18 @@ export async function handleGroupTextMessage(
   // resolved lazily (only inside runInterpretedIntent's "transaction" case)
   // so an ordinary non-money message in a group doesn't pay for a member
   // profile lookup it doesn't need.
+  // See handleTextMessage's own comment on this flag.
+  let aiWasReachable = false;
+
   if (!effectivePending) {
     const history = await getConversationHistory(env.ACCOUNTS, subjectId).catch((err) => {
       console.error("getConversationHistory failed, continuing without history", err);
       return [];
     });
-    const intent = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
-    if (intent) {
-      const reply = await runInterpretedIntent(env, subjectId, link, intent, text, origin, tokenCache, () =>
+    const outcome = await interpretMessage(env.GEMINI_API_KEY, text, history, settings, env.ACCOUNTS);
+    aiWasReachable = outcome.kind !== "unavailable";
+    if (outcome.kind === "intent") {
+      const reply = await runInterpretedIntent(env, subjectId, link, outcome.intent, text, origin, tokenCache, () =>
         resolveGroupAttribution(env, groupId, senderUserId)
       );
       await recordConversationTurn(env, subjectId, text, reply);
@@ -1093,8 +1161,57 @@ export async function handleGroupTextMessage(
     return reply;
   }
 
+  if (result.unknown) {
+    const reply = await answerUnrecognized(
+      env, subjectId, link, text, origin, tokenCache, aiWasReachable, result.botMessage
+    );
+    await recordConversationTurn(env, subjectId, text, reply);
+    return reply;
+  }
+
   await recordConversationTurn(env, subjectId, text, result.botMessage);
   return result.botMessage;
+}
+
+
+// Last resort for a message nothing recognised (PLAN.md 17.56).
+//
+// The deterministic engine saying "I don't understand" is the end of the
+// line, but it isn't always the honest end: the AI interpreter runs first
+// and only hands over when it produced nothing usable, and *why* it produced
+// nothing matters. If Gemini answered with something that failed validation,
+// the model is up and worth asking in plain language — which is exactly the
+// case a real user hit, asking for their contacts and being told the bot
+// didn't understand. If Gemini wasn't reachable at all, a second call would
+// only spend a request to fail the same way, so this says so instead of
+// blaming the message.
+async function answerUnrecognized(
+  env: Env,
+  subjectId: string,
+  link: AccountLink,
+  text: string,
+  origin: string,
+  tokenCache: TokenCache | undefined,
+  aiWasReachable: boolean,
+  deterministicReply: string
+): Promise<string> {
+  if (!aiWasReachable) {
+    return "ตอนนี้ระบบ AI ตอบไม่ได้ชั่วคราว เลยเข้าใจข้อความนี้ไม่ได้นะ ลองใหม่อีกสักครู่ หรือพิมพ์คำสั่งตรงๆ ก็ได้ เช่น \"ค่ากาแฟ 60\" หรือ \"สรุปเดือนนี้\"";
+  }
+  const actionCtx = makeActionCtxFactory(env, subjectId, link, origin);
+  try {
+    return await withFreshAccessToken(
+      env,
+      link.refreshToken,
+      (accessToken) => answerQuestion(actionCtx(accessToken), text),
+      tokenCache
+    );
+  } catch (err) {
+    // Never let the last resort be the thing that breaks the reply — the
+    // deterministic answer was already good enough to send.
+    console.error("answerUnrecognized: the fallback AI question failed too", err);
+    return deterministicReply;
+  }
 }
 
 const UNKNOWN_GROUP_MEMBER_LABEL = "สมาชิกกลุ่ม";
@@ -1790,6 +1907,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   // No token, no env — the guide is the same for everyone and holds no
   // account data (see viewHelpPage.ts).
   if (url.pathname === "/view/help") return handleViewHelpRequest(env);
+  if (url.pathname === "/view/movies") return handleViewMoviesRequest(request, env);
   if (url.pathname === "/view/search") return handleViewSearchRequest(request, env);
   if (url.pathname === "/view/settings") return handleViewSettingsRequest(request, env);
   if (url.pathname === "/view/shifts") return handleViewShiftsRequest(request, env);

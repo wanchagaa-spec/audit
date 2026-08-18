@@ -185,6 +185,20 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
     flex: 1; text-align: center; padding: .6rem 1rem; border-radius: 10px; background: #fff; color: #40444b;
     text-decoration: none; font-size: .88rem; box-shadow: 0 1px 2px rgba(0,0,0,0.06);
   }
+  /* /view/movies (PLAN.md 17.57): poster beside the text, so a phone shows
+     roughly three films per screen instead of one. The fixed poster width
+     with a 2:3 ratio is what keeps the rows aligned when TMDb returns
+     posters of slightly different sizes — or none at all. */
+  .movie { display: flex; gap: .85rem; align-items: flex-start; }
+  .movie .poster { flex: none; width: 5.5rem; aspect-ratio: 2 / 3; border-radius: 8px; object-fit: cover; background: #e5e7eb; display: block; }
+  .movie .poster-empty { display: flex; align-items: center; justify-content: center; text-align: center; color: #9aa0a6; font-size: .65rem; padding: .3rem; }
+  .movie-body { flex: 1; min-width: 0; }
+  .movie-title { font-size: .95rem; margin: 0 0 .15rem; color: #1c1e21; }
+  .movie-original { color: #6b6f76; font-size: .78rem; margin-bottom: .2rem; word-break: break-word; }
+  .movie-meta { color: #6b6f76; font-size: .78rem; margin-bottom: .4rem; }
+  .movie-overview { font-size: .82rem; line-height: 1.5; margin: 0 0 .5rem; color: #40444b; }
+  .movie-overview-empty { color: #9aa0a6; font-style: italic; }
+  .movie-watch { font-size: .8rem; color: #16a34a; text-decoration: none; }
   .search-answer p { margin: 0 0 .7rem; font-size: .92rem; line-height: 1.6; }
   .search-answer p:last-child { margin-bottom: 0; }
   .source-list { margin: 0; padding-left: 1.1rem; }

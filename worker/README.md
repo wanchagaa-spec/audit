@@ -146,6 +146,7 @@ Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
    | `GEMINI_API_KEY` | from step 4 (optional — omit and "ถาม"/"วิเคราะห์" just always reply with the fallback message) |
    | `GOOGLE_MAPS_API_KEY` | from step 4.5 (optional — omit and "หา...ใกล้ฉัน" just replies that the feature isn't set up) |
    | `TRAVELPAYOUTS_TOKEN` | from step 4.6 (optional — omit and travel search sends booking links without in-chat prices) |
+   | `TMDB_READ_TOKEN` | the **API Read Access Token** (the long bearer token, not the short v3 API Key) from https://www.themoviedb.org/settings/api, free for non-commercial use (optional — omit and the movie commands reply that the feature isn't set up) |
 
 2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
    **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
@@ -586,6 +587,11 @@ Gmail: so "ส่งอีเมล ถึง <ชื่อ>" doesn't require ty
 - If more than one contact's name contains the search term, it lists them and asks you to be
   more specific instead of guessing which one you meant. If a matching contact has no email on
   file, it says so instead of erroring.
+- `ขอรายชื่ออีเมล` / `มีอีเมลใครบ้าง` — lists every contact that has an email on file (PLAN.md
+  17.56). Contacts *without* one are left out on purpose: the question is which addresses you
+  have, and a bare name isn't an answer to it. Capped at 30 entries with a count of the rest,
+  so a large address book can't blow past LINE's message limit. Matched on the whole phrase
+  rather than as a substring, so it can't swallow `อีเมลของ<ชื่อ>`.
 - Feeds directly into `ส่งอีเมล ถึง <ชื่อ>` (see the Gmail section above) — the same lookup, the
   same "found exactly one, or ask" behavior, and the confirm-before-send step always shows the
   address it actually resolved to before anything sends.
@@ -655,6 +661,50 @@ honest note — a search never comes back empty-handed just because the price AP
   Amadeus before this ever went live) — an app-level token like `GOOGLE_MAPS_API_KEY`, so
   there are no per-user re-link error classes; any Travelpayouts problem is admin-only and
   degrades to links.
+
+### Movies (PLAN.md 17.57)
+
+Cinema listings and film search, from The Movie Database. Read-only, nothing is saved, and —
+like Places and Travelpayouts — it needs no per-user OAuth at all, just a flat
+`TMDB_READ_TOKEN`. Every answer comes in two halves: a five-film list in chat, and a link to
+`/view/movies` carrying the same films with posters, synopses and a per-film "where to watch
+in Thailand" link. That split is forced by the medium rather than chosen — `replyToLine`
+sends plain text, so a poster can only ever live on a page.
+
+- `หนังใหม่` — in Thai cinemas now. `หนังกำลังจะเข้า` — dated but not open yet. `หนังมาแรง` —
+  this week's trending. `หนังสตรีมมิ่ง` — new on the subscription apps available in Thailand
+  (Netflix, Prime Video, Disney+, Apple TV+, Viu). Four separate TMDb endpoints, because they
+  are four different questions.
+- `หนังเรื่อง<ชื่อ>` / `ค้นหาหนัง<ชื่อ>` — search by title.
+- `หนังแนว<แนว>` / `หนังเกี่ยวกับ<เนื้อเรื่อง>` — **search by what a film is about**, which TMDb
+  cannot do directly: `/search/movie` matches titles only. What it has is genres and a curated
+  keyword vocabulary, both searchable, so Gemini turns the description into those and TMDb
+  resolves every one against its own catalogue before use. A safe use of the model by this
+  codebase's own rule (see `news.ts`): it supplies search *terms*, never facts — the films
+  that come back are TMDb's answer. Genres are ANDed (a horror-comedy is both at once),
+  keywords ORed (they are alternative phrasings of one idea). With Gemini unavailable, or when
+  nothing resolves to a real id, it degrades to a title search rather than refusing —
+  `/discover` with no filter at all would answer "the most popular films on TMDb", which looks
+  like a result and answers nothing.
+- Natural phrasing works too via the AI interpreter's `movie_list` / `movie_search` /
+  `movie_discover` intents. `movieListKind` is validated against the real union, since it
+  picks an endpoint and an invented one would build a request to a path that does not exist.
+- `/view/movies` stores the *result*, not the query (same pattern as `/view/search`): the page
+  then shows exactly the films the chat message listed, and opening the link costs no TMDb
+  request. One-hour TTL matching the view token, and the id is scoped by subject.
+- **TMDb's attribution requirement is a licence condition, not a courtesy** — the page carries
+  it and a test enforces it. Don't remove it.
+- Authenticated with TMDb's **API Read Access Token as a bearer header**, not the v3
+  `?api_key=` query parameter. Both work against every endpoint used here and TMDb issues
+  both from the same settings page; the header keeps the credential out of the URL, which is
+  the part of a request that ends up in proxy logs, error messages and anything recording
+  "what was requested".
+- **Not verified against the live API.** The environment this was built in blocks
+  `api.themoviedb.org` at the egress proxy, so no call here has ever run for real; the tests
+  drive a mock encoding the same assumptions as the code and therefore cannot catch a wrong
+  path or parameter name. Check it against a real key before relying on it. Provider ids for
+  the smaller Thai services (WeTV, iQIYI, TrueID) are left out for the same reason — a wrong
+  id fails silently, filtering out a catalogue with no error.
 
 ### Diary (PLAN.md 15.4)
 
@@ -965,6 +1015,15 @@ safety net (17.9) is what stays in place to bound the risk:
   apply/prompt/answer functions (e.g. `promptCalendarDeleteByKeyword`, `answerDiarySearch`,
   `promptOrStartTrip`, `setProvinceByName`) so both the regex matchers and the AI interpreter call
   the same code — no duplicated logic to keep in sync by hand.
+- **When nothing recognises the message, *why* decides what happens next** (PLAN.md 17.56).
+  `interpretMessage` returns a discriminated result rather than a bare `null`: `unusable` (Gemini
+  answered, but with non-JSON or an intent that failed `validateIntent`) means the model is up and
+  merely misread the sentence, so `answerUnrecognized` in `index.ts` puts the original message to
+  it again as a plain question via `answerQuestion` — and falls back to the deterministic
+  "I don't understand" text if even that fails. `unavailable` (a `GeminiError`, an aborted fetch,
+  or the 17.54 breaker already open) means nothing was heard at all, so the bot says the AI is
+  temporarily unavailable instead of blaming a message nobody read, and makes no second call that
+  would only fail the same way.
 - **Cost tradeoff, accepted knowingly**: a message can now trigger up to two sequential Gemini
   calls (interpret, then persona-style the reply) — real additional quota usage and latency on top
   of 17.9's already-accepted persona cost. `INTERPRETER_TIMEOUT_MS` (3s) keeps a slow/hanging call
