@@ -52,6 +52,11 @@ id = "18630d0859b24d9591cd9025ab557cfe"
 #                               not OAuth — optional, same degrade-gracefully treatment as
 #                               GEMINI_API_KEY if left unset
 #
+# Secrets reach the deployed Worker through .github/workflows/worker-deploy.yml,
+# which uploads them one by one from the repository's GitHub secrets. Adding a
+# name here or to Env in src/index.ts does nothing on its own — the workflow's
+# list is what runs, and a secret missing from it is silently empty at runtime.
+#
 # Plain vars (not secrets) can go under [vars] below.
 #   ENABLE_WEB_SEARCH         - "true" turns on Google Search grounding for the AI Q&A
 #                               call (PLAN.md 17.42). Left off because grounding requires
