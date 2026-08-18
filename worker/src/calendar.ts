@@ -4,6 +4,8 @@
 
 import { toRfc3339, toRfc3339PlusOneHour } from "./thaiDate.ts";
 
+import { fetchWithTimeout, NETWORK_TIMEOUTS } from "./timeouts.ts";
+
 const CALENDAR_BASE = "https://www.googleapis.com/calendar/v3";
 const TIMEZONE = "Asia/Bangkok";
 
@@ -17,7 +19,8 @@ export class InsufficientCalendarScopeError extends Error {}
 export class CalendarApiDisabledError extends Error {}
 
 async function calendarFetch(accessToken: string, path: string, init: RequestInit = {}): Promise<any> {
-  const res = await fetch(`${CALENDAR_BASE}${path}`, {
+  // Bounded since PLAN.md 17.52, same reasoning as sheetsFetch.
+  const res = await fetchWithTimeout("Google Calendar", NETWORK_TIMEOUTS.calendar, `${CALENDAR_BASE}${path}`, {
     ...init,
     headers: {
       ...init.headers,

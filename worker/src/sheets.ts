@@ -4,13 +4,18 @@
 // stays exactly as it was, because books created by the old app are still
 // real spreadsheets holding real money, and the bot has to keep reading them.
 
+import { fetchWithTimeout, NETWORK_TIMEOUTS } from "./timeouts.ts";
+
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const TRANSACTION_HEADERS = [
   "id", "date", "type", "amount", "categoryId", "note", "rawText", "addedBy", "addedByName", "createdAt",
 ];
 
 async function sheetsFetch(accessToken: string, path: string, init: RequestInit = {}): Promise<any> {
-  const res = await fetch(`${SHEETS_BASE}${path}`, {
+  // Bounded since PLAN.md 17.52 — every read and write in this file goes
+  // through here, and a hung one used to be able to hold a reply open past
+  // the LINE token that was meant to answer it.
+  const res = await fetchWithTimeout("Google Sheets", NETWORK_TIMEOUTS.sheets, `${SHEETS_BASE}${path}`, {
     ...init,
     headers: {
       ...init.headers,
@@ -90,9 +95,16 @@ export async function createBookSpreadsheet(accessToken: string, bookName: strin
  * (can't), since there's no LINE API to verify who actually clicked the
  * link. */
 export async function canAccessSpreadsheet(accessToken: string, spreadsheetId: string): Promise<boolean> {
-  const res = await fetch(`${SHEETS_BASE}/${spreadsheetId}?fields=spreadsheetId`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  // Not sheetsFetch, because a non-2xx here is the answer rather than an
+  // error — but it gets the same deadline (PLAN.md 17.52). A timeout is not
+  // "no access", so it throws rather than quietly returning false and
+  // sending someone down the re-link flow over a slow request.
+  const res = await fetchWithTimeout(
+    "Google Sheets access check",
+    NETWORK_TIMEOUTS.sheets,
+    `${SHEETS_BASE}/${spreadsheetId}?fields=spreadsheetId`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
   return res.ok;
 }
 

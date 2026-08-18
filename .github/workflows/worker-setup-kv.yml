@@ -10,7 +10,12 @@ jobs:
       run:
         working-directory: worker
     steps:
+      # Pinned for the same reason as the rich-menu workflow (PLAN.md 17.51):
+      # a one-time action against live infrastructure should never depend on
+      # which branch the dispatch happened to be started from.
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: 22

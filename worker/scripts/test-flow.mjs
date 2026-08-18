@@ -131,7 +131,26 @@ let simulateGroundedAnswer = false; // one-shot: next AI Q&A call comes back gro
 let simulateShortGroundedAnswer = false; // one-shot: same, but with a short answer — the common case, which goes straight into the chat with no page and nothing stored
 let simulateSearchResultPutFailureOnce = false; // one-shot: fails the KV write that stores a grounded answer, leaving a real answer with nowhere permitted to display it
 let simulateGroundingRejected = false; // one-shot: Gemini refuses any request carrying the google_search tool with a 400 — the real production failure, where a model that doesn't serve the tool took the whole Q&A feature down with it
-let simulateTransactionAppendFailureOnce = false; // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
+let simulateTransactionAppendFailureOnce = false;
+// One-shot: makes the next Sheets / Calendar / weather request hang instead
+// of answering, to prove the deadlines added in PLAN.md 17.52 actually fire.
+// A hang is the failure they exist for and the one nothing else covers — an
+// error at least reaches a catch block, a hang reaches nothing.
+let simulateHangingSheetsOnce = false;
+let simulateHangingCalendarOnce = false;
+let simulateHangingWeatherOnce = false;
+/** A request that never answers on its own — but that still honours an
+ * AbortSignal, exactly as the real fetch does. Emulating the abort is the
+ * whole point: without it the mock would hang through the deadline too, and
+ * the test would prove nothing about whether the deadline works. */
+const hangUntilAborted = (init) =>
+  new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return; // no signal: genuinely hangs, same as real fetch
+    const abort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  }); // one-shot: fails the next Transactions!A1:append call, to exercise resolveConfirmation keeping the pending draft alive for a retry instead of losing it on a transient save failure
 // One-shot: makes the next Transactions append land *after* the budget read
 // that now runs alongside it (PLAN.md 17.45). Without this the mock applies
 // appends synchronously, so the read always sees the new rows and only one
@@ -221,6 +240,20 @@ function sheetValuesForRange(range) {
 const realFetch = fetch;
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
+
+  // Checked before anything else so it can hang any of the three (17.52).
+  if (simulateHangingSheetsOnce && u.startsWith("https://sheets.googleapis.com")) {
+    simulateHangingSheetsOnce = false;
+    return hangUntilAborted(init);
+  }
+  if (simulateHangingCalendarOnce && u.startsWith("https://www.googleapis.com/calendar")) {
+    simulateHangingCalendarOnce = false;
+    return hangUntilAborted(init);
+  }
+  if (simulateHangingWeatherOnce && u.includes("open-meteo.com")) {
+    simulateHangingWeatherOnce = false;
+    return hangUntilAborted(init);
+  }
 
   if (u.includes("oauth2.googleapis.com/token")) {
     const params = new URLSearchParams(init.body);
@@ -5978,6 +6011,82 @@ for (const text of menuTexts) {
   const reply = await handleTextMessage(env, lineUserId, text, origin);
   check(`the menu tile "${text}" sends something the bot understands`, reply.length > 0 && !reply.includes("ไม่เข้าใจ"));
 }
+
+// ---- Deadlines on Sheets / Calendar / weather (PLAN.md 17.52) -------------
+// Written after a real message was read and answered with nothing at all.
+// The handling code was cleared first — every path it could take returns
+// text — so what was left was how long the slow path could run before trying
+// to answer. Gemini was the only dependency with a timeout; the three below
+// had none, which is backwards: they are the ones nothing else was watching.
+//
+// The deadlines are shortened here rather than waited out. Ten seconds of
+// real time per case would make this suite unusable, and what needs proving
+// is that the deadline fires and the failure degrades — not its exact value.
+const { NETWORK_TIMEOUTS, fetchWithTimeout, NetworkTimeoutError } = await import("../src/timeouts.ts");
+const realTimeouts = { ...NETWORK_TIMEOUTS };
+NETWORK_TIMEOUTS.sheets = 40;
+NETWORK_TIMEOUTS.calendar = 40;
+NETWORK_TIMEOUTS.weather = 40;
+
+check(
+  "the real deadlines are generous — these are hang guards, not latency targets",
+  realTimeouts.sheets >= 5000 && realTimeouts.calendar >= 5000 && realTimeouts.weather >= 3000
+);
+
+// A hung Sheets read must end in a worded reply, not an open request.
+// Driven through the real webhook, because that is where the catch that
+// turns a thrown error into an apology lives — handleTextMessage itself
+// propagates, which is correct and is why testing it directly would have
+// looked like a failure.
+simulateHangingSheetsOnce = true;
+const repliesBeforeHang = replies.length;
+const hangBody = JSON.stringify({ events: [personalTextEvent("สรุปเดือนนี้")] });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(hangBody, env.LINE_CHANNEL_SECRET) },
+    body: hangBody,
+  }),
+  env
+);
+check(
+  "a hung Sheets read still ends in a reply, instead of silence",
+  replies.length === repliesBeforeHang + 1 && replies.at(-1).includes("ผิดพลาด")
+);
+
+// Calendar and weather are already best-effort inside answerQuestion, so a
+// timeout there should cost only that one detail — the answer still arrives.
+simulateHangingCalendarOnce = true;
+simulateInterpreterResult = { intent: "question", question: "เดือนนี้ใช้เงินไปเท่าไหร่" };
+const hungCalendarReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
+check("a hung Calendar call still lets the question be answered", hungCalendarReply.length > 0);
+
+await kv.put(`province:${lineUserId}`, JSON.stringify({ name: "เชียงใหม่", lat: 18.78, lon: 98.98 }));
+simulateHangingWeatherOnce = true;
+simulateInterpreterResult = { intent: "question", question: "เดือนนี้ใช้เงินไปเท่าไหร่" };
+const hungWeatherReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
+check("a hung weather call still lets the question be answered", hungWeatherReply.length > 0);
+
+// The error has to name the dependency. "The request was aborted" in a log
+// tells you nothing when half a dozen Google APIs could have been the one.
+let timeoutError = null;
+simulateHangingSheetsOnce = true;
+try {
+  await fetchWithTimeout("Google Sheets", 30, "https://sheets.googleapis.com/v4/spreadsheets/x");
+} catch (err) {
+  timeoutError = err;
+}
+check(
+  "a timeout says which dependency ran out of time",
+  timeoutError instanceof NetworkTimeoutError && timeoutError.message.includes("Google Sheets")
+);
+
+// A request that answers in time must pass straight through, or the guard
+// would be breaking the normal path to protect the rare one.
+const fineResponse = await fetchWithTimeout("Google Sheets", 5000, "https://sheets.googleapis.com/v4/spreadsheets/fake-sheet-id/values/Budgets!A2:D");
+check("and a request that answers in time is untouched", fineResponse.ok);
+
+Object.assign(NETWORK_TIMEOUTS, realTimeouts);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

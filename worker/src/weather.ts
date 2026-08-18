@@ -1,3 +1,4 @@
+import { fetchWithTimeout, NETWORK_TIMEOUTS } from "./timeouts.ts";
 // Weather for the morning briefing (PLAN.md 15.11). Uses Open-Meteo
 // (open-meteo.com) — chosen because both its geocoding and forecast
 // endpoints are free with no API key or account at all, which fits this
@@ -17,7 +18,7 @@ export async function geocodeProvince(name: string): Promise<GeocodedProvince | 
   const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
     name
   )}&count=1&language=th&format=json`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout("Weather API", NETWORK_TIMEOUTS.weather, url);
   if (!res.ok) throw new Error(`Open-Meteo geocoding error (${res.status}): ${await res.text()}`);
   const data = (await res.json()) as { results?: Array<{ name: string; latitude: number; longitude: number }> };
   const first = data.results?.[0];
@@ -49,7 +50,7 @@ export async function fetchWeatherSummary(province: GeocodedProvince): Promise<s
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${province.lat}&longitude=${province.lon}` +
     `&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=Asia%2FBangkok`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout("Weather API", NETWORK_TIMEOUTS.weather, url);
   if (!res.ok) return null;
   const data = (await res.json()) as {
     current?: { temperature_2m?: number; weather_code?: number };

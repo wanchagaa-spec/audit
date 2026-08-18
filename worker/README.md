@@ -203,6 +203,13 @@ understands, nothing new to build on the LINE side.
 3. Re-run the same workflow any time you change `worker/assets/rich-menu.png` — it deletes
    the previous menu of the same name first, so it's safe to run repeatedly.
 
+The workflow checks out `main` explicitly, whatever branch you dispatch it from. It
+publishes straight to the live LINE account with no staging step, so a run from an old
+branch would replace the real menu with that branch's version **and still finish green** —
+which is exactly what happened once, with nothing to show for it but a branch name on the
+run. The script also prints the tile list before publishing, so the log says what it did
+rather than only that it worked.
+
 Three tiles in a single row (LINE's "compact" rich menu size): วิธีใช้ (help), เปิดเว็บดูข้อมูล
 (web viewer link, PLAN.md 16), and ตั้งค่า (settings page, PLAN.md 17.48). It has been as large
 as a full-size 4x2 grid; รายการล่าสุด and สรุปเดือนนี้ held the last two slots until 17.50 and gave
@@ -1066,6 +1073,18 @@ would force every linked account to re-consent. The code lasts 15 minutes and
 is destroyed after five wrong tries. The wipe clears the Transactions tab
 only — diary, budgets, calendar, tasks and trip photos are untouched, which
 the page states and a test enforces.
+
+### Network deadlines
+
+`src/timeouts.ts` gives Sheets, Calendar and the weather API a deadline, applied at their
+low-level fetch wrappers so every caller is covered rather than just the path that happened
+to reveal the gap. Before that, the only timeouts in the codebase were on the three Gemini
+calls — the wrong way round, since the Google APIs were the ones nothing else was watching,
+and one hung request could hold a reply open long past the LINE token meant to answer it.
+
+They are hang guards, not latency targets: 10s/8s/5s, far beyond how long these take when
+anything is working. A timeout names the dependency that ran out of time, because "the
+request was aborted" in a log is useless when half a dozen Google APIs are equally suspect.
 
 ### How much of the sheet a command reads
 
