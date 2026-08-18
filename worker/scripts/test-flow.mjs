@@ -122,7 +122,8 @@ let simulateGroupMemberProfileFailure = false; // makes the next group-member-pr
 let simulateGroupSummaryFailure = false; // makes the next group-summary lookup fail, to exercise the generic spreadsheet-name fallback
 let mockGroupName = "ทริปเพื่อน"; // the group name returned by the mocked group-summary endpoint
 let simulateQueuePutFailureOnce = false; // one-shot: fails the next KV put to the upload queue, to exercise handleQueuedMediaBatch's outer catch
-let simulateGeminiFailure = false; // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
+let simulateGeminiFailure = false;
+let simulateGeminiQuotaRejection = false; // one-shot: next Gemini call answers 429, the status the breaker (PLAN.md 17.54) reacts to // one-shot: fails the next Gemini request, to exercise the AI command's fallback message
 let simulatePersonaRewrite = false; // one-shot: makes the next persona-styling call (PLAN.md 17.9) return a recognizably different string instead of echoing, to verify styling actually happened
 let simulatePersonaDropQuote = false; // one-shot: makes the next persona-styling call return the input with all quoted spans stripped, to verify applyPersona's fallback when a quoted instruction (e.g. "ใช่") doesn't survive
 let simulatePersonaDropLink = false; // one-shot: same idea for a URL — the travel/places replies carry no quoted spans at all, so links need their own coverage
@@ -819,6 +820,20 @@ globalThis.fetch = async (url, init = {}) => {
     const body = JSON.parse(init.body);
     const systemInstruction = body.systemInstruction?.parts?.[0]?.text ?? "";
     const question = body.contents?.[0]?.parts?.[0]?.text ?? "";
+
+    // Checked ahead of everything else, including the interpreter marker
+    // below: a quota rejection is Google refusing the *account*, so it lands
+    // on whichever call happens to be next rather than on a particular kind
+    // of call. Putting it after the interpreter branch made the breaker test
+    // fail for exactly that reason — the interpreter answered from its own
+    // mock and never saw the 429.
+    if (simulateGeminiQuotaRejection) {
+      simulateGeminiQuotaRejection = false;
+      return new Response(
+        JSON.stringify({ error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" } }),
+        { status: 429 }
+      );
+    }
 
     // AI-interpreter calls (PLAN.md 17.11, aiInterpreter.ts) are identified
     // by their own marker phrase and handled before simulateGeminiFailure is
@@ -1539,6 +1554,20 @@ diaryRows.push(["diary-broadcast-test-1", yesterdayKeyForBroadcast, "ทั่�
 
 await broadcastMorningBriefings(env, env.ACCOUNTS, notSevenOClockUtc);
 check("the broadcast is a no-op outside the 07:00 Bangkok minute", pushes.length === pushesBeforeBroadcast);
+
+// The briefing is opt-in for accounts linked after PLAN.md 17.54, and this
+// suite links its account fresh — so it is a new account and gets nothing
+// until it asks. Checked before opting in, because "the default is off" is
+// the whole point of the change and would otherwise only be visible as an
+// absence nobody asserted.
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check(
+  "a newly linked account gets no 07:00 push until it opts in",
+  pushes.length === pushesBeforeBroadcast
+);
+await kv.delete("last-broadcast-date"); // that run consumed the once-a-day guard
+const { getBotSettings, saveBotSettings, wantsMorningBriefing } = await import("../src/settings.ts");
+await saveBotSettings(kv, lineUserId, { ...(await getBotSettings(kv, lineUserId)), morningBriefing: true });
 
 await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
 const broadcastPushes = pushes.slice(pushesBeforeBroadcast);
@@ -5741,7 +5770,6 @@ await postSettings({
   botCharacter: "ผู้ชายสุภาพ พูดสั้นๆ ใช้ผม/ครับ",
   userNickname: "พี่แว่น",
 });
-const { getBotSettings } = await import("../src/settings.ts");
 const savedSettings = await getBotSettings(kv, lineUserId);
 check(
   "saving stores the name, character and nickname",
@@ -6213,6 +6241,125 @@ check(
   contactSection(LEGAL_SECTIONS.privacy.th).includes("wanchagaa1999@gmail.com") &&
     contactSection(LEGAL_SECTIONS.privacy.en).includes("wanchagaa1999@gmail.com")
 );
+
+// ---- Morning briefing opt-in, grandfathered (PLAN.md 17.54) ---------------
+// The briefing is one charged LINE push per person per day, sent whether or
+// not they use the bot — the largest recurring cost the moment more than one
+// person is on it. New accounts start opted out; accounts that already had
+// it keep it, and the signal for "already had it" is an account link with no
+// linkedAt, because that field only started being written here.
+
+const grandfatheredId = "Ugrandfathered1";
+// Written straight to KV, bypassing setAccountLink, precisely because
+// setAccountLink now stamps linkedAt — this is what a link saved before this
+// feature existed looks like on disk.
+await kv.put(
+  `link:${grandfatheredId}`,
+  JSON.stringify({ spreadsheetId: "fake-sheet-id", refreshToken: "fake-refresh-token", displayName: "เก่า" })
+);
+check(
+  "an account with no linkedAt keeps the briefing without opting in",
+  wantsMorningBriefing(await getBotSettings(kv, grandfatheredId), JSON.parse(await kv.get(`link:${grandfatheredId}`)))
+);
+
+const newcomerId = "Unewcomer1";
+await setAccountLink(kv, newcomerId, {
+  spreadsheetId: "fake-sheet-id",
+  refreshToken: "fake-refresh-token",
+  displayName: "ใหม่",
+});
+const newcomerLink = JSON.parse(await kv.get(`link:${newcomerId}`));
+check("a link created now records linkedAt", typeof newcomerLink.linkedAt === "string");
+check(
+  "and that account is opted out by default",
+  wantsMorningBriefing(await getBotSettings(kv, newcomerId), newcomerLink) === false
+);
+
+// Re-linking (re-consenting for a wider scope) must not look like signing up
+// today, or an existing user would silently lose their briefing.
+await setAccountLink(kv, grandfatheredId, {
+  spreadsheetId: "fake-sheet-id",
+  refreshToken: "fake-refresh-token-2",
+  displayName: "เก่า",
+});
+check(
+  "re-linking an old account does not stamp it as new",
+  JSON.parse(await kv.get(`link:${grandfatheredId}`)).linkedAt === undefined
+);
+
+// An explicit choice beats the default in both directions.
+await saveBotSettings(kv, grandfatheredId, { morningBriefing: false });
+check(
+  "an old account that switches it off stays off",
+  wantsMorningBriefing(await getBotSettings(kv, grandfatheredId), { }) === false
+);
+await saveBotSettings(kv, newcomerId, { morningBriefing: true });
+check(
+  "and a new account that switches it on stays on",
+  wantsMorningBriefing(await getBotSettings(kv, newcomerId), newcomerLink) === true
+);
+// Saving the other fields must not wipe the choice.
+await saveBotSettings(kv, newcomerId, { ...(await getBotSettings(kv, newcomerId)), botName: "อีกชื่อ" });
+check("changing an unrelated setting keeps the briefing choice", (await getBotSettings(kv, newcomerId)).morningBriefing === true);
+await kv.delete(`link:${grandfatheredId}`);
+await kv.delete(`link:${newcomerId}`);
+await kv.delete(`settings:${grandfatheredId}`);
+await kv.delete(`settings:${newcomerId}`);
+
+// The settings page: an unticked checkbox sends nothing at all, so without
+// the hidden marker beside it, switching the briefing off would save as
+// "never chosen" and a grandfathered account would keep getting it.
+const briefingOnHtml = await (await postSettings({
+  action: "save", botName: "ไพโรจน์", botCharacter: "ร่าเริง", userNickname: "",
+  morningBriefingSubmitted: "1", morningBriefing: "on",
+})).text();
+check("ticking the box on the settings page turns the briefing on", briefingOnHtml.includes('name="morningBriefing"') && (await getBotSettings(kv, lineUserId)).morningBriefing === true);
+await postSettings({ action: "save", botName: "ไพโรจน์", botCharacter: "ร่าเริง", userNickname: "", morningBriefingSubmitted: "1" });
+check(
+  "and unticking it records an explicit no, not an absent answer",
+  (await getBotSettings(kv, lineUserId)).morningBriefing === false
+);
+
+// ---- Gemini circuit breaker (PLAN.md 17.54) -------------------------------
+// Asked for as a daily cap; built as a breaker on Gemini's own 429, because
+// Google already counts accurately and a counter would cost a KV write per
+// call against a 1,000-a-day write budget the bot is already spending.
+
+const { isGeminiPaused, resumeGemini } = await import("../src/geminiBudget.ts");
+await resumeGemini(kv);
+sheetRows.length = 0;
+
+simulateGeminiQuotaRejection = true;
+const duringQuotaReply = await handleTextMessage(env, lineUserId, "ค่ากาแฟ 60", origin);
+check(
+  "a 429 from Gemini still answers, via the deterministic path",
+  duringQuotaReply.includes("ใช่ไหม") && duringQuotaReply.includes("60")
+);
+check("and it opens the breaker", await isGeminiPaused(kv));
+
+// While paused, no Gemini request is made at all — that is the saving, and
+// the reason for the breaker rather than retrying into a wall.
+geminiRequests.length = 0;
+const whilePausedReply = await handleTextMessage(env, lineUserId, "ค่าข้าว 50", origin);
+check(
+  "while paused the bot keeps working with no Gemini call whatsoever",
+  geminiRequests.length === 0 && whilePausedReply.includes("50")
+);
+
+// Questions need Gemini, so those degrade to the honest fallback rather than
+// pretending — but they still answer.
+const pausedQuestionReply = await handleTextMessage(env, lineUserId, "ถาม เดือนนี้ใช้เงินไปเท่าไหร่", origin);
+check("a question during the pause gets the fallback message, not silence", pausedQuestionReply.length > 0);
+
+await resumeGemini(kv);
+geminiRequests.length = 0;
+await handleTextMessage(env, lineUserId, "ค่าน้ำ 20", origin);
+check("once the pause lifts, Gemini is used again", geminiRequests.length > 0);
+
+// A 500 is this one call's problem, not a reason to stop trying for everyone.
+simulateGeminiFailure = true;
+await handleTextMessage(env, lineUserId, "ค่าขนม 30", origin);
+check("a non-429 Gemini failure does not open the breaker", (await isGeminiPaused(kv)) === false);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

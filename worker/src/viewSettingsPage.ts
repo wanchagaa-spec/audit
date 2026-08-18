@@ -22,8 +22,14 @@ import {
   sendEmail,
 } from "./gmail.ts";
 import { clearAllTransactions } from "./sheets.ts";
-import { DEFAULT_BOT_CHARACTER, DEFAULT_BOT_NAME, getBotSettings, saveBotSettings } from "./settings.ts";
-import { getUserProvince } from "./state.ts";
+import {
+  DEFAULT_BOT_CHARACTER,
+  DEFAULT_BOT_NAME,
+  getBotSettings,
+  saveBotSettings,
+  wantsMorningBriefing,
+} from "./settings.ts";
+import { getAccountLink, getUserProvince } from "./state.ts";
 import {
   DATA_FETCH_FAILED_MESSAGE,
   escapeHtml,
@@ -96,6 +102,7 @@ interface PageState {
   botCharacter: string;
   userNickname: string;
   provinceName: string | null;
+  morningBriefing: boolean;
   /** Set once a code has been emailed and is still valid. */
   pendingWipeEmail: string | null;
   notice: string | null;
@@ -149,6 +156,15 @@ ${error}
     </label>
   </div>
   <div class="card">
+    <h2>สรุปเช้า 7 โมง</h2>
+    <label class="check-field">
+      <input type="hidden" name="morningBriefingSubmitted" value="1" />
+      <input type="checkbox" name="morningBriefing" value="on"${state.morningBriefing ? " checked" : ""} />
+      <span>ส่งสรุปเช้าให้ทุกวัน 7 โมง</span>
+    </label>
+    <small class="field-note">วันที่ อากาศ ข่าว ราคาทอง-บิตคอยน์ นัดวันนี้ เวรวันนี้ และสรุปไดอารี่เมื่อวาน · ปิดไว้ก็ยังทัก "สวัสดี" เพื่อขอสรุปเองได้ทุกเมื่อ</small>
+  </div>
+  <div class="card">
     <h2>พื้นที่พยากรณ์อากาศ</h2>
     <label class="field">
       <span>จังหวัด</span>
@@ -174,10 +190,11 @@ async function buildState(
   session: { lineUserId: string; token: string },
   overrides: Partial<PageState> = {}
 ): Promise<PageState> {
-  const [settings, province, challenge] = await Promise.all([
+  const [settings, province, challenge, link] = await Promise.all([
     getBotSettings(env.ACCOUNTS, session.lineUserId),
     getUserProvince(env.ACCOUNTS, session.lineUserId),
     getWipeChallenge(env.ACCOUNTS, session.lineUserId),
+    getAccountLink(env.ACCOUNTS, session.lineUserId),
   ]);
   return {
     token: session.token,
@@ -185,6 +202,10 @@ async function buildState(
     botCharacter: settings.botCharacter,
     userNickname: settings.userNickname,
     provinceName: province?.name ?? null,
+    // Shows what would actually happen tomorrow, not just what was saved —
+    // an account that predates the opt-in has no stored preference and is
+    // still receiving the briefing, so an unticked box would be a lie.
+    morningBriefing: wantsMorningBriefing(settings, link ?? {}),
     pendingWipeEmail: challenge?.email ?? null,
     notice: null,
     error: null,
@@ -201,6 +222,14 @@ async function handleSave(env: Env, lineUserId: string, form: FormData): Promise
     botName: String(form.get("botName") ?? ""),
     botCharacter: String(form.get("botCharacter") ?? ""),
     userNickname: String(form.get("userNickname") ?? ""),
+    // An unticked checkbox sends nothing at all, which is indistinguishable
+    // from a form that never had the field. The hidden marker beside it is
+    // what makes "off" an answer rather than a silence — without it, turning
+    // the briefing off would save as "never chosen" and a grandfathered
+    // account would keep receiving it.
+    ...(form.get("morningBriefingSubmitted") !== null
+      ? { morningBriefing: form.get("morningBriefing") !== null }
+      : {}),
   });
 
   const typedProvince = String(form.get("province") ?? "").trim();

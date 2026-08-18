@@ -283,7 +283,7 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
   // from fetching any of that just to answer it.
   if (isFinanceNewsQuestion(question)) {
     try {
-      const summary = await fetchFinanceNewsSummary(ctx.geminiApiKey);
+      const summary = await fetchFinanceNewsSummary(ctx.geminiApiKey, ctx.kv);
       return summary ?? FALLBACK_MESSAGE;
     } catch (err) {
       console.error("fetchFinanceNewsSummary failed", err);
@@ -295,7 +295,7 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
   // questions aren't about the user's own money/calendar/diary either.
   if (isDomesticNewsQuestion(question)) {
     try {
-      const summary = await fetchNewsSummary(ctx.geminiApiKey);
+      const summary = await fetchNewsSummary(ctx.geminiApiKey, ctx.kv);
       return summary ?? FALLBACK_MESSAGE;
     } catch (err) {
       console.error("fetchNewsSummary failed", err);
@@ -447,6 +447,7 @@ async function askQuestionModel(
   // latency of failing it, before falling back to exactly this.
   if (!ctx.webSearchEnabled) {
     const text = await askGemini(ctx.geminiApiKey, instructionFor(false), question, {
+      kv: ctx.kv,
       signal,
       maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
     });
@@ -455,6 +456,7 @@ async function askQuestionModel(
 
   try {
     return await askGeminiWithSearch(ctx.geminiApiKey, instructionFor(true), question, {
+      kv: ctx.kv,
       signal,
       maxOutputTokens: SEARCH_MAX_OUTPUT_TOKENS,
     });
@@ -465,6 +467,7 @@ async function askQuestionModel(
     // A fresh instruction, not the same one: the search rules are dropped so
     // the model doesn't promise to look something up it now has no way to.
     const text = await askGemini(ctx.geminiApiKey, instructionFor(false), question, {
+      kv: ctx.kv,
       signal,
       maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
     });

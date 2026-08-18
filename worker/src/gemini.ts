@@ -15,6 +15,8 @@
 // free-tier-eligible, low-cost replacement Google points migrators to, and
 // it serves the interpreter, the persona pass, the news summaries and the
 // diary reflection perfectly well.
+import { isGeminiPaused, pauseGemini } from "./geminiBudget.ts";
+
 export const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 
 // The one exception (PLAN.md 17.41). Grounded search runs on the full Flash
@@ -174,6 +176,11 @@ export interface AskGeminiOptions {
   // Defaults to DEFAULT_MODEL. Only the grounded search call overrides it —
   // see SEARCH_MODEL above for why that one call needs a different model.
   model?: string;
+  // Opts this call into the shared circuit breaker (PLAN.md 17.54): skipped
+  // outright while Gemini is paused after a 429, and responsible for
+  // starting that pause if it gets one. Optional so a caller with no KV to
+  // hand (and the tests that predate this) behaves exactly as before.
+  kv?: KVNamespace;
 }
 
 /** Text only, for the callers that neither offer the search tool nor care
@@ -209,7 +216,18 @@ async function callGemini(
   userQuestion: string,
   options: AskGeminiOptions = {}
 ): Promise<GeminiResult> {
-  const { signal, jsonMode, googleSearch, model = DEFAULT_MODEL, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
+  const { signal, jsonMode, googleSearch, kv, model = DEFAULT_MODEL, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
+
+  // Checked here rather than at each call site so no future Gemini caller
+  // can forget it, and so the existing fallbacks do the work: the
+  // interpreter drops to the deterministic matcher chain, persona sends the
+  // reply unstyled, and AI Q&A shows its fallback message. Every one of
+  // those paths was already written and already tested — this just reaches
+  // them without spending a request to find out Gemini is still saying no.
+  if (kv && (await isGeminiPaused(kv))) {
+    throw new GeminiError("Gemini is paused after a recent quota rejection");
+  }
+
   const res = await fetch(endpointFor(model), {
     method: "POST",
     headers: {
@@ -230,7 +248,12 @@ async function callGemini(
     signal,
   });
   if (!res.ok) {
-    throw new GeminiError(`Gemini API error (${res.status}): ${await res.text()}`, res.status);
+    const body = await res.text();
+    // 429 is the one status worth remembering. Everything else (a 500, a
+    // malformed request) is this call's problem, not a reason to stop trying
+    // for everyone.
+    if (res.status === 429 && kv) await pauseGemini(kv, body);
+    throw new GeminiError(`Gemini API error (${res.status}): ${body}`, res.status);
   }
   const data = (await res.json()) as GeminiResponse;
   const candidate = data.candidates?.[0];

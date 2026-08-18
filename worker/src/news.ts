@@ -70,10 +70,12 @@ async function fetchHeadlines(rssUrl: string): Promise<string[] | null> {
 async function summarizePrompt(
   geminiApiKey: string,
   prompt: string,
-  systemInstruction: string
+  systemInstruction: string,
+  kv?: KVNamespace
 ): Promise<string | null> {
   try {
     return await askGemini(geminiApiKey, systemInstruction, prompt, {
+      kv,
       maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
     });
   } catch (err) {
@@ -87,7 +89,7 @@ async function summarizePrompt(
 
 /** Short Thai daily-news summary for the morning briefing, or null if the
  * feed/AI step fails. */
-export async function fetchNewsSummary(geminiApiKey: string): Promise<string | null> {
+export async function fetchNewsSummary(geminiApiKey: string, kv?: KVNamespace): Promise<string | null> {
   const headlines = await fetchHeadlines(DAILY_NEWS_RSS_URL);
   if (!headlines || headlines.length === 0) return null;
   const prompt = headlines.map((h, i) => `${i + 1}. ${h}`).join("\n");
@@ -99,7 +101,8 @@ export async function fetchNewsSummary(geminiApiKey: string): Promise<string | n
       "ด้านล่างคือหัวข้อข่าวล่าสุดจาก Bangkok Post (ภาษาอังกฤษ)",
       "สรุปเป็นภาษาไทย 3-5 หัวข้อสั้นๆ แบบ bullet ไม่ต้องมีคำนำหรือสรุปท้าย ไม่ต้องแปลตรงตัว",
       "ให้เข้าใจง่ายและเป็นธรรมชาติ",
-    ].join("\n")
+    ].join("\n"),
+    kv
   );
 }
 
@@ -155,7 +158,7 @@ const FINANCE_SYSTEM_INSTRUCTION = [
  * only if the headline fetch/AI step itself fails — a failed market-data or
  * economic-calendar fetch just means that part degrades gracefully, the
  * headlines are the one part this can't run without. */
-export async function fetchFinanceNewsSummary(geminiApiKey: string): Promise<string | null> {
+export async function fetchFinanceNewsSummary(geminiApiKey: string, kv?: KVNamespace): Promise<string | null> {
   const [headlines, snapshot, economicEvents] = await Promise.all([
     fetchHeadlines(FINANCE_NEWS_RSS_URL),
     fetchMarketSnapshot(),
@@ -172,7 +175,7 @@ export async function fetchFinanceNewsSummary(geminiApiKey: string): Promise<str
     `ปฏิทินข่าวเศรษฐกิจสหรัฐวันนี้จาก Forex Factory (เวลาไทยแล้ว, มีเฉพาะข่าวผลกระทบระดับกลาง-สูง):\n${economicEventsBlock}`,
   ].join("\n\n");
 
-  const body = await summarizePrompt(geminiApiKey, prompt, FINANCE_SYSTEM_INSTRUCTION);
+  const body = await summarizePrompt(geminiApiKey, prompt, FINANCE_SYSTEM_INSTRUCTION, kv);
   if (body === null) return null;
   return [headerBlock, "", body].join("\n");
 }

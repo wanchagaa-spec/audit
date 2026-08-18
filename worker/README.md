@@ -1092,6 +1092,27 @@ A test reads `googleAuth.ts` and fails if a requested scope isn't explained in t
 A document claiming the bot asks for less than it does is the one way a privacy policy can
 be actively harmful rather than merely stale.
 
+### Cost and quota shape
+
+Two things scale with the number of people using the bot, and neither is what the chat
+traffic suggests:
+
+- **The 07:00 briefing is one LINE push per person per day**, sent whether or not they use
+  the bot. Pushes are the charged direction; replies are free and unlimited. It is opt-in
+  as of PLAN.md 17.54 — but accounts that already had it keep it, detected by the *absence*
+  of `linkedAt` on their account link, since that field only started being written then.
+  No migration, no cutoff date: the accounts already receiving it are exactly the ones that
+  cannot prove when they linked.
+- **Every message costs two Gemini calls** — the interpreter and the persona restyle — even
+  a reply as short as "saved". Questions cost three.
+
+`src/geminiBudget.ts` is a circuit breaker on Gemini's own 429 rather than a local counter.
+Google already counts accurately, and a counter would mean a KV write per Gemini call
+against a 1,000-writes-a-day free budget the bot already spends a few hundred of. It is
+checked inside `callGemini`, so no future Gemini caller can forget it, and every fallback
+it lands on already existed: interpreter → deterministic matchers, persona → unstyled text,
+Q&A → its fallback message. Only 429 opens it; a 500 is one call's problem.
+
 ### Network deadlines
 
 `src/timeouts.ts` gives Sheets, Calendar and the weather API a deadline, applied at their

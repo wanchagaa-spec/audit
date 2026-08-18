@@ -4,6 +4,12 @@ export interface AccountLink {
   spreadsheetId: string;
   refreshToken: string;
   displayName: string;
+  // When this account first linked (PLAN.md 17.54). Absent means "linked
+  // before this field existed", which is exactly the signal the morning
+  // briefing needs to tell an existing user from a new one — see
+  // wantsMorningBriefing in settings.ts. Nothing else reads it, and it is
+  // deliberately not backfilled: the absence carries the meaning.
+  linkedAt?: string;
 }
 
 const PENDING_TTL_SECONDS = 10 * 60; // clarification questions expire after 10 minutes
@@ -14,7 +20,13 @@ export async function getAccountLink(kv: KVNamespace, lineUserId: string): Promi
 }
 
 export async function setAccountLink(kv: KVNamespace, lineUserId: string, link: AccountLink): Promise<void> {
-  await kv.put(`link:${lineUserId}`, JSON.stringify(link));
+  // Re-linking must not look like a new account. Someone re-consenting for a
+  // broader scope keeps whatever linkedAt they had — including not having
+  // one — so an existing user never silently loses their morning briefing by
+  // reconnecting. Costs one KV read on a write that happens once per link.
+  const existing = await getAccountLink(kv, lineUserId);
+  const linkedAt = existing ? existing.linkedAt : new Date().toISOString();
+  await kv.put(`link:${lineUserId}`, JSON.stringify({ ...link, ...(linkedAt ? { linkedAt } : {}) }));
 }
 
 export async function getPending(kv: KVNamespace, lineUserId: string): Promise<PendingClarification | null> {

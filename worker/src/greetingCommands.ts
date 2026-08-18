@@ -14,6 +14,7 @@ import { buildGoldBtcLines, fetchMarketSnapshot } from "./marketData.ts";
 import { fetchNewsSummary } from "./news.ts";
 import { applyPersona } from "./persona.ts";
 import { readAllDiaryEntries, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
+import { getBotSettings, wantsMorningBriefing } from "./settings.ts";
 import { geocodeProvince, fetchWeatherSummary } from "./weather.ts";
 import {
   getAccountLink,
@@ -94,7 +95,7 @@ async function buildBriefingBody(
     }
   }
 
-  const newsBlock = sharedNewsBlock !== undefined ? sharedNewsBlock : await fetchDailyNewsBlock(env);
+  const newsBlock = sharedNewsBlock !== undefined ? sharedNewsBlock : await fetchDailyNewsBlock(env, kv);
 
   const parts = [`สวัสดีตอนเช้า ☀️ วันนี้${dateLine}`];
   if (weatherLine) parts.push(weatherLine);
@@ -103,9 +104,9 @@ async function buildBriefingBody(
   return parts.join("\n\n");
 }
 
-async function fetchDailyNewsBlock(env: Env): Promise<string | null> {
+async function fetchDailyNewsBlock(env: Env, kv: KVNamespace): Promise<string | null> {
   try {
-    return await fetchNewsSummary(env.GEMINI_API_KEY);
+    return await fetchNewsSummary(env.GEMINI_API_KEY, kv);
   } catch (err) {
     console.error("fetchDailyNewsBlock: news summary failed", err);
     return null;
@@ -221,6 +222,7 @@ async function buildYesterdayDiaryLine(
       "ตอบเป็นภาษาไทยล้วนๆ ตอบเนื้อความเลย ไม่ต้องมีหัวข้อหรือคำนำ",
     ].join("\n");
     const analysis = await askGemini(env.GEMINI_API_KEY, systemInstruction, diaryText, {
+      kv,
       maxOutputTokens: ANSWER_MAX_OUTPUT_TOKENS,
     });
     return `📔 ไดอารี่เมื่อวาน:\n${analysis}`;
@@ -264,7 +266,7 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
   // buildBriefingBody's own comment) — neither the news nor the gold/BTC
   // price is personalized, only the weather (and the Calendar/shift/diary
   // extras below) is.
-  const newsBlock = await fetchDailyNewsBlock(env);
+  const newsBlock = await fetchDailyNewsBlock(env, kv);
   const marketSnapshot = await fetchMarketSnapshot();
   const marketLines = buildGoldBtcLines(marketSnapshot);
   const marketBlock = marketLines.length > 0 ? marketLines.join("\n") : null;
@@ -282,6 +284,12 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
       // base weather/news briefing only, same best-effort spirit as every
       // other piece of this broadcast.
       const link = await getAccountLink(kv, lineUserId);
+      const settings = await getBotSettings(kv, lineUserId);
+      // Opted out, or a new account that never opted in (PLAN.md 17.54).
+      // Checked here rather than when building the recipient list so the
+      // shared news/market fetch above still happens once for whoever is
+      // left, and so this reads next to the push it prevents.
+      if (!wantsMorningBriefing(settings, link ?? {})) return;
       if (link) {
         try {
           const accessToken = await refreshAccessToken({
@@ -301,7 +309,7 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
       }
 
       const fullBody = extras.length > 0 ? [body, ...extras].join("\n\n") : body;
-      const styled = await applyPersona(fullBody, env.GEMINI_API_KEY);
+      const styled = await applyPersona(fullBody, env.GEMINI_API_KEY, settings, kv);
       await pushToLine(lineUserId, styled, env.LINE_CHANNEL_ACCESS_TOKEN);
       // Marks today as already-greeted for this user too, same as the
       // reactive path's classifyGreeting — a "สวัสดี" later the same day
