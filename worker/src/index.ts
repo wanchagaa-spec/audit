@@ -146,11 +146,13 @@ export interface Env {
   // the literal "true" once the project has billing to turn the feature on
   // without a code change.
   ENABLE_WEB_SEARCH: string | undefined;
-  // TMDb API key (PLAN.md 17.57) — optional, same degrade-gracefully
-  // treatment as GOOGLE_MAPS_API_KEY and TRAVELPAYOUTS_TOKEN: a flat
-  // project-level key for public data, tied to no account. Without it the
+  // TMDb API Read Access Token (PLAN.md 17.57) — optional, same
+  // degrade-gracefully treatment as GOOGLE_MAPS_API_KEY and
+  // TRAVELPAYOUTS_TOKEN: a flat project-level credential for public data,
+  // tied to no account. The bearer token rather than the v3 `api_key`
+  // query parameter — see movies.ts's tmdbFetch for why. Without it the
   // movie commands say the feature isn't set up yet; nothing else changes.
-  TMDB_API_KEY: string;
+  TMDB_READ_TOKEN: string;
 }
 
 // A function rather than a constant since PLAN.md 17.48 — the bot's name is
@@ -664,7 +666,7 @@ function movieCtx(env: Env, subjectId: string, origin: string): MovieCtx {
     kv: env.ACCOUNTS,
     subjectId,
     origin,
-    tmdbApiKey: env.TMDB_API_KEY,
+    tmdbReadToken: env.TMDB_READ_TOKEN,
     geminiApiKey: env.GEMINI_API_KEY,
     signingSecret: env.STATE_SIGNING_SECRET,
   };

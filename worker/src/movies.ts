@@ -2,7 +2,8 @@
 // entertainment data source, and the third integration (after Google Maps
 // Platform and Travelpayouts) that needs no per-user OAuth at all: what is
 // in cinemas is public data, not anybody's account, so this uses a flat
-// project-level key (TMDB_API_KEY) the same way GOOGLE_MAPS_API_KEY works.
+// project-level credential (TMDB_READ_TOKEN) the same way GOOGLE_MAPS_API_KEY
+// works.
 //
 // Five different things get called "หนังใหม่" and TMDb puts each on its own
 // endpoint, so `MovieListKind` names them rather than guessing:
@@ -23,7 +24,7 @@
 // built in blocks api.themoviedb.org and developer.themoviedb.org, so no
 // call here has ever been made against the real service — the tests drive a
 // mock that encodes these same assumptions, and therefore cannot catch a
-// wrong path or parameter name. Verify against a real key before trusting
+// wrong path or parameter name. Verify against a real token before trusting
 // it in production. Everything that reads a response is deliberately
 // defensive about missing fields for the same reason.
 
@@ -100,13 +101,25 @@ function isoDaysAgo(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-async function tmdbFetch(apiKey: string, path: string, params: Record<string, string>): Promise<any> {
+/**
+ * Authenticated with the API Read Access Token as a bearer header, not the
+ * v3 `?api_key=` query parameter.
+ *
+ * Both work against every endpoint used here, and TMDb issues both from the
+ * same page. The header is the one to use: a credential in a query string
+ * travels inside the URL, which is the part of a request that ends up in
+ * proxy and CDN logs, in error messages, and in anything that records "what
+ * was requested". A header does not. Same key, same free tier, one fewer
+ * place for it to leak.
+ */
+async function tmdbFetch(readToken: string, path: string, params: Record<string, string>): Promise<any> {
   const url = new URL(`${TMDB_BASE}${path}`);
-  url.searchParams.set("api_key", apiKey);
   url.searchParams.set("language", LANGUAGE);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
 
-  const res = await fetchWithTimeout("TMDb", NETWORK_TIMEOUTS.tmdb, url.toString());
+  const res = await fetchWithTimeout("TMDb", NETWORK_TIMEOUTS.tmdb, url.toString(), {
+    headers: { Authorization: `Bearer ${readToken}`, accept: "application/json" },
+  });
   if (!res.ok) {
     // One error class for everything, deliberately. Unlike Calendar/Tasks/
     // Gmail — where a 403 means "this user must re-consent" and the caller
@@ -145,15 +158,15 @@ function parseMovies(raw: unknown): Movie[] {
 }
 
 /** One of the four ready-made lists. */
-export async function fetchMovieList(apiKey: string, kind: MovieListKind): Promise<Movie[]> {
+export async function fetchMovieList(readToken: string, kind: MovieListKind): Promise<Movie[]> {
   if (kind === "trending") {
     // The only endpoint here that takes no region: "trending" is global by
     // definition, and TMDb offers no per-country variant of it.
-    return parseMovies(await tmdbFetch(apiKey, "/trending/movie/week", {}));
+    return parseMovies(await tmdbFetch(readToken, "/trending/movie/week", {}));
   }
   if (kind === "streaming") {
     return parseMovies(
-      await tmdbFetch(apiKey, "/discover/movie", {
+      await tmdbFetch(readToken, "/discover/movie", {
         watch_region: REGION,
         // "|" is TMDb's OR separator (a comma would mean AND — on *every*
         // one of these services at once, which is nearly nothing).
@@ -166,18 +179,18 @@ export async function fetchMovieList(apiKey: string, kind: MovieListKind): Promi
       })
     );
   }
-  return parseMovies(await tmdbFetch(apiKey, `/movie/${kind}`, { region: REGION }));
+  return parseMovies(await tmdbFetch(readToken, `/movie/${kind}`, { region: REGION }));
 }
 
-export async function searchMoviesByTitle(apiKey: string, query: string): Promise<Movie[]> {
-  return parseMovies(await tmdbFetch(apiKey, "/search/movie", { query, include_adult: "false" }));
+export async function searchMoviesByTitle(readToken: string, query: string): Promise<Movie[]> {
+  return parseMovies(await tmdbFetch(readToken, "/search/movie", { query, include_adult: "false" }));
 }
 
 /** TMDb's own genre vocabulary, in Thai. Fetched rather than hard-coded
  * because the ids are TMDb's to change and the Thai names are TMDb's
  * translations — a local copy would drift silently. */
-export async function fetchGenres(apiKey: string): Promise<Array<{ id: number; name: string }>> {
-  const raw = (await tmdbFetch(apiKey, "/genre/movie/list", {})) as { genres?: unknown[] };
+export async function fetchGenres(readToken: string): Promise<Array<{ id: number; name: string }>> {
+  const raw = (await tmdbFetch(readToken, "/genre/movie/list", {})) as { genres?: unknown[] };
   if (!Array.isArray(raw.genres)) return [];
   return raw.genres
     .map((g) => g as Record<string, unknown>)
@@ -187,10 +200,10 @@ export async function fetchGenres(apiKey: string): Promise<Array<{ id: number; n
 /** Resolves free-text keyword terms to TMDb keyword ids, taking the best
  * match for each and ignoring terms that match nothing. Terms are searched
  * one at a time because TMDb's keyword search takes a single query. */
-export async function resolveKeywordIds(apiKey: string, terms: string[]): Promise<number[]> {
+export async function resolveKeywordIds(readToken: string, terms: string[]): Promise<number[]> {
   const ids: number[] = [];
   for (const term of terms) {
-    const raw = (await tmdbFetch(apiKey, "/search/keyword", { query: term })) as { results?: unknown[] };
+    const raw = (await tmdbFetch(readToken, "/search/keyword", { query: term })) as { results?: unknown[] };
     const first = Array.isArray(raw.results) ? (raw.results[0] as Record<string, unknown> | undefined) : undefined;
     if (first && typeof first.id === "number") ids.push(first.id);
   }
@@ -209,7 +222,7 @@ export interface DiscoverFilters {
  * request like "หนังผีตลก" means both genres at once, whereas the keywords
  * a description produces are alternative ways of describing one idea, and
  * ANDing them returns nothing far too often. */
-export async function discoverMovies(apiKey: string, filters: DiscoverFilters): Promise<Movie[]> {
+export async function discoverMovies(readToken: string, filters: DiscoverFilters): Promise<Movie[]> {
   const params: Record<string, string> = { sort_by: "popularity.desc", include_adult: "false" };
   if (filters.genreIds.length > 0) params.with_genres = filters.genreIds.join(",");
   if (filters.keywordIds.length > 0) params.with_keywords = filters.keywordIds.join("|");
@@ -218,16 +231,16 @@ export async function discoverMovies(apiKey: string, filters: DiscoverFilters): 
     params.with_watch_providers = TH_STREAMING_PROVIDER_IDS.join("|");
     params.with_watch_monetization_types = "flatrate";
   }
-  return parseMovies(await tmdbFetch(apiKey, "/discover/movie", params));
+  return parseMovies(await tmdbFetch(readToken, "/discover/movie", params));
 }
 
 /** Which subscription services carry a film in Thailand, by display name.
  * Empty when TMDb has no Thai availability data for it — which is a real
  * answer ("not streaming here"), not an error. */
-export async function fetchThaiWatchProviders(apiKey: string, movieId: number): Promise<string[]> {
+export async function fetchThaiWatchProviders(readToken: string, movieId: number): Promise<string[]> {
   // Note: this endpoint ignores `language` and is not translated, so the
   // names come back in English ("Netflix", "Disney Plus") by design.
-  const raw = (await tmdbFetch(apiKey, `/movie/${movieId}/watch/providers`, {})) as {
+  const raw = (await tmdbFetch(readToken, `/movie/${movieId}/watch/providers`, {})) as {
     results?: Record<string, { flatrate?: unknown[] }>;
   };
   const flatrate = raw.results?.[REGION]?.flatrate;

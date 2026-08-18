@@ -67,10 +67,15 @@ id = "18630d0859b24d9591cd9025ab557cfe"
 #                               (Replaced the original Amadeus credentials — that portal was
 #                               decommissioned 2026-07-17 before this ever went live.)
 #
-#   TMDB_API_KEY              - The Movie Database API key (v3 auth) from
+#   TMDB_READ_TOKEN           - The Movie Database "API Read Access Token" from
 #                               https://www.themoviedb.org/settings/api — free for
-#                               non-commercial use. Powers the movie listings and search
-#                               (movies.ts, PLAN.md 17.57). Optional: without it those
-#                               commands reply that the feature isn't set up yet, and
-#                               nothing else in the bot changes. Note TMDb's attribution
-#                               requirement — /view/movies carries it, don't remove it.
+#                               non-commercial use. That page issues two credentials;
+#                               this is the long bearer token, NOT the short v3 API Key.
+#                               Both authenticate the same endpoints, but a bearer token
+#                               stays in a header instead of travelling in the URL, where
+#                               proxy and CDN logs record it (movies.ts's tmdbFetch).
+#                               Powers the movie listings and search (PLAN.md 17.57).
+#                               Optional: without it those commands reply that the feature
+#                               isn't set up yet, and nothing else in the bot changes.
+#                               Note TMDb's attribution requirement — /view/movies carries
+#                               it, don't remove it.

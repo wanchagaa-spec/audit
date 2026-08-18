@@ -755,7 +755,7 @@ globalThis.fetch = async (url, init = {}) => {
     const parsed = new URL(u);
     const params = Object.fromEntries(parsed.searchParams.entries());
     const path = parsed.pathname.replace(/^\/3/, "");
-    tmdbRequests.push({ path, params });
+    tmdbRequests.push({ path, params, auth: init.headers?.Authorization });
     if (simulateTmdbFailure) {
       simulateTmdbFailure = false;
       return new Response(JSON.stringify({ status_message: "simulated TMDb failure" }), { status: 500 });
@@ -1208,7 +1208,7 @@ const env = {
   ENABLE_WEB_SEARCH: "true",
   GOOGLE_MAPS_API_KEY: "test-maps-key",
   TRAVELPAYOUTS_TOKEN: "test-travelpayouts-token",
-  TMDB_API_KEY: "test-tmdb-key",
+  TMDB_READ_TOKEN: "test-tmdb-read-token",
 };
 const lineUserId = "Utestuser1";
 const origin = "http://localhost:8787";
@@ -6561,8 +6561,15 @@ check(
   "it asks TMDb for Thai cinemas specifically, in Thai",
   tmdbRequests[0].path === "/movie/now_playing" &&
     tmdbRequests[0].params.region === "TH" &&
-    tmdbRequests[0].params.language === "th-TH" &&
-    tmdbRequests[0].params.api_key === "test-tmdb-key"
+    tmdbRequests[0].params.language === "th-TH"
+);
+// The credential travels in a header, and — the half that matters — never
+// in the URL, which is the part that ends up in proxy and CDN logs.
+check(
+  "the read token is sent as a bearer header, never as a query parameter",
+  tmdbRequests[0].auth === "Bearer test-tmdb-read-token" &&
+    !("api_key" in tmdbRequests[0].params) &&
+    !Object.values(tmdbRequests[0].params).includes("test-tmdb-read-token")
 );
 // Five in chat, the rest behind the link — the whole point of the split.
 check(
@@ -6773,15 +6780,15 @@ check("a TMDb failure answers with an apology rather than silence", tmdbFailureR
 
 // Same optional-secret treatment as GOOGLE_MAPS_API_KEY and
 // TRAVELPAYOUTS_TOKEN: an unset key is a setup problem, said plainly.
-const realTmdbKey = env.TMDB_API_KEY;
-env.TMDB_API_KEY = "";
+const realTmdbToken = env.TMDB_READ_TOKEN;
+env.TMDB_READ_TOKEN = "";
 tmdbRequests.length = 0;
 const noTmdbKeyReply = await handleTextMessage(env, lineUserId, "หนังใหม่", origin);
 check(
   "without a TMDb key it says the feature isn't set up, and calls nothing",
   noTmdbKeyReply.includes("ยังไม่ได้ตั้งค่า") && tmdbRequests.length === 0
 );
-env.TMDB_API_KEY = realTmdbKey;
+env.TMDB_READ_TOKEN = realTmdbToken;
 
 // An empty catalogue is an answer, not an error — and there is no page to
 // link to, because there is nothing on it.

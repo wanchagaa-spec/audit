@@ -146,7 +146,7 @@ Two workflows under `.github/workflows/` handle this entirely in GitHub Actions:
    | `GEMINI_API_KEY` | from step 4 (optional — omit and "ถาม"/"วิเคราะห์" just always reply with the fallback message) |
    | `GOOGLE_MAPS_API_KEY` | from step 4.5 (optional — omit and "หา...ใกล้ฉัน" just replies that the feature isn't set up) |
    | `TRAVELPAYOUTS_TOKEN` | from step 4.6 (optional — omit and travel search sends booking links without in-chat prices) |
-   | `TMDB_API_KEY` | a TMDb API key (v3 auth) from https://www.themoviedb.org/settings/api, free for non-commercial use (optional — omit and the movie commands reply that the feature isn't set up) |
+   | `TMDB_READ_TOKEN` | the **API Read Access Token** (the long bearer token, not the short v3 API Key) from https://www.themoviedb.org/settings/api, free for non-commercial use (optional — omit and the movie commands reply that the feature isn't set up) |
 
 2. Go to the repo's **Actions** tab → **"One-time - Create Worker KV namespace"** →
    **Run workflow**. Open the run, expand the step, copy the `id` value from the output,
@@ -666,7 +666,7 @@ honest note — a search never comes back empty-handed just because the price AP
 
 Cinema listings and film search, from The Movie Database. Read-only, nothing is saved, and —
 like Places and Travelpayouts — it needs no per-user OAuth at all, just a flat
-`TMDB_API_KEY`. Every answer comes in two halves: a five-film list in chat, and a link to
+`TMDB_READ_TOKEN`. Every answer comes in two halves: a five-film list in chat, and a link to
 `/view/movies` carrying the same films with posters, synopses and a per-film "where to watch
 in Thailand" link. That split is forced by the medium rather than chosen — `replyToLine`
 sends plain text, so a poster can only ever live on a page.
@@ -694,6 +694,11 @@ sends plain text, so a poster can only ever live on a page.
   request. One-hour TTL matching the view token, and the id is scoped by subject.
 - **TMDb's attribution requirement is a licence condition, not a courtesy** — the page carries
   it and a test enforces it. Don't remove it.
+- Authenticated with TMDb's **API Read Access Token as a bearer header**, not the v3
+  `?api_key=` query parameter. Both work against every endpoint used here and TMDb issues
+  both from the same settings page; the header keeps the credential out of the URL, which is
+  the part of a request that ends up in proxy logs, error messages and anything recording
+  "what was requested".
 - **Not verified against the live API.** The environment this was built in blocks
   `api.themoviedb.org` at the egress proxy, so no call here has ever run for real; the tests
   drive a mock encoding the same assumptions as the code and therefore cannot catch a wrong

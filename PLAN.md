@@ -3016,21 +3016,28 @@ keyword ที่คนดูแลจริง ทั้งคู่ค้น�
 
 **Attribution ของ TMDb เป็นเงื่อนไขสัญญา ไม่ใช่มารยาท** — มีเทสต์คุมไว้ และมี mutation ที่ลบมันออกแล้วแดง
 
+**auth ใช้ API Read Access Token เป็น bearer header ไม่ใช่ `?api_key=`** — หน้า settings ของ TMDb
+ออกให้ทั้งสองอย่าง ใช้ยิง endpoint ชุดเดียวกันได้เหมือนกัน แต่ credential ที่อยู่ใน query string
+**เดินทางอยู่ใน URL ซึ่งเป็นส่วนที่ proxy/CDN log เก็บ** และโผล่ในข้อความ error ส่วน header ไม่โผล่
+เทสต์ assert สองด้าน: header ถูกต้อง **และ token ไม่ปรากฏใน query param เลย** (mutation
+เอากลับไปใส่ใน query string → แดง)
+
 **ข้อจำกัดที่ต้องพูดตรงๆ**: environment ที่เขียนโค้ดนี้ **egress proxy บล็อก `api.themoviedb.org`
 และ `developer.themoviedb.org`** — ไม่เคยยิงของจริงเลยสักครั้ง mock ในเทสต์เข้ารหัส*ข้อสันนิษฐาน
 ชุดเดียวกับโค้ด* จึงจับ path/param ที่ผิดไม่ได้ เทสต์พิสูจน์ว่า routing/filter/rendering เป็นไปตามที่
 โค้ดตั้งใจ **ไม่ได้พิสูจน์ว่า TMDb เห็นด้วย** — ต้องยืนยันด้วยคีย์จริงก่อนใช้งานจริง
 (provider id ของ WeTV/iQIYI/TrueID ก็ยืนยันไม่ได้ จึงยังไม่ใส่ เพราะ id ผิดจะกรองแคตตาล็อกทิ้งเงียบๆ)
 
-**ทดสอบ** (+35): ทั้ง 4 ลิสต์ยิงถูก endpoint, filter ของ streaming ครบ, แชทตัดที่ 5 พร้อมบอกจำนวนที่เหลือ,
+**ทดสอบ** (+38): ทั้ง 4 ลิสต์ยิงถูก endpoint, filter ของ streaming ครบ, แชทตัดที่ 5 พร้อมบอกจำนวนที่เหลือ,
 หนังไม่มีคะแนนไม่โชว์ ⭐0.0, หน้าเว็บมีโปสเตอร์/เรื่องย่อ/ลิงก์ดูที่ไหน/placeholder ของหนังไม่มีโปสเตอร์/
 attribution, token ของคนอื่นเปิดไม่ได้, ค้นตามชื่อ, ค้นตามเนื้อเรื่องครบเส้น (genre+keyword→discover),
 AND/OR ถูกด้าน, alias ของแนว, ไม่เหลือ filter → ตกไปค้นชื่อ, Gemini ล่ม → ตกไปค้นชื่อ,
 `"แนะนำหนังหน่อย"` → trending, AI intent ทั้งสามแบบ, `movieListKind` มั่ว → ถูกปฏิเสธ,
 **`"ค่าตั๋วหนัง 300"` ยังเป็นรายจ่ายเหมือนเดิม**, `"ค้นหาหนัง..."`/`"หาหนังเรื่อง..."` ไม่ถูก
 transaction search กลืน, TMDb ล่ม, ไม่มีคีย์, ผลว่าง —
-mutation check 12 รอบ ตายทั้งหมด: ถอด flatrate → แดง, `|`→`,` ทั้ง provider และ keyword → แดง,
+mutation check 13 รอบ ตายทั้งหมด: ถอด flatrate → แดง, `|`→`,` ทั้ง provider และ keyword → แดง,
 ถอด `region=TH` → แดง, discover ทั้งที่ไม่มี filter → แดง, ปฏิเสธแทนถอย → แดง, รับ kind มั่ว → แดง,
 ถอด subject ออกจาก key → แดง, ลบ attribution → แดง, ไม่ตัดคำสุภาพ → แดง, ยกเพดานแชทเป็น 50 → แดง,
-ย้าย matcher ไปท้าย dispatch chain → แดง —
-รวม **646 ผ่าน 0 ล้มเหลว** (+ chat-engine 22)
+ย้าย matcher ไปท้าย dispatch chain → แดง,
+เอา token กลับไปใส่ query string → แดง —
+รวม **647 ผ่าน 0 ล้มเหลว** (+ chat-engine 22)

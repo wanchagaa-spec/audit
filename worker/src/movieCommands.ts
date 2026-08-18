@@ -32,7 +32,7 @@ export interface MovieCtx {
   kv: KVNamespace;
   subjectId: string;
   origin: string;
-  tmdbApiKey: string;
+  tmdbReadToken: string;
   geminiApiKey: string;
   signingSecret: string;
 }
@@ -48,7 +48,7 @@ const CHAT_RESULTS = 5;
 const PAGE_RESULTS = 20;
 
 const NOT_CONFIGURED =
-  "ฟีเจอร์หนังยังไม่พร้อมใช้งาน (ยังไม่ได้ตั้งค่า TMDb API key) แจ้งผู้ดูแลบอทดูนะ";
+  "ฟีเจอร์หนังยังไม่พร้อมใช้งาน (ยังไม่ได้ตั้งค่า TMDb read access token) แจ้งผู้ดูแลบอทดูนะ";
 const LOOKUP_FAILED = "ดึงข้อมูลหนังไม่สำเร็จ ลองใหม่อีกครั้งนะ";
 
 const LIST_HEADINGS: Record<MovieListKind, string> = {
@@ -110,7 +110,7 @@ async function answerWith(
   emptyMessage: string,
   load: () => Promise<Movie[]>
 ): Promise<string> {
-  if (!ctx.tmdbApiKey) return NOT_CONFIGURED;
+  if (!ctx.tmdbReadToken) return NOT_CONFIGURED;
   let movies: Movie[];
   try {
     movies = await load();
@@ -124,13 +124,13 @@ async function answerWith(
 
 export async function answerMovieList(ctx: MovieCtx, kind: MovieListKind): Promise<string> {
   return answerWith(ctx, LIST_HEADINGS[kind], `ตอนนี้ยังไม่มีข้อมูล${LIST_HEADINGS[kind]}เลยนะ`, () =>
-    fetchMovieList(ctx.tmdbApiKey, kind)
+    fetchMovieList(ctx.tmdbReadToken, kind)
   );
 }
 
 export async function answerMovieSearch(ctx: MovieCtx, query: string): Promise<string> {
   return answerWith(ctx, `ผลค้นหาหนัง "${query}"`, `ไม่เจอหนังชื่อ "${query}" เลยนะ ลองพิมพ์ชื่ออังกฤษดูไหม`, () =>
-    searchMoviesByTitle(ctx.tmdbApiKey, query)
+    searchMoviesByTitle(ctx.tmdbReadToken, query)
   );
 }
 
@@ -250,7 +250,7 @@ function matchGenreIds(genreNames: string[], catalogue: Array<{ id: number; name
 }
 
 export async function answerMovieDiscover(ctx: MovieCtx, description: string): Promise<string> {
-  if (!ctx.tmdbApiKey) return NOT_CONFIGURED;
+  if (!ctx.tmdbReadToken) return NOT_CONFIGURED;
 
   const plan = await planSearch(ctx.geminiApiKey, description, { kv: ctx.kv });
 
@@ -263,14 +263,14 @@ export async function answerMovieDiscover(ctx: MovieCtx, description: string): P
       ctx,
       `ผลค้นหาหนัง "${description}"`,
       `ตอนนี้ค้นหาแบบบอกเนื้อเรื่องไม่ได้ (ระบบ AI ไม่ว่าง) และค้นจากชื่อ "${description}" ก็ไม่เจอนะ ลองบอกชื่อหนังตรงๆ ดูไหม`,
-      () => searchMoviesByTitle(ctx.tmdbApiKey, description)
+      () => searchMoviesByTitle(ctx.tmdbReadToken, description)
     );
   }
 
   return answerWith(ctx, `หนังที่น่าจะตรงกับ "${description}"`, `ไม่เจอหนังที่ตรงกับ "${description}" เลยนะ ลองบอกแนวหรือเนื้อเรื่องให้ละเอียดกว่านี้ดูไหม`, async () => {
     const [catalogue, keywordIds] = await Promise.all([
-      plan.genres.length > 0 ? fetchGenres(ctx.tmdbApiKey) : Promise.resolve([]),
-      plan.keywords.length > 0 ? resolveKeywordIds(ctx.tmdbApiKey, plan.keywords) : Promise.resolve([]),
+      plan.genres.length > 0 ? fetchGenres(ctx.tmdbReadToken) : Promise.resolve([]),
+      plan.keywords.length > 0 ? resolveKeywordIds(ctx.tmdbReadToken, plan.keywords) : Promise.resolve([]),
     ]);
     const genreIds = matchGenreIds(plan.genres, catalogue);
 
@@ -278,9 +278,9 @@ export async function answerMovieDiscover(ctx: MovieCtx, description: string): P
     // most popular films on TMDb", which looks like a result and answers
     // nothing. A title search at least tried to use what the user typed.
     if (genreIds.length === 0 && keywordIds.length === 0) {
-      return await searchMoviesByTitle(ctx.tmdbApiKey, description);
+      return await searchMoviesByTitle(ctx.tmdbReadToken, description);
     }
-    return await discoverMovies(ctx.tmdbApiKey, { genreIds, keywordIds, streamingOnly: plan.streamingOnly });
+    return await discoverMovies(ctx.tmdbReadToken, { genreIds, keywordIds, streamingOnly: plan.streamingOnly });
   });
 }
 
