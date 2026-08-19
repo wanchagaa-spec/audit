@@ -738,6 +738,45 @@ parameter — sending one is a 400.
   the smaller Thai services (WeTV, iQIYI, TrueID) are left out for the same reason — a wrong
   id fails silently, filtering out a catalogue with no error.
 
+### Recurring monthly bills (PLAN.md 17.59)
+
+Rent, internet, phone, instalments, insurance — the fixed costs that come round every month
+whether or not you think about them. **A reference list, not an automation**: the bot never
+writes a transaction on its own here, and never guesses whether a bill has been paid.
+
+- `ตั้งค่าใช้จ่ายประจำ <ชื่อ> <จำนวน>` — e.g. "ตั้งค่าใช้จ่ายประจำ ค่าเน็ต 599", optionally with a
+  due date: "ตั้งค่าใช้จ่ายประจำ ค่าเช่าบ้าน 6000 ทุกวันที่ 5". Setting the same name again replaces
+  the figure rather than stacking a second row the summary would count twice. Confirms first,
+  like every chat write in this bot.
+- `ค่าใช้จ่ายประจำ` — the whole list with a total, ticked or not for this month.
+- `จ่าย<ชื่อ>แล้ว` — marks it settled for this month **and logs the expense**, in one
+  confirmation that names both effects. Without the pairing, settling a bill would mean
+  telling the bot twice and the two records would drift the first time someone forgot one.
+- `ลบค่าใช้จ่ายประจำ <ชื่อ>` — removes it. Past payment rows are left behind; nothing joins to a
+  missing id, and clearing them would mean a second pass over a second tab for no visible gain.
+- `สรุปเดือนนี้` gains a closing block: the monthly total, and the names of whatever is still
+  outstanding. **Only this month's summary** — "ยังไม่จ่าย" about a month that has ended reads
+  as a debt still owed rather than as history. With nothing set up the block is empty, so the
+  most-read message this bot sends is byte-for-byte unchanged for anyone not using this.
+
+Why the bot does not work out for itself which bills are paid: it would have to match amounts
+against `Transactions`, and two bills of the same size in the same category are
+indistinguishable that way. A wrong guess in a money feature is worse than no answer.
+
+Two tabs, `Recurring` (the definitions) and `RecurringPaid` (one row per bill per month) —
+the same shape `Budgets` already uses, so they share its upsert/delete code. Both are created
+lazily and cached in KV like `Budgets` and `Diary`, which is what makes this safe for books
+that already exist.
+
+**The sharp edge worth knowing about**: `สรุปเดือนนี้` reads both tabs in the *same* batchGet as
+the transactions, so the feature costs no extra Sheets request. But a batchGet naming a range
+on a sheet that does not exist **fails the whole request with a 400** — it does not come back
+empty. `ensureRecurringTabs` therefore has to run before that read, or every pre-existing book
+would lose its month summary entirely rather than merely miss a section. The test mock
+originally answered "empty" for a missing tab, which let a mutation deleting that guard survive;
+it now returns a 400 like the real API, and a test drives the summary against a book that has
+neither tab yet.
+
 ### Diary (PLAN.md 15.4)
 
 - `ไดอารี่ <ข้อความ>` or `บันทึก <ข้อความ>` — e.g. "ไดอารี่ วันนี้อากาศดีมาก". Add `#หมวด` right

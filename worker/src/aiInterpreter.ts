@@ -104,6 +104,13 @@ export type InterpretedIntent =
   | { intent: "budget_set"; budgetCategoryId: string; budgetLimitAmount: number }
   | { intent: "budget_delete"; budgetCategoryId: string }
   | { intent: "budget_list" }
+  // Recurring monthly bills (PLAN.md 17.59). `recurringDay` is optional
+  // because "ค่าเน็ต 599" without a due date is a perfectly complete answer
+  // — omitting it means "sometime this month", not the 1st.
+  | { intent: "recurring_set"; recurringName: string; recurringAmount: number; recurringDay?: number }
+  | { intent: "recurring_delete"; recurringName: string }
+  | { intent: "recurring_paid"; recurringName: string }
+  | { intent: "recurring_list" }
   | { intent: "trip_start"; tripName: string }
   | { intent: "trip_end" }
   | { intent: "trip_status" }
@@ -363,6 +370,32 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     }
     case "budget_list":
       return { intent: "budget_list" };
+    case "recurring_list":
+      return { intent: "recurring_list" };
+    case "recurring_set": {
+      if (!isNonEmptyString(r.recurringName)) return null;
+      const amount = typeof r.recurringAmount === "number" ? r.recurringAmount : Number(r.recurringAmount);
+      if (!Number.isFinite(amount) || amount <= 0) return null;
+      // A day outside 1–31 is not a day. Dropped rather than rejecting the
+      // whole intent, since the bill itself is still perfectly usable
+      // without one.
+      const day = Number(r.recurringDay);
+      const recurringDay = Number.isInteger(day) && day >= 1 && day <= 31 ? day : undefined;
+      return {
+        intent: "recurring_set",
+        recurringName: r.recurringName,
+        recurringAmount: amount,
+        ...(recurringDay === undefined ? {} : { recurringDay }),
+      };
+    }
+    case "recurring_delete": {
+      if (!isNonEmptyString(r.recurringName)) return null;
+      return { intent: "recurring_delete", recurringName: r.recurringName };
+    }
+    case "recurring_paid": {
+      if (!isNonEmptyString(r.recurringName)) return null;
+      return { intent: "recurring_paid", recurringName: r.recurringName };
+    }
     case "trip_start": {
       if (!isNonEmptyString(r.tripName)) return null;
       return { intent: "trip_start", tripName: r.tripName };
@@ -456,6 +489,11 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     '{"intent":"budget_set","budgetCategoryId":string,"budgetLimitAmount":number} — ตั้ง/แก้งบประมาณรายจ่ายของเดือนนี้ เช่น "ตั้งงบค่าอาหารเดือนนี้ 5000", "ขอตั้งงบเดินทางไม่เกินสามพัน" (budgetCategoryId ต้องเป็น categoryId ของหมวด "รายจ่าย" จากลิสต์ข้างบนเท่านั้น; budgetLimitAmount คือจำนวนเงินที่ผู้ใช้พิมพ์มาจริงๆ ห้ามคิดเลขหรือเดาเอง)',
     '{"intent":"budget_delete","budgetCategoryId":string} — ยกเลิก/ลบงบของหมวดนั้นในเดือนนี้ เช่น "ลบงบค่าอาหาร", "ไม่ต้องตั้งงบเดินทางแล้ว"',
     '{"intent":"budget_list"} — ขอดูว่าตั้งงบอะไรไว้บ้างเดือนนี้ (คนละอย่างกับ "งบเหลือเท่าไหร่" ที่ถามยอดคงเหลือ — อันนั้นใช้ intent question)',
+    'ค่าใช้จ่ายประจำ = บิลก้อนเดิมที่ต้องจ่ายทุกเดือน (ค่าเช่าบ้าน ค่าเน็ต ค่าโทรศัพท์ ค่างวดรถ ประกัน ค่าสมาชิกรายเดือน) — คนละอย่างกับ "งบ" ซึ่งเป็นเพดานที่ตั้งเองว่าเดือนนี้จะใช้ไม่เกินเท่าไหร่ และคนละอย่างกับการจดรายจ่ายปกติ',
+    '{"intent":"recurring_set","recurringName":string,"recurringAmount":number,"recurringDay":number} — บอกว่ามีบิลอะไรที่ต้องจ่ายทุกเดือน เช่น "ค่าเน็ตเดือนละ 599", "ทุกเดือนต้องจ่ายค่าเช่าบ้าน 6000 วันที่ 5" (recurringName คือชื่อบิล, recurringAmount คือจำนวนต่อเดือน, recurringDay คือวันครบกำหนด 1-31 ไม่รู้ก็ไม่ต้องใส่)',
+    '{"intent":"recurring_paid","recurringName":string} — บอกว่าจ่ายบิลประจำตัวนั้นของเดือนนี้แล้ว เช่น "จ่ายค่าเน็ตแล้ว", "ค่าเช่าบ้านเดือนนี้จ่ายไปแล้ว"',
+    '{"intent":"recurring_delete","recurringName":string} — เลิกใช้บริการนั้นแล้ว ไม่ต้องนับเป็นค่าใช้จ่ายประจำอีก เช่น "ยกเลิกค่าเน็ตออกจากรายจ่ายประจำ"',
+    '{"intent":"recurring_list"} — ขอดูว่ามีค่าใช้จ่ายประจำอะไรบ้าง และเดือนนี้จ่ายครบยัง',
     '{"intent":"trip_start","tripName":string} — เริ่มทริปเก็บรูปใหม่',
     '{"intent":"trip_end"} — จบทริปที่เปิดอยู่',
     '{"intent":"trip_status"} — ถามว่าตอนนี้เปิดทริปอะไรอยู่',

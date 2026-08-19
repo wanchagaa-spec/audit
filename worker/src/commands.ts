@@ -1,21 +1,18 @@
-import { DEFAULT_CATEGORIES } from "./categories.ts";
 import {
   readAllTransactions,
   readMonthTransactionsAndBudgets,
+  readMonthSummaryData,
   readTransactionsForMonth,
   readTransactionsFrom,
   type TransactionRow,
 } from "./sheets.ts";
+import { categoryLabel, formatBaht } from "./format.ts";
+import { buildRecurringStatus, recurringSummaryBlock } from "./recurring.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokWeekdayIndex } from "./thaiDate.ts";
 
-export function formatBaht(n: number): string {
-  return n.toLocaleString("th-TH", { maximumFractionDigits: 2 });
-}
-
-export function categoryLabel(categoryId: string): string {
-  const cat = DEFAULT_CATEGORIES.find((c) => c.id === categoryId);
-  return `${cat?.icon ?? "📦"} ${cat?.name ?? "อื่น ๆ"}`;
-}
+// Moved to format.ts to break an import cycle (see that file); re-exported
+// here so the eight modules importing them from commands.ts are untouched.
+export { categoryLabel, formatBaht } from "./format.ts";
 
 // Bangkok time, not UTC. These used to slice `new Date().toISOString()`,
 // which is seven hours behind: between midnight and 07:00 Bangkok, "today"
@@ -166,6 +163,14 @@ export function buildHelpText(webSearchEnabled: boolean): string {
     "• งบเหลือเท่าไหร่ — เทียบกับงบที่ตั้งไว้ แจ้งเตือนถ้าเกินงบ / ดูงบ — ดูงบที่ตั้งไว้เดือนนี้",
     "• ตั้งงบ <หมวด> <จำนวน> เช่น \"ตั้งงบ อาหาร 5000\" (ถามยืนยันก่อนเสมอ) / ลบงบ <หมวด> — ตั้งหลายหมวดพร้อมกันได้ที่แท็บ \"งบ\" ในเว็บ",
     "• ค้นหา <คำ> เช่น \"ค้นหากาแฟ\" / รายการล่าสุด — ดู 5 รายการล่าสุด",
+    "",
+    "🔁 ค่าใช้จ่ายประจำทุกเดือน (ค่าเช่าบ้าน ค่าเน็ต ค่างวด ประกัน)",
+    "• ตั้งค่าใช้จ่ายประจำ <ชื่อ> <จำนวน> เช่น \"ตั้งค่าใช้จ่ายประจำ ค่าเน็ต 599\" ใส่วันครบกำหนดด้วยก็ได้ \"...ค่าเช่าบ้าน 6000 ทุกวันที่ 5\"",
+    "• ค่าใช้จ่ายประจำ — ดูทั้งหมดพร้อมยอดรวม และเดือนนี้จ่ายไปแล้วกี่รายการ",
+    "• จ่าย<ชื่อ>แล้ว เช่น \"จ่ายค่าเน็ตแล้ว\" — บันทึกเป็นรายจ่ายให้ด้วยในครั้งเดียว (ถามยืนยันก่อน)",
+    "• ลบค่าใช้จ่ายประจำ <ชื่อ> — เอาออกจากรายการ",
+    "• บอทไม่ลงรายการให้เองอัตโนมัติ และไม่เดาว่าจ่ายหรือยัง ต้องบอกเองเสมอ",
+    "• \"สรุปเดือนนี้\" จะบอกท้ายข้อความว่ายังเหลือบิลไหนไม่ได้จ่าย",
     "",
     "📸 อัลบั้มรูปทริป",
     "• เริ่มทริป <ชื่อ> แล้วส่งรูป/คลิปวิดีโอเข้ามาได้เลย อัปโหลดขึ้น Google Drive อัตโนมัติ แยกโฟลเดอร์ตามทริป+วันที่ถ่าย",
@@ -325,8 +330,25 @@ const COMMANDS: Array<{ test: (text: string) => boolean; handle: Handler }> = [
     test: (t) => includesAny(t, ["สรุปเดือนนี้", "สรุป"]),
     handle: async (accessToken, spreadsheetId, kv) => {
       const month = currentMonthKey();
-      const rows = await readTransactionsForMonth(accessToken, spreadsheetId, kv, month);
-      return summaryText(`สรุปเดือนนี้ (${month})`, rows) + topCategoriesBlock(rows).join("\n");
+      // Recurring bills are appended only to *this* month's summary
+      // (PLAN.md 17.59). Last month's is a closed record, and "ยังไม่จ่าย"
+      // about a month that has ended reads as a bill still owed rather than
+      // as history. The block is empty for anyone with none set up, so the
+      // most-read message this bot sends is unchanged for them — and it
+      // rides along in the same request the transactions already cost, so
+      // it is unchanged in request count for everyone.
+      const { transactions: rows, recurring, paid } = await readMonthSummaryData(
+        accessToken,
+        spreadsheetId,
+        kv,
+        month
+      );
+      const recurringLines = recurringSummaryBlock(buildRecurringStatus(recurring, paid, month));
+      return (
+        summaryText(`สรุปเดือนนี้ (${month})`, rows) +
+        topCategoriesBlock(rows).join("\n") +
+        recurringLines.join("\n")
+      );
     },
   },
   {
