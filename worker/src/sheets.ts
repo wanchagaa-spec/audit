@@ -858,17 +858,36 @@ export interface AccountSnapshot {
   diary: DiaryRow[];
   budgets: BudgetRow[];
   shifts: ShiftGrid;
+  /** A second month's roster, when the caller asked for one (PLAN.md 17.60).
+   * Null when it did not — which is every day except the last of a month. */
+  shiftsExtraMonth: ShiftGrid | null;
 }
 
+/**
+ * `extraShiftMonthKey` exists because of a real reported bug: asked
+ * "พรุ่งนี้มีเวรไหม" on the last day of a month, the bot said no — and it was
+ * right about the data it had, because a shift roster is a tab per month and
+ * only the current month's was ever loaded. Tomorrow's shifts were not
+ * "missing", they were never fetched, and the prompt tells the model not to
+ * guess, so "no" was the only answer available to it.
+ *
+ * The caller decides when a second month is needed (see answerQuestion), so
+ * the normal 30-or-so days of the month cost exactly what they did before.
+ */
 export async function readAccountSnapshot(
   accessToken: string,
   spreadsheetId: string,
   kv: KVNamespace,
-  monthKey: string
+  monthKey: string,
+  extraShiftMonthKey?: string
 ): Promise<AccountSnapshot> {
+  const wantsExtra = extraShiftMonthKey !== undefined && extraShiftMonthKey !== monthKey;
   await Promise.all([
     ensureDiaryTab(accessToken, spreadsheetId, kv),
     ensureShiftsTab(accessToken, spreadsheetId, kv, monthKey),
+    // Same reason the other two ensure* calls go first: a batchGet naming a
+    // tab that does not exist fails the whole request, not just that range.
+    ...(wantsExtra ? [ensureShiftsTab(accessToken, spreadsheetId, kv, extraShiftMonthKey)] : []),
   ]);
   // Transactions come windowed to the month (PLAN.md 17.47) — answerQuestion
   // filtered them to `monthKey` immediately anyway, so nothing downstream
@@ -878,14 +897,29 @@ export async function readAccountSnapshot(
     DIARY_RANGE,
     BUDGETS_RANGE,
     shiftsDataRange(monthKey),
+    ...(wantsExtra ? [shiftsDataRange(extraShiftMonthKey)] : []),
   ]);
-  const [diaryRaw, budgetRaw, shiftRaw] = extras;
+  const [diaryRaw, budgetRaw, shiftRaw, extraShiftRaw] = extras;
   return {
     transactions,
     diary: parseDiaryRows(diaryRaw),
     budgets: parseBudgetRows(budgetRaw),
     shifts: parseShiftGrid(monthKey, shiftRaw),
+    // Still one HTTP request: the extra month rides in the same batchGet.
+    shiftsExtraMonth: wantsExtra ? parseShiftGrid(extraShiftMonthKey, extraShiftRaw ?? []) : null,
   };
+}
+
+/** The shift types checked for one date, across however many months' grids
+ * were loaded. Returns [] both for "nothing is on that day" and for "that
+ * month was not loaded" — which is why the caller must only ask about dates
+ * whose month it actually fetched. */
+export function shiftsOnDate(grids: Array<ShiftGrid | null>, dateKey: string): ShiftType[] {
+  const monthKey = dateKey.slice(0, 7);
+  const day = Number(dateKey.slice(8, 10));
+  const grid = grids.find((g) => g !== null && g.monthKey === monthKey);
+  if (!grid) return [];
+  return SHIFT_TYPES.filter((type) => grid.checked[type].includes(day));
 }
 
 /** Overwrites a whole month's grid with exactly the given checked cells —
