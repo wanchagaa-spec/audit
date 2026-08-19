@@ -1167,6 +1167,39 @@ the model collapsed the unfamiliar concept into the closest one it already knew.
 `calendar_query`'s description as Google-Calendar-only, and adding an explicit rule: shift questions always
 use `"question"`, never any `calendar_*` intent.
 
+### Fix: "พรุ่งนี้มีเวร แต่บอกว่าไม่มี" (PLAN.md 17.60)
+
+A second real report about shifts, three phases after 17.20 fixed the routing. This time the
+question reached the right code and still got the wrong answer, for two unrelated reasons —
+found by driving a probe through the real pipeline and reading the prompt Gemini actually
+received, rather than reasoning about where it might be going wrong.
+
+**The prompt made the model do calendar arithmetic.** The roster went over as bare day numbers
+(`20: เวรเช้า`) while today's date went over in Thai Buddhist years (`19 ส.ค. 2569`). Answering
+"is there a shift tomorrow" meant converting the era, adding a day, and checking the roster's
+month matched — three inferences, in a prompt whose own rule two paragraphs earlier is that the
+model must never work out what this code already knows. Today's and tomorrow's shifts are now
+computed here and stated outright, the same treatment the money totals and the weather get, and
+a day with nothing on it says so rather than being silently absent (to a model, "no line" and
+"no data" look identical). Every roster line now carries a full ISO date.
+
+**And tomorrow's roster was never fetched at all.** A roster is a tab per month, and
+`readAccountSnapshot` only ever loaded the current one — so on the last day of a month,
+tomorrow's shifts were not missing from the answer, they were never read, and the prompt tells
+the model not to guess. "No" was the only answer available to it, however good the model was.
+That is a guaranteed wrong answer twelve days a year. `answerQuestion` now asks for tomorrow's
+month too when it differs, riding in the same batchGet, so the other ~353 days cost exactly what
+they did before.
+
+**Two testing lessons, both the same shape as the bug.** A first pass tested the new plumbing by
+calling `readAccountSnapshot` directly with a second month — which passed while a mutation
+removing the argument at the real call site *survived*, because nothing exercised the Q&A path on
+a month boundary. That is precisely how the original bug shipped: mechanism correct, never wired
+up. The regression test now freezes the clock to a month end and goes through `handleTextMessage`.
+Separately, mutations deleting either `ensureShiftsTab` call survived because the mock happily
+read ranges on tabs that did not exist; it now returns a 400 like the real API, and a test reads
+a month no earlier test had created a tab for.
+
 ## Local development
 
 ```bash

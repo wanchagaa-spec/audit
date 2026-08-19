@@ -385,7 +385,15 @@ globalThis.fetch = async (url, init = {}) => {
     // That is exactly what ensureRecurringTabs guards against for books
     // created before the feature existed, and a mock that answered "empty"
     // instead would let that guard be deleted without a single test noticing.
-    const missing = ranges.find((r) => !recurringTabsExist && r.startsWith("Recurring"));
+    const missing = ranges.find(
+      (r) =>
+        (!recurringTabsExist && r.startsWith("Recurring")) ||
+        // Shift rosters are a tab per month and are created on demand, so a
+        // range for a month nobody has opened yet names a sheet that does not
+        // exist. Same 400 as above — this is what makes every ensureShiftsTab
+        // call load-bearing rather than decorative.
+        (r.startsWith("'Shifts-") && !shiftTabsCreated.has(r.slice(1, r.indexOf("'", 1))))
+    );
     if (missing) {
       return new Response(
         JSON.stringify({ error: { code: 400, message: `Unable to parse range: ${missing}`, status: "INVALID_ARGUMENT" } }),
@@ -4657,9 +4665,12 @@ const shiftsAiReply = await handleTextMessage(env, lineUserId, "ถาม ใค
 check("\"ถาม\" about shifts reaches Gemini, not a canned reply", shiftsAiReply.includes("[mock AI answer]"));
 const lastShiftsGeminiRequest = geminiRequests.at(-1);
 check(
-  "the AI prompt includes the ticked shift-schedule data the web page just saved",
+  // Full ISO dates now, not bare day numbers (PLAN.md 17.60) — the change
+  // this assertion exists to pin down, since the day number alone made the
+  // model do the calendar arithmetic.
+  "the AI prompt includes the ticked shift-schedule data the web page just saved, dated",
   lastShiftsGeminiRequest.systemInstruction.includes("ตารางเวร") &&
-    lastShiftsGeminiRequest.systemInstruction.includes("3: เวรเช้า")
+    lastShiftsGeminiRequest.systemInstruction.includes(`${shiftsMonthKey}-03`)
 );
 
 // /view/tasks (PLAN.md 17.36) — read-only, reuses listIncompleteTasks the
@@ -7350,6 +7361,137 @@ check(
   aiBadDayReply.includes("ค่าประกัน") && !aiBadDayReply.includes("ทุกวันที่")
 );
 simulateInterpreterResult = null;
+
+
+// ---- "พรุ่งนี้มีเวร แต่บอกว่าไม่มี" (PLAN.md 17.60) ------------------------
+// Reported from real use. Reproducing it found two separate faults, and only
+// the second one is a bug the model could ever have worked around.
+
+const { bangkokDateKey: shiftToday, addDaysToDateKey: shiftAddDays } = await import("../src/thaiDate.ts");
+const shiftTodayKey = shiftToday();
+const shiftTomorrowKey = shiftAddDays(shiftTodayKey, 1);
+
+function seedShiftDay(dateKey, type) {
+  const tab = `Shifts-${dateKey.slice(0, 7)}`;
+  const day = Number(dateKey.slice(8, 10));
+  const row = [type];
+  for (let d = 1; d <= 31; d++) row[d] = d === day ? "x" : "";
+  shiftGridStore[tab] = [row];
+  shiftTabsCreated.add(tab);
+}
+
+// Fault one: the grid was handed over as bare day numbers ("20: เวรเช้า"),
+// while the date was handed over in Buddhist years ("19 ส.ค. 2569"). Working
+// out that tomorrow was the 20th, and that the 20th of *this* month was the
+// row to read, was left to the model — in a prompt whose own rule is that it
+// must never work out what this code already knows.
+seedShiftDay(shiftTomorrowKey, "เวรเช้า");
+geminiRequests.length = 0;
+await handleTextMessage(env, lineUserId, "ถาม พรุ่งนี้มีเวรไหม", origin);
+const shiftPrompt = geminiRequests.find((r) => r.systemInstruction.includes("ตารางเวรของผู้ใช้")).systemInstruction;
+check(
+  "tomorrow's shift is stated outright, not left for the model to count out",
+  shiftPrompt.includes(`- พรุ่งนี้ ${shiftTomorrowKey}`) &&
+    shiftPrompt.slice(shiftPrompt.indexOf("- พรุ่งนี้")).startsWith(`- พรุ่งนี้ ${shiftTomorrowKey} (`) &&
+    /- พรุ่งนี้ [^\n]*เวรเช้า/.test(shiftPrompt)
+);
+check(
+  "and every row in the grid carries a full date rather than a day number",
+  shiftPrompt.includes(`${shiftTomorrowKey} (`) && !/\n\d{1,2}: เวร/.test(shiftPrompt)
+);
+
+// A day with nothing on it says so, rather than being silently absent —
+// otherwise "no line" and "no data" look identical to the model.
+seedShiftDay(shiftTomorrowKey, "เวรเช้า");
+geminiRequests.length = 0;
+await handleTextMessage(env, lineUserId, "ถาม วันนี้มีเวรไหม", origin);
+const todayPrompt = geminiRequests.find((r) => r.systemInstruction.includes("ตารางเวรของผู้ใช้")).systemInstruction;
+check(
+  "a day with no shift is stated as having none, not left out",
+  new RegExp(`- วันนี้ ${shiftTodayKey} [^\\n]*ไม่มีเวร`).test(todayPrompt)
+);
+
+// Fault two, and the one that was a real bug: a roster is a tab per month,
+// and only the current month's was ever loaded. On the last day of a month,
+// tomorrow's shifts were not missing from the answer — they were never
+// fetched, and the prompt tells the model not to guess, so "no" was the only
+// answer available to it however good the model was.
+const { readAccountSnapshot: snapshotFor } = await import("../src/sheets.ts");
+const nextMonthKey = shiftAddDays(`${shiftTodayKey.slice(0, 7)}-28`, 10).slice(0, 7);
+seedShiftDay(`${nextMonthKey}-01`, "เวรดึก");
+const twoMonthSnapshot = await snapshotFor(
+  "test-access-token", "fake-sheet-id", kv, shiftTodayKey.slice(0, 7), nextMonthKey
+);
+check(
+  "asking for a second month loads that month's roster too",
+  twoMonthSnapshot.shiftsExtraMonth !== null &&
+    twoMonthSnapshot.shiftsExtraMonth.monthKey === nextMonthKey &&
+    twoMonthSnapshot.shiftsExtraMonth.checked["เวรดึก"].includes(1)
+);
+// It costs nothing on the ~29 days a month where tomorrow is this month.
+const oneMonthSnapshot = await snapshotFor(
+  "test-access-token", "fake-sheet-id", kv, shiftTodayKey.slice(0, 7), shiftTodayKey.slice(0, 7)
+);
+check("and asking for the same month again loads nothing extra", oneMonthSnapshot.shiftsExtraMonth === null);
+
+// The two checks above prove the plumbing exists; this one proves the Q&A
+// path actually uses it, which is where the reported bug lived. Only a
+// month-end date exercises it, so the clock is frozen for exactly this check
+// and put back straight after — the alternative is a mechanism that is
+// verified in isolation and wired up wrong, which is what shipped.
+const RealDateForShifts = Date;
+const monthEndIso = `${shiftTodayKey.slice(0, 7)}-01T03:00:00Z`;
+const frozenMs = new RealDateForShifts(
+  new RealDateForShifts(monthEndIso).getTime() + 40 * 24 * 60 * 60 * 1000
+).setUTCDate(0); // last day of the following month, 10:00 Bangkok
+try {
+  globalThis.Date = class extends RealDateForShifts {
+    constructor(...args) { if (args.length === 0) super(frozenMs); else super(...args); }
+    static now() { return frozenMs; }
+  };
+  const frozenToday = new RealDateForShifts(frozenMs + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const frozenTomorrow = shiftAddDays(frozenToday, 1);
+  seedShiftDay(frozenTomorrow, "เวรบ่าย");
+  geminiRequests.length = 0;
+  await handleTextMessage(env, lineUserId, "ถาม พรุ่งนี้มีเวรไหม", origin);
+  const boundaryPrompt = geminiRequests
+    .find((r) => r.systemInstruction.includes("ตารางเวรของผู้ใช้"))
+    .systemInstruction;
+  check(
+    "on the last day of a month, tomorrow's roster is fetched and answered from",
+    frozenTomorrow.slice(0, 7) !== frozenToday.slice(0, 7) &&
+      new RegExp(`- พรุ่งนี้ ${frozenTomorrow} [^\\n]*เวรบ่าย`).test(boundaryPrompt)
+  );
+} finally {
+  globalThis.Date = RealDateForShifts;
+}
+
+// A roster tab is created on demand, so reading a month nobody has opened
+// yet names a sheet that does not exist — and a batchGet naming a missing
+// sheet 400s the *whole* request, taking the transactions and everything
+// else down with it. Both ensureShiftsTab calls are what stop that, and
+// neither was covered until this: every earlier test happened to run against
+// months whose tabs a previous test had already created.
+const untouchedMonth = "2031-04";
+const untouchedNext = "2031-05";
+check("(precondition) neither tab exists yet", !shiftTabsCreated.has(`Shifts-${untouchedMonth}`) && !shiftTabsCreated.has(`Shifts-${untouchedNext}`));
+const freshSnapshot = await snapshotFor("test-access-token", "fake-sheet-id", kv, untouchedMonth, untouchedNext);
+check(
+  "reading months whose roster tabs do not exist yet creates them instead of failing",
+  freshSnapshot.shifts.monthKey === untouchedMonth &&
+    freshSnapshot.shiftsExtraMonth?.monthKey === untouchedNext &&
+    shiftTabsCreated.has(`Shifts-${untouchedMonth}`) &&
+    shiftTabsCreated.has(`Shifts-${untouchedNext}`)
+);
+
+// shiftsOnDate is what turns two grids into an answer for one date, so it is
+// checked directly: it must read the right month, not merely the right day.
+const { shiftsOnDate: onDate } = await import("../src/sheets.ts");
+check(
+  "a date is looked up in the grid for its own month",
+  onDate([twoMonthSnapshot.shifts, twoMonthSnapshot.shiftsExtraMonth], `${nextMonthKey}-01`).includes("เวรดึก") &&
+    onDate([twoMonthSnapshot.shifts, twoMonthSnapshot.shiftsExtraMonth], `${shiftTodayKey.slice(0, 7)}-01`).length === 0
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

@@ -22,7 +22,7 @@ import {
 import { signViewToken } from "./signedState.ts";
 import { buildSearchChatReply, isAnswerShortEnoughForChat, saveSearchResult } from "./webSearch.ts";
 import { fetchFinanceNewsSummary, fetchNewsSummary } from "./news.ts";
-import { readAccountSnapshot, SHIFT_TYPES, type BudgetRow, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
+import { readAccountSnapshot, SHIFT_TYPES, shiftsOnDate, type BudgetRow, type DiaryRow, type ShiftGrid, type ShiftType, type TransactionRow } from "./sheets.ts";
 import { getUserProvince, type ActionCtx } from "./state.ts";
 import { addDaysToDateKey, bangkokDateKey, bangkokMonthKey, bangkokStartOfDayIso, formatThaiDateLabel } from "./thaiDate.ts";
 import { fetchWeatherSummary } from "./weather.ts";
@@ -118,22 +118,59 @@ function totals(rows: TransactionRow[]): { income: number; expense: number } {
   };
 }
 
-// Turns the checked-cell grid into per-day lines Gemini can read directly
-// (e.g. "5: เวรเช้า, เวรบ่าย") — grouped by day rather than by shift type
-// since questions are almost always day-first ("ใครอยู่เวรเช้าวันนี้",
-// "วันนี้มีเวรอะไรบ้าง").
-function formatShiftLines(grid: ShiftGrid): string[] {
-  const byDay = new Map<number, ShiftType[]>();
-  for (const type of SHIFT_TYPES) {
-    for (const day of grid.checked[type]) {
-      const list = byDay.get(day);
-      if (list) list.push(type);
-      else byDay.set(day, [type]);
+// Turns the checked-cell grid into per-day lines Gemini can read directly —
+// grouped by day rather than by shift type since questions are almost always
+// day-first ("ใครอยู่เวรเช้าวันนี้", "วันนี้มีเวรอะไรบ้าง").
+//
+// Each line carries the full ISO date, not the bare day number it used to
+// (PLAN.md 17.60). "20: เวรเช้า" required the model to work out that
+// tomorrow, given a date it had been handed in Buddhist years as
+// "19 ส.ค. 2569", was the 20th — and then that the 20th of *this* month was
+// the row to look at. Two conversions and a month check, in a prompt whose
+// own rule two paragraphs up is that the model must never work out something
+// this code already knows. A date per line removes all three steps.
+function formatShiftLines(grids: Array<ShiftGrid | null>): string[] {
+  const byDate = new Map<string, ShiftType[]>();
+  for (const grid of grids) {
+    if (!grid) continue;
+    for (const type of SHIFT_TYPES) {
+      for (const day of grid.checked[type]) {
+        const dateKey = `${grid.monthKey}-${String(day).padStart(2, "0")}`;
+        const list = byDate.get(dateKey);
+        if (list) list.push(type);
+        else byDate.set(dateKey, [type]);
+      }
     }
   }
-  return Array.from(byDay.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([day, types]) => `${day}: ${types.join(", ")}`);
+  return Array.from(byDate.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([dateKey, types]) => `${dateKey} (${formatThaiDateLabel(dateKey)}): ${types.join(", ")}`);
+}
+
+/**
+ * Today's and tomorrow's shifts, worked out here and stated outright.
+ *
+ * The reported bug was "พรุ่งนี้มีเวร แต่บอกว่าไม่มี". Half of it was that
+ * tomorrow's month was never fetched at all (see readAccountSnapshot); the
+ * other half is that even when the data was right there, answering needed a
+ * chain of inference the prompt elsewhere forbids. The two questions people
+ * actually ask deserve the same treatment as the money totals and the
+ * weather: computed, handed over as ground truth, never derived by the model.
+ */
+function formatTodayTomorrowShifts(
+  grids: Array<ShiftGrid | null>,
+  todayKey: string,
+  tomorrowKey: string
+): string[] {
+  const describe = (dateKey: string): string => {
+    const types = shiftsOnDate(grids, dateKey);
+    return types.length > 0 ? types.join(", ") : "ไม่มีเวร";
+  };
+  return [
+    'เวรของผู้ใช้ที่คำนวณไว้ให้แล้ว (ใช้สองบรรทัดนี้ตอบคำถาม "วันนี้/พรุ่งนี้มีเวรไหม" โดยตรง ห้ามนับวันเองจากตารางข้างล่าง):',
+    `- วันนี้ ${todayKey} (${formatThaiDateLabel(todayKey)}): ${describe(todayKey)}`,
+    `- พรุ่งนี้ ${tomorrowKey} (${formatThaiDateLabel(tomorrowKey)}): ${describe(tomorrowKey)}`,
+  ];
 }
 
 function topCategories(rows: TransactionRow[], limit = 5): string[] {
@@ -164,7 +201,9 @@ function buildSystemInstruction(
   diaryRows: DiaryRow[],
   calendarEvents: CalendarEventSummary[] | null,
   calendarRangeLabel: string,
-  shiftGrid: ShiftGrid,
+  shiftGrids: Array<ShiftGrid | null>,
+  todayKey: string,
+  tomorrowKey: string,
   budgets: BudgetRow[],
   // False on the retry that runs without the Google Search tool (see
   // askQuestionModel). Telling a model to go and search when it has no
@@ -184,7 +223,7 @@ function buildSystemInstruction(
   const calendarLines = (calendarEvents ?? [])
     .slice(-MAX_ROWS_IN_PROMPT)
     .map((e) => `${e.dateKey} ${e.time || "(ไม่ระบุเวลา)"} ${e.title}`);
-  const shiftLines = formatShiftLines(shiftGrid);
+  const shiftLines = formatShiftLines(shiftGrids);
   const spentByCategory = new Map<string, number>();
   for (const row of txRows) {
     if (row.type !== "expense") continue;
@@ -244,8 +283,12 @@ function buildSystemInstruction(
     `บันทึกไดอารี่เดือนนี้ (ล่าสุด ${diaryLines.length} รายการ):`,
     diaryLines.length > 0 ? diaryLines.join("\n") : "(ไม่มีบันทึก)",
     "",
-    `ตารางเวรของผู้ใช้เดือน ${month} (จากตารางเวรที่ผู้ใช้ติ๊กไว้เอง แต่ละบรรทัดคือวันที่แล้วตามด้วยประเภทเวรที่ติ๊กในวันนั้น ใช้ข้อมูลชุดนี้เท่านั้นเวลาตอบคำถามเรื่องเวร ห้ามเดา):`,
-    shiftLines.length > 0 ? shiftLines.join("\n") : "(ยังไม่ได้ติ๊กเวรไว้เลยเดือนนี้)",
+    // Stated before the raw grid, and phrased as the answer rather than as
+    // data, because these are the two questions that actually get asked.
+    ...formatTodayTomorrowShifts(shiftGrids, todayKey, tomorrowKey),
+    "",
+    `ตารางเวรของผู้ใช้ทั้งหมดที่โหลดมา (จากตารางเวรที่ผู้ใช้ติ๊กไว้เอง แต่ละบรรทัดขึ้นต้นด้วยวันที่เต็ม แล้วตามด้วยประเภทเวรที่ติ๊กในวันนั้น ใช้ข้อมูลชุดนี้เท่านั้นเวลาตอบคำถามเรื่องเวร ห้ามเดา — วันที่ไม่มีในลิสต์นี้คือไม่มีเวร):`,
+    shiftLines.length > 0 ? shiftLines.join("\n") : "(ยังไม่ได้ติ๊กเวรไว้เลย)",
     "",
     // Web search (PLAN.md 17.38). The split below is the whole rule, and it
     // matters in both directions. Personal data is never on the web, so
@@ -312,12 +355,18 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
 
   // Four tabs, one Sheets request (PLAN.md 17.45) — this used to be four
   // parallel round trips at the front of a question the user is waiting on.
+  // Tomorrow's roster lives in a different tab on the last day of a month,
+  // and "พรุ่งนี้มีเวรไหม" is one of the two commonest shift questions —
+  // asking for it costs a second range in the same batchGet, and only on
+  // those twelve days a year (PLAN.md 17.60).
+  const tomorrow = addDaysToDateKey(today, 1);
   const {
     transactions: allTx,
     diary: allDiary,
     shifts: shiftGrid,
+    shiftsExtraMonth,
     budgets,
-  } = await readAccountSnapshot(ctx.accessToken, ctx.spreadsheetId, ctx.kv, month);
+  } = await readAccountSnapshot(ctx.accessToken, ctx.spreadsheetId, ctx.kv, month, tomorrow.slice(0, 7));
   // Calendar access needs its own OAuth scope some already-linked accounts
   // never granted, and can fail for other transient reasons too — fetched
   // separately (not in the Promise.all above) and caught locally so a
@@ -359,7 +408,9 @@ export async function answerQuestion(ctx: ActionCtx, question: string): Promise<
       monthDiary,
       calendarEvents,
       calendarRangeLabel,
-      shiftGrid,
+      [shiftGrid, shiftsExtraMonth],
+      today,
+      tomorrow,
       budgets,
       canSearch
     );
