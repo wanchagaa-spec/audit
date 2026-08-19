@@ -66,6 +66,13 @@ import {
 } from "./line.ts";
 import { answerNearbySearch, matchPlacesCommand, promptPlaceSearch } from "./placesCommands.ts";
 import {
+  answerRecurringList,
+  matchRecurringCommand,
+  promptRecurringDelete,
+  promptRecurringPaid,
+  promptRecurringSet,
+} from "./recurringCommands.ts";
+import {
   answerMovieDiscover,
   answerMovieList,
   answerMovieSearch,
@@ -574,6 +581,17 @@ async function runInterpretedIntent(
         return await withToken((ctx) => promptBudgetSet(ctx, intent.budgetCategoryId, intent.budgetLimitAmount));
       case "budget_delete":
         return await withToken((ctx) => promptBudgetDelete(ctx, intent.budgetCategoryId));
+      // Recurring bills (PLAN.md 17.59)
+      case "recurring_list":
+        return await withToken((ctx) => answerRecurringList(ctx));
+      case "recurring_set":
+        return await withToken((ctx) =>
+          promptRecurringSet(ctx, intent.recurringName, intent.recurringAmount, intent.recurringDay ?? 0)
+        );
+      case "recurring_delete":
+        return await withToken((ctx) => promptRecurringDelete(ctx, intent.recurringName));
+      case "recurring_paid":
+        return await withToken((ctx) => promptRecurringPaid(ctx, intent.recurringName));
       case "budget_list":
         return await withToken((ctx) => answerBudgetList(ctx));
       case "trip_start":
@@ -831,6 +849,20 @@ async function dispatchLegacyCommands(
     // STATE_SIGNING_SECRET, no Google auth (PLAN.md 17.50).
     if (matchSettingsLinkCommand(text)) {
       return await buildSettingsLinkReply(env, subjectId, origin);
+    }
+
+    // Recurring bills (PLAN.md 17.59) — before matchCommand for the same
+    // reason as budgets below: its report matcher tests "สรุป" as a
+    // substring, and "ค่าใช้จ่ายประจำ" contains none of this matcher's own
+    // prefixes either way, so running it first can't swallow a report.
+    const recurringHandler = matchRecurringCommand(text);
+    if (recurringHandler) {
+      return await withFreshAccessToken(
+        env,
+        link.refreshToken,
+        (accessToken) => recurringHandler(actionCtx(accessToken)),
+        tokenCache
+      );
     }
 
     // Before matchCommand's report handler for two reasons: its

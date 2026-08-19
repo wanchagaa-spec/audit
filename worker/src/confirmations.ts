@@ -9,6 +9,7 @@ import { applyBudgetDelete, applyBudgetSet } from "./budgetCommands.ts";
 import { applyCalendarCreate, applyCalendarDelete, applyCalendarEdit } from "./calendarCommands.ts";
 import { applyDiaryCreate } from "./diaryCommands.ts";
 import { applyEmailSend } from "./gmailCommands.ts";
+import { applyRecurringDelete, applyRecurringPaid, applyRecurringSet } from "./recurringCommands.ts";
 import { setPendingConfirmation, type ActionCtx, type PendingConfirmation } from "./state.ts";
 import { applyTaskComplete, applyTaskCreate, applyTaskDelete } from "./taskCommands.ts";
 import { applyTransactionCreate, applyTransactionDeleteLast } from "./transactionCommands.ts";
@@ -95,6 +96,12 @@ function applyPendingConfirmation(ctx: ActionCtx, pending: PendingConfirmation):
       return applyBudgetSet(ctx, pending);
     case "budgetDelete":
       return applyBudgetDelete(ctx, pending);
+    case "recurringSet":
+      return applyRecurringSet(ctx, pending);
+    case "recurringDelete":
+      return applyRecurringDelete(ctx, pending);
+    case "recurringPaid":
+      return applyRecurringPaid(ctx, pending);
     case "transactionDeleteLast":
       return applyTransactionDeleteLast(ctx);
     case "transactionCreate":

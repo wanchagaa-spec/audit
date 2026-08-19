@@ -104,6 +104,14 @@ export type PendingConfirmation =
   // still set the budget for the month the user was actually looking at.
   | { kind: "budgetSet"; categoryId: string; month: string; limitAmount: number }
   | { kind: "budgetDelete"; categoryId: string; month: string }
+  // Recurring monthly bills (PLAN.md 17.59). recurringPaid carries the whole
+  // bill rather than just its id, because confirming it both records the
+  // payment and writes the expense — and re-reading the sheet between the
+  // question and the answer to recover the amount would let a figure change
+  // underneath a confirmation the user already read.
+  | { kind: "recurringSet"; name: string; amount: number; dayOfMonth: number; categoryId: string }
+  | { kind: "recurringDelete"; name: string }
+  | { kind: "recurringPaid"; recurringId: string; name: string; amount: number; categoryId: string; month: string }
   // PLAN.md 17.9: money logging no longer saves immediately, even for an
   // unambiguous message — always confirms first, same as every other
   // create/delete action already did. `attribution` is resolved once, at

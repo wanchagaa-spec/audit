@@ -58,6 +58,13 @@ class FakeExecutionContext {
 
 const sheetRows = []; // simulates the Transactions tab
 const budgetRows = []; // simulates the Budgets tab
+const recurringRows = []; // simulates the Recurring tab (PLAN.md 17.59)
+// Gated like diaryTabExists: the tabs are created lazily on first use, and a
+// mock that always reported them present would never exercise that path —
+// which is the whole mechanism keeping this safe for books that predate the
+// feature.
+let recurringTabsExist = false;
+const recurringPaidRows = []; // simulates the RecurringPaid tab
 const replies = []; // captures what would have been sent back to LINE
 const pushes = []; // captures push messages (the reply-token-expired fallback)
 
@@ -244,6 +251,8 @@ function sheetValuesForRange(range) {
     tab === "Transactions" ? sheetRows
     : tab === "Budgets" ? budgetRows
     : tab === "Diary" ? diaryRows
+    : tab === "Recurring" ? recurringRows
+    : tab === "RecurringPaid" ? recurringPaidRows
     : /^Shifts-\d{4}-\d{2}$/.test(tab) ? (shiftGridStore[tab] ?? [])
     : null;
   if (store === null) throw new Error(`test mock: unhandled sheet tab "${tab}"`);
@@ -314,6 +323,12 @@ globalThis.fetch = async (url, init = {}) => {
           // has actually been created, same gating as the .title variant
           // of this same endpoint above.
           ...(diaryTabExists ? [{ properties: { sheetId: 100, title: "Diary" } }] : []),
+          ...(recurringTabsExist
+            ? [
+                { properties: { sheetId: 200, title: "Recurring" } },
+                { properties: { sheetId: 201, title: "RecurringPaid" } },
+              ]
+            : []),
         ],
       }),
       { status: 200 }
@@ -321,6 +336,18 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.includes(":batchUpdate")) {
     const body = init.body ? JSON.parse(init.body) : {};
+    // Careful: this branch also catches "/values:batchUpdate", which is a
+    // different endpoint — ensureRecurringTabs writes both its headers
+    // through it in one call. Checked before the requests below, which that
+    // endpoint's body does not have.
+    if ((body.data ?? []).some((d) => String(d.range).startsWith("Recurring"))) {
+      recurringTabsExist = true;
+      return new Response(JSON.stringify({}), { status: 200 });
+    }
+    if ((body.requests ?? []).some((r) => r.addSheet?.properties?.title?.startsWith("Recurring"))) {
+      recurringTabsExist = true;
+      return new Response(JSON.stringify({}), { status: 200 });
+    }
     const deleteReq = (body.requests ?? []).find((r) => r.deleteDimension);
     if (deleteReq) {
       const { sheetId, startIndex, endIndex } = deleteReq.deleteDimension.range;
@@ -328,7 +355,11 @@ globalThis.fetch = async (url, init = {}) => {
       // matching the real sheet's row 2 = index 0 offset already applied
       // by the real code under test — sheetId tells the two sheets' delete
       // requests apart, same as a real spreadsheet would.
-      const target = sheetId === 100 ? diaryRows : sheetId === 2 ? budgetRows : sheetRows;
+      const target =
+        sheetId === 100 ? diaryRows
+        : sheetId === 200 ? recurringRows
+        : sheetId === 2 ? budgetRows
+        : sheetRows;
       target.splice(startIndex - 1, endIndex - startIndex);
     }
     return new Response(JSON.stringify({}), { status: 200 });
@@ -349,6 +380,18 @@ globalThis.fetch = async (url, init = {}) => {
   if (u.includes("/values:batchGet?")) {
     sheetsValueReadRequests++;
     const ranges = new URL(u).searchParams.getAll("ranges");
+    // A range naming a sheet that does not exist fails the *whole* request
+    // with a 400 in the real API — it does not come back as an empty range.
+    // That is exactly what ensureRecurringTabs guards against for books
+    // created before the feature existed, and a mock that answered "empty"
+    // instead would let that guard be deleted without a single test noticing.
+    const missing = ranges.find((r) => !recurringTabsExist && r.startsWith("Recurring"));
+    if (missing) {
+      return new Response(
+        JSON.stringify({ error: { code: 400, message: `Unable to parse range: ${missing}`, status: "INVALID_ARGUMENT" } }),
+        { status: 400 }
+      );
+    }
     const valueRanges = ranges.map((range) => {
       const values = sheetValuesForRange(range);
       return values.length > 0 ? { range, values } : { range };
@@ -382,6 +425,26 @@ globalThis.fetch = async (url, init = {}) => {
     budgetRows[rowNumber - 2] = body.values[0]; // -2: 1-based row, minus the header
     return new Response(JSON.stringify({}), { status: 200 });
   }
+  // Recurring-bill writes (PLAN.md 17.59). ensureRecurringTabs writes both
+  // headers through the values:batchUpdate endpoint rather than two PUTs,
+  // which is the one shape that differs from the Budgets block above.
+  if (u.includes("Recurring!A1:append")) {
+    const body = JSON.parse(init.body);
+    recurringRows.push(...body.values);
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  if (u.includes("RecurringPaid!A1:append")) {
+    const body = JSON.parse(init.body);
+    recurringPaidRows.push(...body.values);
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
+  const recurringRowUpdateMatch = u.match(/Recurring!A(\d+):F\1\?valueInputOption=RAW/);
+  if (recurringRowUpdateMatch) {
+    const rowNumber = Number(recurringRowUpdateMatch[1]);
+    const body = JSON.parse(init.body);
+    recurringRows[rowNumber - 2] = body.values[0]; // -2: 1-based row, minus the header
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
   if (u.includes("Transactions!A1:append")) {
     if (simulateTransactionAppendFailureOnce) {
       simulateTransactionAppendFailureOnce = false;
@@ -395,7 +458,7 @@ globalThis.fetch = async (url, init = {}) => {
     sheetRows.push(...body.values);
     return new Response(JSON.stringify({}), { status: 200 });
   }
-  const singleRangeRead = u.match(/\/values\/((?:Transactions|Budgets|Diary)![A-Z]+\d+:[A-Z]+\d*)$/);
+  const singleRangeRead = u.match(/\/values\/((?:Transactions|Budgets|Diary|Recurring|RecurringPaid)![A-Z]+\d+:[A-Z]+\d*)$/);
   if (singleRangeRead) {
     sheetsValueReadRequests++;
     return new Response(JSON.stringify({ values: sheetValuesForRange(singleRangeRead[1]) }), { status: 200 });
@@ -848,6 +911,7 @@ globalThis.fetch = async (url, init = {}) => {
     diaryTabMetaCalls += 1;
     const titles = [
       ...(diaryTabExists ? ["Diary"] : []),
+      ...(recurringTabsExist ? ["Recurring", "RecurringPaid"] : []),
       ...Array.from(shiftTabsCreated),
     ];
     return new Response(JSON.stringify({ sheets: titles.map((title) => ({ properties: { title } })) }), {
@@ -7086,6 +7150,206 @@ check(
   "both privacy pages list TMDB among the services data is sent to",
   surfacePrivacyThHtml.includes("TMDB") && surfacePrivacyEnHtml.includes("TMDB")
 );
+
+
+// ---- Recurring monthly bills (PLAN.md 17.59) ------------------------------
+// Rent, internet, phone: the fixed costs that come round whether or not you
+// think about them. A reference list, deliberately not an automation — the
+// bot never writes money on its own here, and never guesses whether a bill
+// is settled.
+
+recurringRows.length = 0;
+recurringPaidRows.length = 0;
+sheetRows.length = 0;
+
+// A book that predates the feature has neither tab. The summary names their
+// ranges in the same batchGet as the transactions, and a batchGet naming a
+// missing sheet 400s the whole request — so without the lazy create running
+// first, this would break the summary for every existing account rather
+// than merely omit a section.
+recurringTabsExist = false;
+await kv.delete(`recurring-tabs:fake-sheet-id`);
+const summaryOnOldBook = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  // A 400 on the batchGet surfaces as the generic apology, not as a summary,
+  // so the heading is what tells the two apart.
+  "the month summary works on a book that has no Recurring tabs yet",
+  summaryOnOldBook.includes("สรุปเดือนนี้") && recurringTabsExist
+);
+
+const setNetReply = await handleTextMessage(env, lineUserId, "ตั้งค่าใช้จ่ายประจำ ค่าเน็ต 599", origin);
+check(
+  "setting a recurring bill asks to confirm before writing anything",
+  setNetReply.includes("ค่าเน็ต") && setNetReply.includes("599") && setNetReply.includes("ใช่ไหม") &&
+    recurringRows.length === 0
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("confirming writes one row", recurringRows.length === 1 && recurringRows[0][2] === "ค่าเน็ต");
+
+// The due day must not be mistaken for the price. Taking the last number in
+// the string — the obvious implementation — would file rent at 5 baht.
+const setRentReply = await handleTextMessage(
+  env, lineUserId, "ตั้งค่าใช้จ่ายประจำ ค่าเช่าบ้าน 6000 ทุกวันที่ 5", origin
+);
+check(
+  "a due day is read as a day, not as the amount",
+  setRentReply.includes("6,000") && setRentReply.includes("ทุกวันที่ 5")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("both bills are stored", recurringRows.length === 2);
+
+// Same name again replaces the figure rather than stacking a second row the
+// summary would then count twice.
+const raiseReply = await handleTextMessage(env, lineUserId, "ตั้งค่าใช้จ่ายประจำ ค่าเน็ต 699", origin);
+check("re-setting a bill says it replaces the old figure", raiseReply.includes("จะทับของเดิม"));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and it updates in place instead of adding a row",
+  recurringRows.length === 2 && recurringRows.find((r) => r[2] === "ค่าเน็ต")[3] === 699
+);
+
+const listReply = await handleTextMessage(env, lineUserId, "ค่าใช้จ่ายประจำ", origin);
+check(
+  "the list shows every bill, the total, and what is still unpaid",
+  listReply.includes("ค่าเน็ต") && listReply.includes("ค่าเช่าบ้าน") &&
+    listReply.includes("6,699") && listReply.includes("ยังไม่จ่าย")
+);
+
+// ---- The summary block ----------------------------------------------------
+const summaryWithBills = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "the month summary reports the recurring total and names what is outstanding",
+  summaryWithBills.includes("ค่าใช้จ่ายประจำเดือนนี้") && summaryWithBills.includes("6,699") &&
+    summaryWithBills.includes("ค่าเน็ต") && summaryWithBills.includes("ค่าเช่าบ้าน")
+);
+// Last month is a closed record; "ยังไม่จ่าย" about it would read as a debt
+// still owed rather than as history.
+const recurringLastMonthSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนที่แล้ว", origin);
+check("last month's summary carries no recurring block", !recurringLastMonthSummary.includes("ค่าใช้จ่ายประจำเดือนนี้"));
+
+// ---- Marking one paid -----------------------------------------------------
+// One action, one confirmation, two effects — and the confirmation names
+// both, so nothing is written silently.
+const rowsBeforePaid = sheetRows.length;
+const paidPrompt = await handleTextMessage(env, lineUserId, "จ่ายค่าเน็ตแล้ว", origin);
+check(
+  "marking a bill paid asks to confirm, and says it will log the expense too",
+  paidPrompt.includes("รายจ่าย") && paidPrompt.includes("ใช่ไหม") &&
+    sheetRows.length === rowsBeforePaid && recurringPaidRows.length === 0
+);
+const paidReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming logs a real transaction and ticks the bill off",
+  sheetRows.length === rowsBeforePaid + 1 && recurringPaidRows.length === 1 &&
+    paidReply.includes("จ่ายเดือนนี้แล้ว")
+);
+check(
+  "the logged row is an ordinary expense, with the bill's own amount",
+  sheetRows.at(-1)[2] === "expense" && Number(sheetRows.at(-1)[3]) === 699
+);
+
+// If the money fails to save, the bill must not be ticked off: the summary
+// would then report it settled with nothing behind it, which is the one
+// wrong answer this feature can give that the user cannot see.
+await handleTextMessage(env, lineUserId, "จ่ายค่าเช่าบ้านแล้ว", origin);
+simulateTransactionAppendFailureOnce = true;
+const rentId = recurringRows.find((x) => x[2] === "ค่าเช่าบ้าน")[0];
+let saveThrew = false;
+// A failing append propagates out of handleTextMessage — the webhook handler
+// is what turns it into an apology — so the assertion is that it threw *and*
+// nothing was ticked, not that some particular text came back.
+try {
+  await handleTextMessage(env, lineUserId, "ใช่", origin);
+} catch {
+  saveThrew = true;
+}
+check(
+  "a failed save leaves the bill unpaid rather than ticking it off anyway",
+  saveThrew && !recurringPaidRows.some((r) => r[0] === rentId)
+);
+
+// Idempotent: a double-tap must not make the summary think two months were
+// settled, or log the expense twice.
+const againReply = await handleTextMessage(env, lineUserId, "จ่ายค่าเน็ตแล้ว", origin);
+check(
+  "paying the same bill twice in a month is refused, not double-counted",
+  againReply.includes("จ่ายแล้ว") && recurringPaidRows.length === 1 && sheetRows.length === rowsBeforePaid + 1
+);
+
+const summaryAfterPaid = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "the summary now counts only the rest as outstanding",
+  summaryAfterPaid.includes("ยังไม่จ่าย") && summaryAfterPaid.includes("ค่าเช่าบ้าน") &&
+    !summaryAfterPaid.match(/ยังไม่จ่าย[^\n]*ค่าเน็ต/)
+);
+
+await handleTextMessage(env, lineUserId, "จ่ายค่าเช่าบ้านแล้ว", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+const allPaidSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check("with everything settled it says so instead of listing nothing", allPaidSummary.includes("จ่ายครบแล้ว"));
+
+// ---- Deleting -------------------------------------------------------------
+const deletePrompt = await handleTextMessage(env, lineUserId, "ลบค่าใช้จ่ายประจำ ค่าเน็ต", origin);
+check("deleting confirms first", deletePrompt.includes("ใช่ไหม") && recurringRows.length === 2);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("and then removes the row", recurringRows.length === 1 && recurringRows[0][2] === "ค่าเช่าบ้าน");
+
+const missingReply = await handleTextMessage(env, lineUserId, "ลบค่าใช้จ่ายประจำ ค่าที่ไม่มีอยู่", origin);
+check("deleting something that was never set says so plainly", missingReply.includes("ไม่เจอ"));
+
+// ---- Nothing set up at all ------------------------------------------------
+// The summary is the most-read message this bot sends. Someone who never
+// touched this feature must see exactly what they always saw.
+recurringRows.length = 0;
+recurringPaidRows.length = 0;
+const plainSummary = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check(
+  "with no bills set up the summary is untouched",
+  !plainSummary.includes("ค่าใช้จ่ายประจำ") && !plainSummary.includes("ยังไม่จ่าย")
+);
+const emptyListReply = await handleTextMessage(env, lineUserId, "ค่าใช้จ่ายประจำ", origin);
+check("and the list explains how to add one", emptyListReply.includes("ยังไม่ได้ตั้ง") && emptyListReply.includes("ค่าเน็ต 599"));
+
+// A "จ่าย...แล้ว" naming something that was never a recurring bill gets a
+// harmless answer rather than a wrong action — the reason that looser
+// pattern is checked last.
+const strayPaidReply = await handleTextMessage(env, lineUserId, "จ่ายค่าอะไรก็ไม่รู้แล้ว", origin);
+check("a stray 'paid X' about an unknown bill does nothing", strayPaidReply.includes("ไม่เจอ") && recurringPaidRows.length === 0);
+
+// The refusal above is promptRecurringPaid's, which short-circuits before
+// anything is written — so it does not exercise markRecurringPaid's own
+// guard at all. That guard is the one that holds if two confirmations ever
+// resolve against the same bill (a stale pending confirmed after another
+// path already ticked it), so it gets driven directly.
+const { markRecurringPaid: markPaidDirect } = await import("../src/sheets.ts");
+recurringPaidRows.length = 0;
+await markPaidDirect("test-access-token", "fake-sheet-id", kv, "bill-id-1", "2026-08");
+await markPaidDirect("test-access-token", "fake-sheet-id", kv, "bill-id-1", "2026-08");
+check("marking the same bill paid twice writes one row, not two", recurringPaidRows.length === 1);
+await markPaidDirect("test-access-token", "fake-sheet-id", kv, "bill-id-1", "2026-09");
+check("but the next month is a separate payment", recurringPaidRows.length === 2);
+recurringPaidRows.length = 0;
+
+// ---- The AI reaches the same answers --------------------------------------
+simulateInterpreterResult = { intent: "recurring_set", recurringName: "ค่าโทรศัพท์", recurringAmount: 400, recurringDay: 12 };
+const aiSetReply = await handleTextMessage(env, lineUserId, "ทุกเดือนต้องจ่ายค่าโทรศัพท์สี่ร้อย วันที่ 12", origin);
+check("the AI's recurring_set intent reaches the same confirmation", aiSetReply.includes("ค่าโทรศัพท์") && aiSetReply.includes("ทุกวันที่ 12"));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("and saves the same way", recurringRows.length === 1 && Number(recurringRows[0][4]) === 12);
+
+simulateInterpreterResult = { intent: "recurring_list" };
+const aiListReply = await handleTextMessage(env, lineUserId, "มีบิลอะไรต้องจ่ายบ้าง", origin);
+check("the AI's recurring_list intent lists them", aiListReply.includes("ค่าโทรศัพท์"));
+
+// A day outside 1-31 is not a day. Dropped rather than rejecting the whole
+// intent, since the bill itself is still perfectly usable without one.
+simulateInterpreterResult = { intent: "recurring_set", recurringName: "ค่าประกัน", recurringAmount: 1200, recurringDay: 99 };
+const aiBadDayReply = await handleTextMessage(env, lineUserId, "ค่าประกันเดือนละพันสอง", origin);
+check(
+  "an impossible due day is dropped, not treated as a day and not fatal",
+  aiBadDayReply.includes("ค่าประกัน") && !aiBadDayReply.includes("ทุกวันที่")
+);
+simulateInterpreterResult = null;
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

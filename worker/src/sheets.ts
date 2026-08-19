@@ -46,6 +46,13 @@ async function sheetsFetch(accessToken: string, path: string, init: RequestInit 
 const TRANSACTIONS_RANGE = "Transactions!A2:J";
 const BUDGETS_RANGE = "Budgets!A2:D";
 const DIARY_RANGE = "Diary!A2:E";
+// Recurring monthly bills (PLAN.md 17.59). Two tabs rather than one because
+// a definition and a payment are different things with different lifetimes:
+// "ค่าเน็ต 599 ทุกวันที่ 5" is set once and read every month, while "paid it
+// for August" is one row per bill per month. That is exactly the shape
+// Budgets already uses, so upsert/delete follow the same code.
+const RECURRING_RANGE = "Recurring!A2:F";
+const RECURRING_PAID_RANGE = "RecurringPaid!A2:C";
 
 /** Fetches several ranges in one HTTP request. Results come back positionally
  * — `valueRanges[i]` is `ranges[i]` — which is the documented correspondence
@@ -333,6 +340,36 @@ export async function readTransactionsForMonth(
 ): Promise<TransactionRow[]> {
   const rows = await readTransactionsFrom(accessToken, spreadsheetId, kv, month);
   return rows.filter((r) => r.date?.startsWith(month));
+}
+
+/**
+ * One month's spending, its recurring bills and their payment records, in
+ * one HTTP request (PLAN.md 17.59) — for "สรุปเดือนนี้".
+ *
+ * The recurring ranges ride along in the transactions batchGet rather than
+ * costing a request of their own. `ensureRecurringTabs` has to run first,
+ * though, and not only to create the tabs on a book that predates the
+ * feature: a batchGet naming a range on a sheet that does not exist fails
+ * the *whole* request, so without it the summary would break for every
+ * existing book rather than merely miss a section. It is KV-cached, so the
+ * guard costs nothing after the first call.
+ */
+export async function readMonthSummaryData(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  month: string
+): Promise<{ transactions: TransactionRow[]; recurring: RecurringRow[]; paid: RecurringPaidRow[] }> {
+  await ensureRecurringTabs(accessToken, spreadsheetId, kv);
+  const { transactions, extras } = await readTransactionsFromMonth(accessToken, spreadsheetId, kv, month, [
+    RECURRING_RANGE,
+    RECURRING_PAID_RANGE,
+  ]);
+  return {
+    transactions: transactions.filter((r) => r.date?.startsWith(month)),
+    recurring: parseRecurringRows(extras[0]),
+    paid: parseRecurringPaidRows(extras[1]),
+  };
 }
 
 /** One month's spending and this month's limits, in one HTTP request — for
@@ -871,5 +908,190 @@ export async function saveShiftGrid(
   await sheetsFetch(accessToken, `/${spreadsheetId}/values/${shiftsDataRange(monthKey)}?valueInputOption=RAW`, {
     method: "PUT",
     body: JSON.stringify({ values: rows }),
+  });
+}
+
+
+// ---- Recurring monthly bills (PLAN.md 17.59) -------------------------------
+//
+// A reference list, not an automation. Nothing here ever writes a
+// transaction on its own: the bot records what you *said* you pay every
+// month, and the summary reports which of those have been paid this month
+// and which have not. Marking one paid is an explicit act by the user (see
+// recurringCommands.ts) — the same "money is never decided for you" rule the
+// rest of this codebase follows.
+//
+// The two tabs are created lazily and cached in KV, exactly like Budgets and
+// Diary, which is what keeps this safe for books that already exist: they
+// get the tabs the first time the feature is used, and a book whose tabs
+// were deleted by hand recovers on the next call.
+
+const RECURRING_HEADERS = ["id", "categoryId", "name", "amount", "dayOfMonth", "createdAt"];
+const RECURRING_PAID_HEADERS = ["recurringId", "month", "paidAt"];
+
+export interface RecurringRow {
+  id: string;
+  categoryId: string;
+  name: string;
+  amount: number;
+  /** 1–31, or 0 when the user did not say. Zero means "sometime this month",
+   * which is a real answer and not the same as the 1st. */
+  dayOfMonth: number;
+}
+
+export interface RecurringPaidRow {
+  recurringId: string;
+  month: string;
+}
+
+async function ensureRecurringTabs(accessToken: string, spreadsheetId: string, kv: KVNamespace): Promise<void> {
+  const cacheKey = `recurring-tabs:${spreadsheetId}`;
+  if (await kv.get(cacheKey)) return;
+
+  const meta = await sheetsFetch(accessToken, `/${spreadsheetId}?fields=sheets.properties.title`);
+  const titles: string[] = (meta.sheets ?? []).map((s: any) => s.properties.title);
+  const missing = ["Recurring", "RecurringPaid"].filter((t) => !titles.includes(t));
+  if (missing.length > 0) {
+    // Both in one batchUpdate rather than a request each — they are always
+    // created together, and a book that ended up with only one of them would
+    // fail every read from then on.
+    await sheetsFetch(accessToken, `/${spreadsheetId}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({ requests: missing.map((title) => ({ addSheet: { properties: { title } } })) }),
+    });
+  }
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({
+      valueInputOption: "RAW",
+      data: [
+        { range: "Recurring!A1:F1", values: [RECURRING_HEADERS] },
+        { range: "RecurringPaid!A1:C1", values: [RECURRING_PAID_HEADERS] },
+      ],
+    }),
+  });
+  await kv.put(cacheKey, "1");
+}
+
+function parseRecurringRows(raw: string[][]): RecurringRow[] {
+  return raw
+    .filter((r) => r[0] && r[2])
+    .map((r) => ({
+      id: r[0],
+      categoryId: r[1] ?? "",
+      name: r[2],
+      amount: Number(r[3]) || 0,
+      // A blank, a stray label, or a number outside 1–31 all mean "no day
+      // given" rather than a day to be guessed at.
+      dayOfMonth: Number(r[4]) >= 1 && Number(r[4]) <= 31 ? Number(r[4]) : 0,
+    }));
+}
+
+function parseRecurringPaidRows(raw: string[][]): RecurringPaidRow[] {
+  return raw.filter((r) => r[0] && r[1]).map((r) => ({ recurringId: r[0], month: r[1] }));
+}
+
+/** Both tabs in one request. The summary needs them together and separately
+ * they are useless — a definition with no payment record cannot say what is
+ * outstanding, and a payment record alone has no name or amount. */
+export async function readRecurringWithPaid(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace
+): Promise<{ recurring: RecurringRow[]; paid: RecurringPaidRow[] }> {
+  await ensureRecurringTabs(accessToken, spreadsheetId, kv);
+  const [recurringRaw, paidRaw] = await sheetsBatchGet(accessToken, spreadsheetId, [
+    RECURRING_RANGE,
+    RECURRING_PAID_RANGE,
+  ]);
+  return { recurring: parseRecurringRows(recurringRaw), paid: parseRecurringPaidRows(paidRaw) };
+}
+
+/** One entry per name: setting "ค่าเน็ต" again replaces the existing figure
+ * rather than stacking a second row the summary would then count twice.
+ * Matched case-insensitively on the trimmed name, since that is how a person
+ * refers to it in chat. */
+export async function upsertRecurring(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  entry: { categoryId: string; name: string; amount: number; dayOfMonth: number }
+): Promise<{ replaced: boolean }> {
+  await ensureRecurringTabs(accessToken, spreadsheetId, kv);
+  const [rawRows] = await sheetsBatchGet(accessToken, spreadsheetId, [RECURRING_RANGE]);
+  const needle = entry.name.trim().toLowerCase();
+  const rawIndex = rawRows.findIndex((r) => String(r[2] ?? "").trim().toLowerCase() === needle);
+
+  if (rawIndex === -1) {
+    await sheetsFetch(accessToken, `/${spreadsheetId}/values/Recurring!A1:append?valueInputOption=RAW`, {
+      method: "POST",
+      body: JSON.stringify({
+        values: [[
+          crypto.randomUUID(),
+          entry.categoryId,
+          entry.name,
+          entry.amount,
+          entry.dayOfMonth || "",
+          new Date().toISOString(),
+        ]],
+      }),
+    });
+    return { replaced: false };
+  }
+
+  const rowNumber = rawIndex + 2; // +1 for the header, +1 for 1-based rows
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Recurring!A${rowNumber}:F${rowNumber}?valueInputOption=RAW`, {
+    method: "PUT",
+    // Keeps the existing id and createdAt — this is the same bill with a new
+    // figure, not a new one, and the id is what RecurringPaid rows point at.
+    body: JSON.stringify({
+      values: [[
+        rawRows[rawIndex][0],
+        entry.categoryId,
+        entry.name,
+        entry.amount,
+        entry.dayOfMonth || "",
+        rawRows[rawIndex][5] ?? new Date().toISOString(),
+      ]],
+    }),
+  });
+  return { replaced: true };
+}
+
+/** Returns false (not an error) when there was no such bill — the caller
+ * says "there wasn't one" rather than treating it as a failure. Payment
+ * rows for the deleted bill are left behind on purpose: they are harmless
+ * (nothing joins to a missing id) and deleting them would mean a second
+ * pass over a second tab for no visible benefit. */
+export async function deleteRecurring(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  name: string
+): Promise<boolean> {
+  await ensureRecurringTabs(accessToken, spreadsheetId, kv);
+  const [rawRows] = await sheetsBatchGet(accessToken, spreadsheetId, [RECURRING_RANGE]);
+  const needle = name.trim().toLowerCase();
+  const rawIndex = rawRows.findIndex((r) => String(r[2] ?? "").trim().toLowerCase() === needle);
+  if (rawIndex === -1) return false;
+  await deleteSheetRow(accessToken, spreadsheetId, "Recurring", rawIndex);
+  return true;
+}
+
+/** Idempotent: marking the same bill paid twice in a month leaves one row,
+ * so a double-tap cannot make the summary think two months were settled. */
+export async function markRecurringPaid(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  recurringId: string,
+  month: string
+): Promise<void> {
+  await ensureRecurringTabs(accessToken, spreadsheetId, kv);
+  const [rawRows] = await sheetsBatchGet(accessToken, spreadsheetId, [RECURRING_PAID_RANGE]);
+  if (rawRows.some((r) => r[0] === recurringId && r[1] === month)) return;
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/RecurringPaid!A1:append?valueInputOption=RAW`, {
+    method: "POST",
+    body: JSON.stringify({ values: [[recurringId, month, new Date().toISOString()]] }),
   });
 }
