@@ -731,12 +731,14 @@ parameter — sending one is a 400.
   both from the same settings page; the header keeps the credential out of the URL, which is
   the part of a request that ends up in proxy logs, error messages and anything recording
   "what was requested".
-- **Not verified against the live API.** The environment this was built in blocks
-  `api.themoviedb.org` at the egress proxy, so no call here has ever run for real; the tests
-  drive a mock encoding the same assumptions as the code and therefore cannot catch a wrong
-  path or parameter name. Check it against a real key before relying on it. Provider ids for
-  the smaller Thai services (WeTV, iQIYI, TrueID) are left out for the same reason — a wrong
-  id fails silently, filtering out a catalogue with no error.
+- **Confirmed working against the live API** (PLAN.md 17.62). Until that, this was the largest
+  unknown in the codebase: the environment it was built in blocks `api.themoviedb.org` at the
+  egress proxy, so the tests drive a mock encoding the same assumptions as the code and could
+  never have caught a wrong path or parameter name. Bearer auth, the base URL, the response
+  shapes and the listing endpoints are now known good rather than assumed. Provider ids for
+  the smaller Thai services (WeTV, iQIYI, TrueID) remain the one part taken on trust and are
+  still left out — a wrong id fails silently, filtering out a catalogue with no error, so they
+  should be checked against `/watch/providers/movie?watch_region=TH` before being added.
 
 ### Recurring monthly bills (PLAN.md 17.59)
 
@@ -758,6 +760,21 @@ writes a transaction on its own here, and never guesses whether a bill has been 
   outstanding. **Only this month's summary** — "ยังไม่จ่าย" about a month that has ended reads
   as a debt still owed rather than as history. With nothing set up the block is empty, so the
   most-read message this bot sends is byte-for-byte unchanged for anyone not using this.
+
+**Due-date reminders ride in the 7:00 briefing** (PLAN.md 17.61). 17.59 deliberately stopped
+short of reminders because a reminder normally means a LINE push, and pushes are the one charged
+thing this bot does — 17.54 had just made the morning briefing opt-in to reduce them. But that
+briefing is already being pushed to everyone opted in, so a due-bill line costs no extra push at
+all, only one more Sheets read per person per day. That is why this became worth doing later and
+was not worth doing then.
+
+Two states are raised, both actionable: due today, and past due and still unpaid. A bill with no
+due date is never raised — "sometime this month" is a real answer and there is no honest morning
+to raise it on; guessing one turns a daily message into noise. An overdue bill is repeated every
+morning until it is marked paid, which is the feature rather than an oversight: a reminder that
+gives up after a day can be missed by being busy on exactly the wrong morning. `effectiveDueDay`
+clamps a due day to one that exists in the month, so a bill due on the 31st comes due on 30 April
+and on the last day of February instead of never coming due at all.
 
 Why the bot does not work out for itself which bills are paid: it would have to match amounts
 against `Transactions`, and two bills of the same size in the same category are

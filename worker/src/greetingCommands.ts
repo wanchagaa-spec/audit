@@ -13,7 +13,8 @@ import { pushToLine } from "./line.ts";
 import { buildGoldBtcLines, fetchMarketSnapshot } from "./marketData.ts";
 import { fetchNewsSummary } from "./news.ts";
 import { applyPersona } from "./persona.ts";
-import { readAllDiaryEntries, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
+import { buildRecurringStatus, recurringDueLines } from "./recurring.ts";
+import { readAllDiaryEntries, readRecurringWithPaid, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
 import { getBotSettings, wantsMorningBriefing } from "./settings.ts";
 import { geocodeProvince, fetchWeatherSummary } from "./weather.ts";
 import {
@@ -204,6 +205,25 @@ async function buildTodayShiftLine(
   }
 }
 
+/** Due and overdue bills for the 7:00 briefing (PLAN.md 17.61). Best-effort
+ * like every other line here: a failure omits this one line rather than
+ * costing the user their whole briefing. */
+async function buildDueBillsLine(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  today: string
+): Promise<string> {
+  try {
+    const { recurring, paid } = await readRecurringWithPaid(accessToken, spreadsheetId, kv);
+    const status = buildRecurringStatus(recurring, paid, today.slice(0, 7));
+    return recurringDueLines(status, today).join("\n");
+  } catch (err) {
+    console.error("buildDueBillsLine failed", err);
+    return "";
+  }
+}
+
 async function buildYesterdayDiaryLine(
   env: Env,
   accessToken: string,
@@ -297,12 +317,19 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
             clientId: env.GOOGLE_CLIENT_ID,
             clientSecret: env.GOOGLE_CLIENT_SECRET,
           });
-          const [calendarLine, shiftLine, diaryLine] = await Promise.all([
+          const [calendarLine, shiftLine, billsLine, diaryLine] = await Promise.all([
             buildTodayCalendarLine(accessToken, today),
             buildTodayShiftLine(accessToken, link.spreadsheetId, kv, today),
+            // Costs one more Sheets read per person per day, and no extra
+            // LINE push at all — this message was going out regardless, which
+            // is the whole reason a bill reminder is affordable here and was
+            // not affordable as its own notification (PLAN.md 17.59).
+            buildDueBillsLine(accessToken, link.spreadsheetId, kv, today),
             buildYesterdayDiaryLine(env, accessToken, link.spreadsheetId, kv, yesterday),
           ]);
-          for (const line of [calendarLine, shiftLine, diaryLine]) if (line) extras.push(line);
+          // Bills before the diary reflection: it is the only line here that
+          // asks the reader to go and do something today.
+          for (const line of [calendarLine, shiftLine, billsLine, diaryLine]) if (line) extras.push(line);
         } catch (err) {
           console.error("broadcastMorningBriefings: refreshing access token failed, sending base briefing only", lineUserId, err);
         }

@@ -1711,6 +1711,22 @@ calendarEvents.push({
   start: { dateTime: `${bangkokDateKey()}T09:00:00+07:00` },
   end: { dateTime: `${bangkokDateKey()}T10:00:00+07:00` },
 });
+// Two bills for the 7:00 reminder (PLAN.md 17.61): one due today, one that
+// came due earlier in the month and is still unpaid. Seeded before the
+// broadcast so the same push can be asserted on for both states.
+const broadcastTodayDay = Number(bangkokDateKey().slice(8, 10));
+recurringRows.length = 0;
+recurringPaidRows.length = 0;
+recurringRows.push(
+  ["bill-due-today", "utilities", "ค่าเน็ตรอบนี้", 599, String(broadcastTodayDay), new Date().toISOString()],
+  ["bill-no-day", "other-expense", "ค่าอะไรไม่รู้", 100, "", new Date().toISOString()],
+  ["bill-paid", "other-expense", "ค่าที่จ่ายแล้ว", 250, "1", new Date().toISOString()]
+);
+if (broadcastTodayDay > 1) {
+  recurringRows.push(["bill-overdue", "housing", "ค่าเช่ารอบนี้", 6000, "1", new Date().toISOString()]);
+}
+recurringPaidRows.push(["bill-paid", bangkokDateKey().slice(0, 7), new Date().toISOString()]);
+
 const yesterdayKeyForBroadcast = addDaysToDateKey(bangkokDateKey(), -1);
 diaryRows.push(["diary-broadcast-test-1", yesterdayKeyForBroadcast, "ทั่วไป", "เมื่อวานไปวิ่งออกกำลังกายมา", new Date().toISOString()]);
 
@@ -1741,6 +1757,24 @@ check(
     broadcastPushes[0]?.text.includes("เชียงใหม่") &&
     broadcastPushes[0]?.text.includes("°C")
 );
+check(
+  "the 07:00 briefing names a bill that comes due today",
+  broadcastPushes[0]?.text.includes("วันนี้ครบกำหนด") && broadcastPushes[0]?.text.includes("ค่าเน็ตรอบนี้")
+);
+// A bill already paid this month, and one with no due date at all, must both
+// stay out of it — the second because "sometime this month" has no honest
+// morning to be raised on, and a daily message people skim is worse than no
+// message at all.
+check(
+  "a bill already paid this month is not chased, and one with no due date is never raised",
+  !broadcastPushes[0]?.text.includes("ค่าที่จ่ายแล้ว") && !broadcastPushes[0]?.text.includes("ค่าอะไรไม่รู้")
+);
+if (broadcastTodayDay > 1) {
+  check(
+    "and one that came due earlier and is still unpaid is chased as overdue",
+    broadcastPushes[0]?.text.includes("เลยกำหนดแล้ว") && broadcastPushes[0]?.text.includes("ค่าเช่ารอบนี้")
+  );
+}
 check(
   "the broadcast includes today's real gold and bitcoin prices",
   broadcastPushes[0]?.text.includes("ทองคำ") && broadcastPushes[0]?.text.includes("บิตคอยน์")
@@ -7482,6 +7516,63 @@ check(
     freshSnapshot.shiftsExtraMonth?.monthKey === untouchedNext &&
     shiftTabsCreated.has(`Shifts-${untouchedMonth}`) &&
     shiftTabsCreated.has(`Shifts-${untouchedNext}`)
+);
+
+// ---- Due-bill reminders, month lengths and all (PLAN.md 17.61) -----------
+// Driven directly rather than through the briefing: the interesting cases are
+// specific calendar dates, and the briefing can only ever run on today's.
+const { recurringDueLines, effectiveDueDay, buildRecurringStatus: statusOf } = await import("../src/recurring.ts");
+
+const bill = (id, name, amount, day) => ({ id, categoryId: "other-expense", name, amount, dayOfMonth: day });
+
+// A bill due on the 31st would otherwise never come due in a 30-day month and
+// never at all in February — sitting unpaid and silent, the exact opposite of
+// what setting a due date is for.
+check(
+  "a due day past the end of a short month falls on that month's last day",
+  effectiveDueDay(31, "2026-02") === 28 &&
+    effectiveDueDay(31, "2026-04") === 30 &&
+    effectiveDueDay(31, "2026-03") === 31 &&
+    effectiveDueDay(29, "2028-02") === 29 // leap year, a real 29th
+);
+const lateBill = statusOf([bill("late", "ค่าบัตรเครดิต", 3000, 31)], [], "2026-04");
+check(
+  "so a 31st bill is raised on the 30th of April, not skipped",
+  recurringDueLines(lateBill, "2026-04-30").some((l) => l.includes("วันนี้ครบกำหนด") && l.includes("ค่าบัตรเครดิต"))
+);
+
+// Nothing due, nothing said — the briefing must not grow a section on the
+// ~28 mornings a month when there is nothing to act on.
+check(
+  "a morning with nothing due produces no lines at all",
+  recurringDueLines(statusOf([bill("a", "ค่าเน็ต", 599, 15)], [], "2026-04"), "2026-04-10").length === 0
+);
+
+// An overdue bill is repeated every morning until it is marked paid. That is
+// the feature: a reminder that gives up after a day can be missed by being
+// busy on exactly the wrong morning.
+const stillOwed = statusOf([bill("owed", "ค่าเน็ต", 599, 5)], [], "2026-04");
+check(
+  "an overdue bill keeps being raised on later mornings, not just the day after",
+  recurringDueLines(stillOwed, "2026-04-06").some((l) => l.includes("เลยกำหนดแล้ว")) &&
+    recurringDueLines(stillOwed, "2026-04-25").some((l) => l.includes("เลยกำหนดแล้ว"))
+);
+// ...and stops the moment it is marked paid.
+const settled = statusOf([bill("owed", "ค่าเน็ต", 599, 5)], [{ recurringId: "owed", month: "2026-04" }], "2026-04");
+check("marking it paid silences it", recurringDueLines(settled, "2026-04-25").length === 0);
+
+// Oldest first: the one that has been waiting longest is the one most worth
+// acting on today.
+const several = statusOf(
+  [bill("b1", "บิลวันที่สิบ", 100, 10), bill("b2", "บิลวันที่สาม", 200, 3), bill("b3", "บิลวันนี้", 300, 20)],
+  [],
+  "2026-04"
+);
+const severalLines = recurringDueLines(several, "2026-04-20").join("\n");
+check(
+  "due-today comes first, then overdue oldest-first",
+  severalLines.indexOf("บิลวันนี้") < severalLines.indexOf("บิลวันที่สาม") &&
+    severalLines.indexOf("บิลวันที่สาม") < severalLines.indexOf("บิลวันที่สิบ")
 );
 
 // shiftsOnDate is what turns two grids into an answer for one date, so it is

@@ -81,3 +81,68 @@ export function recurringSummaryBlock(status: RecurringStatus[]): string[] {
   lines.push(`ยังไม่จ่าย ${formatBaht(unpaid)} บาท — ${names}`);
   return lines;
 }
+
+// ---- The morning reminder (PLAN.md 17.61) ---------------------------------
+//
+// 17.59 deliberately stopped short of reminders, because a reminder normally
+// means a LINE push and pushes are the one charged thing this bot does. This
+// costs none: the 7:00 briefing is already being pushed to everyone opted in
+// (PLAN.md 17.54), so a due-bill line rides along in a message that was going
+// out anyway. That is the whole reason this is worth doing now and was not
+// worth doing then.
+
+/**
+ * The due day, clamped to a day that exists in `monthKey`.
+ *
+ * A bill due on the 31st would otherwise never come due in a 30-day month,
+ * and never at all in February — it would sit unpaid and silent, which is the
+ * exact opposite of what setting a due date is for. The last day of a short
+ * month is the honest reading of "the 31st" in that month.
+ */
+export function effectiveDueDay(dayOfMonth: number, monthKey: string): number {
+  if (dayOfMonth < 1) return 0;
+  const [year, month] = monthKey.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return Math.min(dayOfMonth, lastDay);
+}
+
+/**
+ * Bills worth mentioning this morning: due today, or past due and still
+ * unpaid.
+ *
+ * Bills with no due day never appear. "Sometime this month" is a real answer
+ * (see RecurringRow.dayOfMonth) and there is no honest day on which to raise
+ * it — guessing one would make the reminder noise, and noise in a daily
+ * message is how people learn to skim past it.
+ *
+ * An overdue bill is repeated every morning until it is marked paid. That is
+ * the feature, not an oversight: a reminder that gives up after one day is a
+ * reminder you can miss by being busy on exactly the wrong morning.
+ */
+export function recurringDueLines(status: RecurringStatus[], todayKey: string): string[] {
+  const monthKey = todayKey.slice(0, 7);
+  const todayDay = Number(todayKey.slice(8, 10));
+
+  const dueToday: RecurringStatus[] = [];
+  const overdue: Array<{ status: RecurringStatus; day: number }> = [];
+  for (const s of status) {
+    if (s.paid) continue;
+    const day = effectiveDueDay(s.entry.dayOfMonth, monthKey);
+    if (day === 0) continue;
+    if (day === todayDay) dueToday.push(s);
+    else if (day < todayDay) overdue.push({ status: s, day });
+  }
+  if (dueToday.length === 0 && overdue.length === 0) return [];
+
+  const lines: string[] = ["💸 บิลที่ต้องจ่าย:"];
+  for (const s of dueToday) {
+    lines.push(`• วันนี้ครบกำหนด ${s.entry.name} ${formatBaht(s.entry.amount)} บาท`);
+  }
+  // Sorted by how long they have been outstanding, oldest first — the one
+  // that has been waiting longest is the one most worth acting on.
+  for (const { status: s, day } of overdue.sort((a, b) => a.day - b.day)) {
+    lines.push(`• เลยกำหนดแล้ว ${s.entry.name} ${formatBaht(s.entry.amount)} บาท (ครบวันที่ ${day})`);
+  }
+  lines.push('จ่ายแล้วพิมพ์ "จ่าย<ชื่อบิล>แล้ว" ได้เลย');
+  return lines;
+}
