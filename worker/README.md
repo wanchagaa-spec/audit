@@ -740,6 +740,38 @@ parameter — sending one is a 400.
   still left out — a wrong id fails silently, filtering out a catalogue with no error, so they
   should be checked against `/watch/providers/movie?watch_region=TH` before being added.
 
+### Fixing a transaction that is not the newest (PLAN.md 17.63)
+
+Until this, the only remedy for a mistyped amount was `ลบรายการล่าสุด`, which reaches only the
+newest row. Log three more things after fat-fingering 600 for 60 and the only way to fix it was
+to open Google Sheets and edit the cell by hand — money being the one thing this bot could not
+correct, while diary, calendar and tasks all could.
+
+`/view` is now write-capable, the fourth such page after shifts, budgets and settings. Every row
+of the current month renders as a small form: date, category, amount, note.
+
+- **Editing lives on the page rather than in chat** because the hard part of correcting an entry
+  is saying *which* one, and a list you can see answers that by itself. In chat it would mean
+  matching on a keyword or an amount, and picking the wrong row is a silent, wrong change to
+  somebody's money.
+- **Two speeds, the shape the diary page settled on**: an edit saves immediately (it is
+  reversible by editing again); a delete goes through a confirm page naming the row (it is not).
+- **Every rejection re-renders with the stored row untouched** — a zero, negative or
+  non-numeric amount, a malformed date, an invented type, a category that does not match the
+  row's type. Refusing costs one retry; writing a substituted figure puts a wrong number in
+  somebody's accounts that nothing downstream can tell from a real one. The category select only
+  offers matching categories, but the check is repeated server-side: a form post is not a promise.
+- `rawText` and `createdAt` are carried through untouched. The first is what the user originally
+  typed and stays a record of that even after the parsed figure is corrected; the second says
+  when it was logged, which an edit does not change.
+- The row is found by id in the **raw** values response, never in a filtered list — a blank row
+  above the target would otherwise shift every index below it and silently edit a neighbour. Same
+  rule, and same reason, as `updateDiaryEntry`.
+- Neither operation touches the KV month-start hint, and neither needs to: editing a date never
+  moves a row physically, and the one case that could mislead a later read — editing a row *above*
+  the window into this month — leaves the boundary row's month equal to the month asked for, which
+  is exactly what `checkMonthWindow` rejects, forcing a rebuild.
+
 ### Recurring monthly bills (PLAN.md 17.59)
 
 Rent, internet, phone, instalments, insurance — the fixed costs that come round every month

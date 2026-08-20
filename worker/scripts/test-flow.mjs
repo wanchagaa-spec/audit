@@ -453,6 +453,15 @@ globalThis.fetch = async (url, init = {}) => {
     recurringRows[rowNumber - 2] = body.values[0]; // -2: 1-based row, minus the header
     return new Response(JSON.stringify({}), { status: 200 });
   }
+  // In-place edit of one transaction row (PLAN.md 17.63) — the same shape as
+  // the Budgets and Recurring row updates above, on the ten-column range.
+  const transactionRowUpdateMatch = u.match(/Transactions!A(\d+):J\1\?valueInputOption=RAW/);
+  if (transactionRowUpdateMatch) {
+    const rowNumber = Number(transactionRowUpdateMatch[1]);
+    const body = JSON.parse(init.body);
+    sheetRows[rowNumber - 2] = body.values[0]; // -2: 1-based row, minus the header
+    return new Response(JSON.stringify({}), { status: 200 });
+  }
   if (u.includes("Transactions!A1:append")) {
     if (simulateTransactionAppendFailureOnce) {
       simulateTransactionAppendFailureOnce = false;
@@ -7582,6 +7591,138 @@ check(
   "a date is looked up in the grid for its own month",
   onDate([twoMonthSnapshot.shifts, twoMonthSnapshot.shiftsExtraMonth], `${nextMonthKey}-01`).includes("เวรดึก") &&
     onDate([twoMonthSnapshot.shifts, twoMonthSnapshot.shiftsExtraMonth], `${shiftTodayKey.slice(0, 7)}-01`).length === 0
+);
+
+
+// ---- Editing a transaction that is not the newest (PLAN.md 17.63) --------
+// Until this, a mistyped amount could only be undone if it was still the
+// most recent row. Log three more things after fat-fingering 600 for 60 and
+// the only remedy was editing the Google Sheet by hand — money being the one
+// thing this bot could not correct, while diary, calendar and tasks all
+// could.
+
+const accountsUrl = `${origin}/view?token=${viewToken}`;
+const postAccounts = (fields) =>
+  worker.fetch(
+    new Request(accountsUrl, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+    }),
+    env,
+    new FakeExecutionContext()
+  );
+
+sheetRows.length = 0;
+const editToday = bangkokDateKey();
+// Three rows, and the one to fix is deliberately *not* the newest — that is
+// the whole case deleteMostRecentTransaction could never reach.
+sheetRows.push(
+  ["tx-typo", editToday, "expense", 600, "food", "ค่ากาแฟ", "ค่ากาแฟ 600", "unknown", "", `${editToday}T01:00:00.000Z`],
+  ["tx-later-1", editToday, "expense", 50, "food", "ข้าวเช้า", "ข้าวเช้า 50", "unknown", "", `${editToday}T02:00:00.000Z`],
+  ["tx-later-2", editToday, "expense", 80, "transport", "ค่ารถ", "ค่ารถ 80", "unknown", "", `${editToday}T03:00:00.000Z`]
+);
+
+const editablePage = await (await worker.fetch(new Request(accountsUrl), env, new FakeExecutionContext())).text();
+check(
+  "the accounts page renders every row as an editable form, not a read-only table",
+  editablePage.includes('name="op" value="update"') &&
+    editablePage.includes('value="tx-typo"') &&
+    editablePage.includes('name="amount"')
+);
+// A row cannot be an expense filed under an income category, so the select
+// must not offer one — a form that can produce an impossible row is a bug
+// waiting for someone to tab past it.
+check(
+  "the category select only offers categories matching the row's own type",
+  !editablePage.includes('<option value="salary"')
+);
+
+const fixedHtml = await (await postAccounts({
+  op: "update", id: "tx-typo", date: editToday, type: "expense", categoryId: "food", amount: "60", note: "ค่ากาแฟ",
+})).text();
+check(
+  "fixing an older row's amount saves it and says so",
+  fixedHtml.includes("บันทึกการแก้ไขแล้ว") && Number(sheetRows.find((r) => r[0] === "tx-typo")[3]) === 60
+);
+check(
+  "the rows around it are untouched",
+  sheetRows.length === 3 && Number(sheetRows.find((r) => r[0] === "tx-later-1")[3]) === 50
+);
+// rawText is what the user originally typed and stays a record of that even
+// after the parsed figure is corrected; createdAt says when it was logged,
+// which an edit does not change.
+check(
+  "the original typed text and the logged-at time are carried through untouched",
+  sheetRows.find((r) => r[0] === "tx-typo")[6] === "ค่ากาแฟ 600" &&
+    sheetRows.find((r) => r[0] === "tx-typo")[9] === `${editToday}T01:00:00.000Z`
+);
+
+// Every rejection re-renders with the stored row untouched. This is money:
+// refusing costs one retry, writing a substituted figure is a wrong number
+// in somebody's accounts that nothing downstream can tell from a real one.
+for (const [label, fields, expect] of [
+  ["a zero amount", { amount: "0" }, "มากกว่า 0"],
+  ["a negative amount", { amount: "-5" }, "มากกว่า 0"],
+  ["a non-numeric amount", { amount: "abc" }, "มากกว่า 0"],
+  ["a malformed date", { date: "not-a-date" }, "วันที่ไม่ถูกต้อง"],
+  ["a category that does not match the type", { categoryId: "salary" }, "หมวดไม่ตรง"],
+  ["an invented type", { type: "refund" }, "ประเภทรายการไม่ถูกต้อง"],
+]) {
+  const body = { op: "update", id: "tx-typo", date: editToday, type: "expense", categoryId: "food", amount: "60", note: "ค่ากาแฟ", ...fields };
+  const rejected = await (await postAccounts(body)).text();
+  check(
+    `${label} is refused and changes nothing`,
+    rejected.includes(expect) && Number(sheetRows.find((r) => r[0] === "tx-typo")[3]) === 60
+  );
+}
+
+// Deleting is the one irreversible action here, so it gets a confirm step —
+// the same two-speed shape the diary page settled on.
+const confirmPage = await (await worker.fetch(
+  new Request(`${accountsUrl}&confirmDelete=tx-later-1`), env, new FakeExecutionContext()
+)).text();
+check(
+  "deleting shows a confirm page naming the row, and deletes nothing yet",
+  confirmPage.includes("ลบรายการนี้?") && confirmPage.includes("ข้าวเช้า") && sheetRows.length === 3
+);
+const deletedHtml = await (await postAccounts({ op: "delete", id: "tx-later-1" })).text();
+check(
+  "confirming removes that row and only that row",
+  deletedHtml.includes("ลบรายการแล้ว") &&
+    sheetRows.length === 2 &&
+    !sheetRows.some((r) => r[0] === "tx-later-1") &&
+    sheetRows.some((r) => r[0] === "tx-typo") &&
+    sheetRows.some((r) => r[0] === "tx-later-2")
+);
+
+// A stale page — the row already gone from another tab — must say so rather
+// than claim this request did something.
+const goneHtml = await (await postAccounts({ op: "delete", id: "tx-later-1" })).text();
+check("deleting an already-deleted row says so instead of claiming success", goneHtml.includes("ไม่พบรายการนี้แล้ว"));
+const goneEditHtml = await (await postAccounts({
+  op: "update", id: "tx-later-1", date: editToday, type: "expense", categoryId: "food", amount: "10", note: "x",
+})).text();
+check("and editing one does the same", goneEditHtml.includes("ไม่พบรายการนี้แล้ว") && sheetRows.length === 2);
+const staleConfirm = await (await worker.fetch(
+  new Request(`${accountsUrl}&confirmDelete=tx-later-1`), env, new FakeExecutionContext()
+)).text();
+check("a stale confirm link falls back to the list rather than a dead end", staleConfirm.includes("ไม่พบรายการนี้แล้ว"));
+
+// The row is found by id in the *raw* values, never in a filtered list — a
+// blank row above the target would otherwise shift every index below it and
+// silently edit a neighbour (the bug updateDiaryEntry's comment exists for).
+sheetRows.length = 0;
+sheetRows.push(
+  [],
+  ["tx-below-blank", editToday, "expense", 999, "food", "ใต้แถวว่าง", "ใต้แถวว่าง 999", "unknown", "", `${editToday}T04:00:00.000Z`]
+);
+await postAccounts({
+  op: "update", id: "tx-below-blank", date: editToday, type: "expense", categoryId: "food", amount: "111", note: "ใต้แถวว่าง",
+});
+check(
+  "a blank row above the target does not shift the edit onto a neighbour",
+  Number(sheetRows.find((r) => r[0] === "tx-below-blank")[3]) === 111 && sheetRows[0].length === 0
 );
 
 console.log(`\n${pass} passed, ${fail} failed`);

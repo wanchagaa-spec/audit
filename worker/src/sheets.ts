@@ -1129,3 +1129,98 @@ export async function markRecurringPaid(
     body: JSON.stringify({ values: [[recurringId, month, new Date().toISOString()]] }),
   });
 }
+
+
+// ---- Editing a transaction that is not the newest (PLAN.md 17.63) --------
+//
+// Until this, the only remedy for a mistyped amount was
+// deleteMostRecentTransaction — which only reaches the newest row. Log three
+// more things after fat-fingering 600 for 60 and the only way to fix it was
+// to open Google Sheets and edit the cell by hand. Money is the core feature
+// of this bot and was the one thing it could not correct, while diary,
+// calendar and tasks all could.
+//
+// Both functions below find the row by id **in the raw values response**,
+// never in a filtered list — see updateDiaryEntry's comment for the bug that
+// rule exists to prevent (a blank row above the target silently shifts every
+// index below it, editing a neighbour instead).
+//
+// The same "no transactions in the Sheets API" race updateDiaryEntry
+// documents applies here: between the read and the write, a concurrent
+// delete from another tab can shift rows under this write. Milliseconds
+// wide on a single-user personal tool, and noted rather than pretended away.
+//
+// Neither touches the KV month-start hint, and neither needs to. Editing a
+// row's date never moves it physically, so the hint stays where it was; and
+// the one case that could mislead a later read — editing a row *above* the
+// window into this month — leaves the boundary row's own month equal to the
+// month asked for, which is exactly what checkMonthWindow rejects, forcing
+// a rebuild. A delete is already covered for the same reason (see the note
+// above readTransactionsFromMonth).
+
+export interface TransactionEdit {
+  date: string;
+  type: "income" | "expense";
+  amount: number;
+  categoryId: string;
+  note: string;
+}
+
+async function readTransactionRawRows(accessToken: string, spreadsheetId: string): Promise<string[][]> {
+  const data = await sheetsFetch(accessToken, `/${spreadsheetId}/values/${TRANSACTIONS_RANGE}`);
+  return data.values ?? [];
+}
+
+/** Returns false (not an error) when no row with this id exists — it may
+ * already have been deleted from another tab, and the caller says so rather
+ * than claiming an edit happened. */
+export async function updateTransaction(
+  accessToken: string,
+  spreadsheetId: string,
+  id: string,
+  updates: TransactionEdit
+): Promise<boolean> {
+  const rawRows = await readTransactionRawRows(accessToken, spreadsheetId);
+  const rawIndex = rawRows.findIndex((r) => r[0] === id);
+  if (rawIndex === -1) return false;
+
+  const existing = rawRows[rawIndex];
+  const rowNumber = rawIndex + 2; // +1 for the header row, +1 for 1-based rows
+  // rawText, addedBy, addedByName and createdAt are carried through
+  // untouched. rawText is what the user originally typed and stays a record
+  // of that even after the parsed figures are corrected; the attribution and
+  // timestamp describe who logged it and when, which an edit does not change.
+  const values = [[
+    id,
+    updates.date,
+    updates.type,
+    updates.amount,
+    updates.categoryId,
+    updates.note,
+    existing[6] ?? "",
+    existing[7] ?? "",
+    existing[8] ?? "",
+    existing[9] ?? "",
+  ]];
+  await sheetsFetch(accessToken, `/${spreadsheetId}/values/Transactions!A${rowNumber}:J${rowNumber}?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values }),
+  });
+  return true;
+}
+
+/** Returns the deleted row so the caller can name it in the confirmation,
+ * or null when the id is already gone — same already-deleted reasoning as
+ * updateTransaction. */
+export async function deleteTransactionById(
+  accessToken: string,
+  spreadsheetId: string,
+  id: string
+): Promise<TransactionRow | null> {
+  const rawRows = await readTransactionRawRows(accessToken, spreadsheetId);
+  const rawIndex = rawRows.findIndex((r) => r[0] === id);
+  if (rawIndex === -1) return null;
+  const [row] = parseTransactionRows([rawRows[rawIndex]]);
+  await deleteSheetRow(accessToken, spreadsheetId, "Transactions", rawIndex);
+  return row ?? null;
+}
