@@ -158,6 +158,28 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
     background: #16a34a; color: #fff; font-size: .92rem; font-family: inherit; font-weight: 600; cursor: pointer;
   }
   .save-notice { text-align: center; color: #16a34a; font-size: .85rem; margin: 0 0 1rem; }
+  /* /view accounts rows (PLAN.md 17.63) — one form per row, laid out to
+     stay tappable on a phone: date and category share a line, the amount
+     gets its own field wide enough to read at a glance. */
+  .tx-edit-form { padding: .6rem 0; border-bottom: 1px solid #eee; }
+  .tx-edit-form:last-child { border-bottom: none; padding-bottom: 0; }
+  .tx-edit-row { display: flex; gap: .4rem; margin-bottom: .4rem; flex-wrap: wrap; }
+  .tx-edit-row input[type="date"] { flex: none; width: 9rem; }
+  .tx-edit-row select { flex: 1; min-width: 7rem; }
+  .tx-edit-row .tx-amount { flex: none; width: 7rem; text-align: right; font-weight: 600; }
+  .tx-edit-form input, .tx-edit-form select {
+    padding: .45rem .55rem; border-radius: 8px; border: 1px solid #d8dade; font-size: .85rem; font-family: inherit;
+  }
+  .tx-edit-form input[type="text"] { width: 100%; margin-bottom: .45rem; }
+  .tx-edit-actions { display: flex; gap: .5rem; }
+  .tx-edit-actions button {
+    flex: 1; padding: .45rem; border-radius: 8px; border: none; background: #16a34a; color: #fff;
+    font-size: .82rem; font-family: inherit; cursor: pointer;
+  }
+  .tx-edit-actions a {
+    flex: none; padding: .45rem 1rem; text-align: center; border-radius: 8px; background: #fdecea;
+    color: #de350b; text-decoration: none; font-size: .82rem;
+  }
   .diary-edit-form { margin-bottom: 0; }
   .diary-edit-row { display: flex; gap: .5rem; margin-bottom: .4rem; }
   .diary-edit-row input[type="date"] { flex: none; width: 9.5rem; }
