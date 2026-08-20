@@ -68,7 +68,8 @@ function renderAccountsSummaryPage(
   token: string,
   monthLabel: string,
   monthTx: TransactionRow[],
-  notice?: string
+  notice?: string,
+  editId?: string | null
 ): string {
   const nav = { token, active: "accounts" as const };
 
@@ -120,8 +121,14 @@ function renderAccountsSummaryPage(
 
   const recentHtml = `<div class="card">
     <h2>รายการเดือนนี้</h2>
-    <p class="subtitle">แตะแก้ตัวเลข หมวด หรือวันที่ได้เลย แล้วกด "บันทึก"</p>
-    ${recent.map((r) => renderTransactionForm(token, r)).join("\n")}
+    <p class="subtitle">${editId ? 'แก้ไขแถวที่เลือกแล้วกด "บันทึก"' : 'กด "แก้" ท้ายแถวเพื่อแก้ไข'}</p>
+    ${editId ? `<form id="tx-edit" method="post" action="${accountsUrl(token)}"><input type="hidden" name="op" value="update" /><input type="hidden" name="id" value="${escapeHtml(editId)}" /></form>` : ""}
+    <div class="table-scroll"><table class="data-table tx-table">
+      <thead><tr><th>วันที่</th><th>หมวด</th><th>รายการ</th><th class="num">จำนวนเงิน</th><th></th></tr></thead>
+      <tbody>
+        ${recent.map((r) => (r.id === editId ? renderEditingRow(token, r) : renderReadOnlyRow(token, r))).join("\n")}
+      </tbody>
+    </table></div>
   </div>`;
 
   return pageShell(
@@ -136,27 +143,53 @@ ${recentHtml}
   );
 }
 
-/** One row, as a form. The amount is a number input rather than free text so
- * a phone offers the numeric keypad, but the value is still validated on the
- * way in — a browser hint is not a check. */
-function renderTransactionForm(token: string, r: TransactionRow): string {
-  const confirmUrl = `${accountsUrl(token)}&confirmDelete=${encodeURIComponent(r.id)}`;
+/** A normal row: values, then the two actions at the end of the line.
+ *
+ * Read-only until "แก้" is pressed, rather than every row being a live input
+ * at once (PLAN.md 17.64). A month of always-editable rows is a wall of
+ * form controls to scroll past when all anyone came to do is look, and it
+ * makes an accidental tap on a phone a silent change to a figure — the whole
+ * page becomes a hazard to read. */
+function renderReadOnlyRow(token: string, r: TransactionRow): string {
+  const label = escapeHtml(r.note || r.rawText || categoryLabel(r.categoryId));
+  const sign = r.type === "income" ? "+" : "-";
   const cls = r.type === "income" ? "income" : "expense";
-  return `<form method="post" action="${accountsUrl(token)}" class="tx-edit-form">
-    <input type="hidden" name="op" value="update" />
-    <input type="hidden" name="id" value="${escapeHtml(r.id)}" />
-    <input type="hidden" name="type" value="${escapeHtml(r.type)}" />
-    <div class="tx-edit-row">
-      <input type="date" name="date" value="${escapeHtml(r.date)}" />
-      <select name="categoryId">${categoryOptions(r.categoryId, r.type)}</select>
-      <input class="tx-amount ${cls}" type="number" name="amount" step="0.01" min="0" value="${r.amount}" inputmode="decimal" />
-    </div>
-    <input type="text" name="note" value="${escapeHtml(r.note)}" placeholder="รายละเอียด" />
-    <div class="tx-edit-actions">
-      <button type="submit">บันทึก</button>
-      <a href="${confirmUrl}">ลบ</a>
-    </div>
-  </form>`;
+  const editUrl = `${accountsUrl(token)}&edit=${encodeURIComponent(r.id)}`;
+  const confirmUrl = `${accountsUrl(token)}&confirmDelete=${encodeURIComponent(r.id)}`;
+  return `<tr>
+    <td>${escapeHtml(r.date)}</td>
+    <td>${escapeHtml(categoryLabel(r.categoryId))}</td>
+    <td class="note">${label}</td>
+    <td class="num ${cls}">${sign}${formatBaht(r.amount)}</td>
+    <td class="tx-actions"><a class="tx-edit-link" href="${editUrl}">แก้</a><a class="tx-delete-link" href="${confirmUrl}">ลบ</a></td>
+  </tr>`;
+}
+
+/**
+ * The one row being edited, as inputs in place.
+ *
+ * The inputs carry `form="tx-edit"` and the form itself sits above the
+ * table: HTML does not allow a <form> to wrap a group of <td>s, and putting
+ * one inside a single cell would collapse the row's alignment with every
+ * other row — which is the entire point of using a table here.
+ *
+ * The amount is a number input so a phone offers the numeric keypad, but it
+ * is still validated server-side on the way in: a browser hint is not a
+ * check, and this is money.
+ */
+function renderEditingRow(token: string, r: TransactionRow): string {
+  const cls = r.type === "income" ? "income" : "expense";
+  return `<tr class="tx-editing">
+    <td><input form="tx-edit" type="date" name="date" value="${escapeHtml(r.date)}" /></td>
+    <td><select form="tx-edit" name="categoryId">${categoryOptions(r.categoryId, r.type)}</select></td>
+    <td class="note"><input form="tx-edit" type="text" name="note" value="${escapeHtml(r.note)}" placeholder="รายละเอียด" /></td>
+    <td class="num"><input form="tx-edit" class="tx-amount ${cls}" type="number" name="amount" step="0.01" min="0" value="${r.amount}" inputmode="decimal" /></td>
+    <td class="tx-actions">
+      <input form="tx-edit" type="hidden" name="type" value="${escapeHtml(r.type)}" />
+      <button form="tx-edit" type="submit">บันทึก</button>
+      <a class="tx-cancel-link" href="${accountsUrl(token)}">ยกเลิก</a>
+    </td>
+  </tr>`;
 }
 
 /** Deleting is the one irreversible action here, so it gets its own page —
@@ -188,9 +221,12 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
 
   const month = bangkokMonthKey();
   const monthLabel = `เดือน ${month} · ข้อมูลล่าสุด ณ ${formatThaiDateLabel(bangkokDateKey())}`;
-  const renderMonth = async (notice?: string) => {
+  const renderMonth = async (notice?: string, editId?: string | null) => {
     const monthTx = await readTransactionsForMonth(session.accessToken, session.spreadsheetId, env.ACCOUNTS, month);
-    return html(renderAccountsSummaryPage(session.token, monthLabel, monthTx, notice));
+    // A row asked for by ?edit= that is no longer in the month falls back to
+    // the plain list — a stale link should not leave a row half-open.
+    const openId = editId && monthTx.some((r) => r.id === editId) ? editId : null;
+    return html(renderAccountsSummaryPage(session.token, monthLabel, monthTx, notice, openId));
   };
 
   if (request.method === "POST") {
@@ -257,7 +293,7 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
       if (target) return html(renderConfirmDeletePage(session.token, target));
       return renderMonth("ไม่พบรายการนี้แล้ว อาจถูกลบไปก่อนหน้านี้");
     }
-    return renderMonth();
+    return renderMonth(undefined, new URL(request.url).searchParams.get("edit"));
   } catch (err) {
     console.error("handleViewAccountsRequest: fetching account summary failed", err);
     return html(renderErrorPage("ดึงข้อมูลไม่สำเร็จ", DATA_FETCH_FAILED_MESSAGE), 502);

@@ -7623,19 +7623,57 @@ sheetRows.push(
   ["tx-later-2", editToday, "expense", 80, "transport", "ค่ารถ", "ค่ารถ 80", "unknown", "", `${editToday}T03:00:00.000Z`]
 );
 
-const editablePage = await (await worker.fetch(new Request(accountsUrl), env, new FakeExecutionContext())).text();
+const listPage = await (await worker.fetch(new Request(accountsUrl), env, new FakeExecutionContext())).text();
 check(
-  "the accounts page renders every row as an editable form, not a read-only table",
-  editablePage.includes('name="op" value="update"') &&
-    editablePage.includes('value="tx-typo"') &&
-    editablePage.includes('name="amount"')
+  "the accounts page is a table with an edit and a delete action per row",
+  listPage.includes("<table") &&
+    listPage.includes(`&edit=tx-typo`) &&
+    listPage.includes(`&confirmDelete=tx-typo`)
+);
+// Read-only until a row is opened (PLAN.md 17.64). A month of always-live
+// inputs is a wall of form controls to scroll past when all anyone came to
+// do is look, and on a phone an accidental tap becomes a silent change to a
+// figure.
+check(
+  "rows are read-only until one is opened for editing",
+  !listPage.includes('name="amount"') && !listPage.includes('name="op" value="update"')
+);
+
+const editingPage = await (await worker.fetch(
+  new Request(`${accountsUrl}&edit=tx-typo`), env, new FakeExecutionContext()
+)).text();
+check(
+  "opening one row turns just that row into inputs",
+  editingPage.includes('name="op" value="update"') &&
+    editingPage.includes('value="tx-typo"') &&
+    editingPage.includes('name="amount"') &&
+    // The other two rows stay plain — only one row is editable at a time,
+    // which is what lets a single form serve the whole table.
+    (editingPage.match(/name="amount"/g) ?? []).length === 1
+);
+// HTML does not allow a <form> to wrap a group of <td>s, so the inputs are
+// associated by form= instead. Getting that wrong silently posts nothing.
+check(
+  "the editing row's inputs are wired to the form that sits outside the table",
+  editingPage.includes('id="tx-edit"') && editingPage.includes('form="tx-edit"')
 );
 // A row cannot be an expense filed under an income category, so the select
 // must not offer one — a form that can produce an impossible row is a bug
 // waiting for someone to tab past it.
 check(
   "the category select only offers categories matching the row's own type",
-  !editablePage.includes('<option value="salary"')
+  !editingPage.includes('<option value="salary"')
+);
+const staleEditPage = await (await worker.fetch(
+  new Request(`${accountsUrl}&edit=tx-does-not-exist`), env, new FakeExecutionContext()
+)).text();
+check(
+  // The absence of inputs is not the thing to check — with no matching row
+  // there is nothing to render as inputs either way. What the guard actually
+  // prevents is the page telling you to edit and save a row that is not
+  // there: an empty form and an instruction with nothing to act on.
+  "an ?edit= for a row that is not in this month falls back to the plain list",
+  !staleEditPage.includes('id="tx-edit"') && staleEditPage.includes('กด "แก้" ท้ายแถว')
 );
 
 const fixedHtml = await (await postAccounts({

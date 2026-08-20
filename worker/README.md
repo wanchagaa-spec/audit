@@ -747,8 +747,16 @@ newest row. Log three more things after fat-fingering 600 for 60 and the only wa
 to open Google Sheets and edit the cell by hand — money being the one thing this bot could not
 correct, while diary, calendar and tasks all could.
 
-`/view` is now write-capable, the fourth such page after shifts, budgets and settings. Every row
-of the current month renders as a small form: date, category, amount, note.
+`/view` is now write-capable, the fourth such page after shifts, budgets and settings. The
+current month is a spreadsheet-shaped table — date, category, note, amount — with **แก้** and
+**ลบ** at the end of each line.
+
+Rows are read-only until one is opened with **แก้** (PLAN.md 17.64; the first cut made every row
+a live form, which was worse for the common case). A month of always-editable rows is a wall of
+form controls to scroll past when all anyone came to do is look, and on a phone an accidental tap
+becomes a silent change to a figure. Only one row is open at a time, which is what lets a single
+`<form>` serve the whole table: HTML does not allow a `<form>` to wrap a group of `<td>`s, so the
+open row's inputs carry `form="tx-edit"` and the form itself sits above the table.
 
 - **Editing lives on the page rather than in chat** because the hard part of correcting an entry
   is saying *which* one, and a list you can see answers that by itself. In chat it would mean
