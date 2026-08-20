@@ -759,6 +759,21 @@ writes a transaction on its own here, and never guesses whether a bill has been 
   as a debt still owed rather than as history. With nothing set up the block is empty, so the
   most-read message this bot sends is byte-for-byte unchanged for anyone not using this.
 
+**Due-date reminders ride in the 7:00 briefing** (PLAN.md 17.61). 17.59 deliberately stopped
+short of reminders because a reminder normally means a LINE push, and pushes are the one charged
+thing this bot does — 17.54 had just made the morning briefing opt-in to reduce them. But that
+briefing is already being pushed to everyone opted in, so a due-bill line costs no extra push at
+all, only one more Sheets read per person per day. That is why this became worth doing later and
+was not worth doing then.
+
+Two states are raised, both actionable: due today, and past due and still unpaid. A bill with no
+due date is never raised — "sometime this month" is a real answer and there is no honest morning
+to raise it on; guessing one turns a daily message into noise. An overdue bill is repeated every
+morning until it is marked paid, which is the feature rather than an oversight: a reminder that
+gives up after a day can be missed by being busy on exactly the wrong morning. `effectiveDueDay`
+clamps a due day to one that exists in the month, so a bill due on the 31st comes due on 30 April
+and on the last day of February instead of never coming due at all.
+
 Why the bot does not work out for itself which bills are paid: it would have to match amounts
 against `Transactions`, and two bills of the same size in the same category are
 indistinguishable that way. A wrong guess in a money feature is worse than no answer.
