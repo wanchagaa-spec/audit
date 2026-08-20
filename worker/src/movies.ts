@@ -26,14 +26,17 @@
 // TMDB_ATTRIBUTION below is that statement, and it is rendered on the web
 // page. Do not remove it.
 //
-// Written against the documented shape of TMDb API v3. Worth knowing when
-// reading the tests: the network egress proxy in the environment this was
-// built in blocks api.themoviedb.org and developer.themoviedb.org, so no
-// call here has ever been made against the real service — the tests drive a
-// mock that encodes these same assumptions, and therefore cannot catch a
-// wrong path or parameter name. Verify against a real token before trusting
-// it in production. Everything that reads a response is deliberately
-// defensive about missing fields for the same reason.
+// Written against the documented shape of TMDb API v3, and **confirmed
+// working against the live service** with a real read token (PLAN.md 17.62).
+// Until that confirmation this was the largest unknown in the codebase: the
+// network egress proxy in the environment it was built in blocks
+// api.themoviedb.org, so the tests drive a mock encoding the same
+// assumptions as the code and could never have caught a wrong path or
+// parameter name. The bearer auth, the base URL, the response shapes and the
+// listing endpoints are now known good rather than assumed.
+//
+// Everything that reads a response is still deliberately defensive about
+// missing fields — TMDb genuinely omits them, and that has not changed.
 
 import { fetchWithTimeout, NETWORK_TIMEOUTS } from "./timeouts.ts";
 
@@ -101,12 +104,12 @@ export type MovieListKind = "now_playing" | "upcoming" | "trending" | "streaming
  * services with a real Thai presence: a longer list would mostly add
  * catalogues nobody asking this question can watch.
  *
- * Deliberately short. Ids for the smaller Thai services (WeTV, iQIYI,
- * TrueID) exist but could not be confirmed from this environment (see the
- * egress note at the top of this file), and a wrong id here fails silently
- * — it just quietly filters out a catalogue — which is exactly the kind of
- * bug worth not guessing at. Add them once checked against
- * /watch/providers/movie?watch_region=TH with a real token.
+ * Deliberately short, and still the one part of this file taken on trust:
+ * ids for the smaller Thai services (WeTV, iQIYI, TrueID) could not be
+ * confirmed from this environment, and a wrong id here fails silently — it
+ * just quietly filters out a catalogue rather than erroring — which is
+ * exactly the kind of bug worth not guessing at. Add them once checked
+ * against /watch/providers/movie?watch_region=TH with a real token.
  */
 const TH_STREAMING_PROVIDER_IDS = [
   8, // Netflix

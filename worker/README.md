@@ -731,12 +731,14 @@ parameter — sending one is a 400.
   both from the same settings page; the header keeps the credential out of the URL, which is
   the part of a request that ends up in proxy logs, error messages and anything recording
   "what was requested".
-- **Not verified against the live API.** The environment this was built in blocks
-  `api.themoviedb.org` at the egress proxy, so no call here has ever run for real; the tests
-  drive a mock encoding the same assumptions as the code and therefore cannot catch a wrong
-  path or parameter name. Check it against a real key before relying on it. Provider ids for
-  the smaller Thai services (WeTV, iQIYI, TrueID) are left out for the same reason — a wrong
-  id fails silently, filtering out a catalogue with no error.
+- **Confirmed working against the live API** (PLAN.md 17.62). Until that, this was the largest
+  unknown in the codebase: the environment it was built in blocks `api.themoviedb.org` at the
+  egress proxy, so the tests drive a mock encoding the same assumptions as the code and could
+  never have caught a wrong path or parameter name. Bearer auth, the base URL, the response
+  shapes and the listing endpoints are now known good rather than assumed. Provider ids for
+  the smaller Thai services (WeTV, iQIYI, TrueID) remain the one part taken on trust and are
+  still left out — a wrong id fails silently, filtering out a catalogue with no error, so they
+  should be checked against `/watch/providers/movie?watch_region=TH` before being added.
 
 ### Recurring monthly bills (PLAN.md 17.59)
 
