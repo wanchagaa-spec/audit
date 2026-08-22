@@ -9,6 +9,7 @@ import { groupIdFromSubject } from "./groupSubject.ts";
 import { refreshAccessToken } from "./googleAuth.ts";
 import type { Env } from "./index.ts";
 import { verifyViewToken } from "./signedState.ts";
+import { bangkokMonthKey } from "./thaiDate.ts";
 import { getAccountLink } from "./state.ts";
 
 // Not imported from index.ts on purpose — index.ts imports handleViewRequest
@@ -50,6 +51,33 @@ export function decodeUrlSegment(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Month-key plumbing shared by every /view page that browses by month
+ * (PLAN.md 17.65).
+ *
+ * Written twice already — once in viewDiaryPage.ts and once in
+ * viewShiftsPage.ts — and about to be written a third time for the accounts
+ * page, which is the point at which two identical copies stop being cheaper
+ * than one shared one. Both originals were byte-identical; they now import
+ * these instead.
+ */
+const MONTH_KEY_PATTERN = /^\d{4}-\d{2}$/;
+
+export function shiftMonthKey(monthKey: string, delta: number): string {
+  const [y, m] = monthKey.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/** A malformed month (bad copy-paste, hand-edited URL) would otherwise flow
+ * straight into shiftMonthKey's Number() parsing and produce "NaN-NaN"
+ * prev/next links that can never recover — falls back to the current month
+ * instead of trusting the query param's shape. */
+export function resolveMonthKey(url: URL): string {
+  const requested = url.searchParams.get("month");
+  return requested && MONTH_KEY_PATTERN.test(requested) ? requested : bangkokMonthKey();
 }
 
 export function escapeHtml(value: string): string {
