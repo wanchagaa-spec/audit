@@ -20,10 +20,17 @@
 
 import type { Env } from "./index.ts";
 import { deleteDiaryEntry, readAllDiaryEntries, updateDiaryEntry, type DiaryRow } from "./sheets.ts";
-import { bangkokMonthKey } from "./thaiDate.ts";
-import { DATA_FETCH_FAILED_MESSAGE, escapeHtml, html, pageShell, renderErrorPage, resolveViewSession } from "./viewAuth.ts";
+import {
+  DATA_FETCH_FAILED_MESSAGE,
+  escapeHtml,
+  html,
+  pageShell,
+  renderErrorPage,
+  resolveMonthKey,
+  resolveViewSession,
+  shiftMonthKey,
+} from "./viewAuth.ts";
 
-const MONTH_KEY_PATTERN = /^\d{4}-\d{2}$/;
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Shape AND calendar validity — the pattern alone accepts "2026-99-99",
@@ -37,11 +44,6 @@ function isValidDateKey(raw: string): boolean {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === raw;
 }
 
-function shiftMonthKey(monthKey: string, delta: number): string {
-  const [y, m] = monthKey.split("-").map(Number);
-  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-}
 
 function groupByDate(rows: DiaryRow[]): Map<string, DiaryRow[]> {
   const groups = new Map<string, DiaryRow[]>();
@@ -199,14 +201,6 @@ function renderConfirmDeletePage(token: string, month: string, entry: DiaryRow):
   );
 }
 
-function resolveMonthKey(url: URL): string {
-  const requested = url.searchParams.get("month");
-  // A malformed month (bad copy-paste, hand-edited URL) would otherwise
-  // flow straight into shiftMonthKey's Number() parsing and produce
-  // "NaN-NaN" prev/next links that can never recover — falls back to the
-  // current month instead of trusting the query param's shape.
-  return requested && MONTH_KEY_PATTERN.test(requested) ? requested : bangkokMonthKey();
-}
 
 export async function handleViewDiaryRequest(request: Request, env: Env): Promise<Response> {
   const session = await resolveViewSession(request, env);

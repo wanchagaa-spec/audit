@@ -6180,7 +6180,13 @@ check(
   monthPageResponse.status === 200 &&
     [1, 2, 3, 4, 5, 6, 7, 8, 9].every((i) => monthPageHtml.includes(`รายการที่ ${i}`))
 );
-check("and titles that section as the month rather than 'latest'", monthPageHtml.includes("รายการเดือนนี้"));
+// Names the month outright rather than "เดือนนี้" (PLAN.md 17.65): once the
+// page can show any month, a heading that just says "this month" is wrong on
+// every page but one.
+check(
+  "and titles that section with the month it is actually showing",
+  monthPageHtml.includes(`รายการเดือน ${bangkokMonthKey()}`)
+);
 
 // ---- "ตั้งค่า" as a chat command (PLAN.md 17.50) --------------------------
 // The rich menu shrank to three tiles and one of them is ตั้งค่า. A tap just
@@ -7762,6 +7768,107 @@ check(
   "a blank row above the target does not shift the edit onto a neighbour",
   Number(sheetRows.find((r) => r[0] === "tx-below-blank")[3]) === 111 && sheetRows[0].length === 0
 );
+
+// ---- Browsing an earlier month on the accounts page (PLAN.md 17.65) -----
+// The editing above could only ever reach the current month, which capped it
+// exactly where it was most needed: on the 1st, yesterday's mistyped entry
+// was already unreachable. The data layer took any month all along (it was
+// written for "สรุปเดือนที่แล้ว") — only the page was pinned to today's.
+
+const accountsThisMonth = bangkokMonthKey();
+const accountsPrevMonth = (() => {
+  const [y, m] = accountsThisMonth.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 2, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+})();
+const prevMonthDay = `${accountsPrevMonth}-14`;
+
+sheetRows.length = 0;
+sheetRows.push(
+  ["tx-old", prevMonthDay, "expense", 250, "food", "ข้าวเดือนก่อน", "ข้าวเดือนก่อน 250", "unknown", "", `${prevMonthDay}T01:00:00.000Z`],
+  ["tx-now", editToday, "expense", 70, "food", "ข้าววันนี้", "ข้าววันนี้ 70", "unknown", "", `${editToday}T01:00:00.000Z`]
+);
+// The month hint is remembered per book and per month; a stale one pointing
+// at the old row layout would make this test pass or fail for the wrong
+// reason, so start it clean.
+await env.ACCOUNTS.delete(`tx-month-start:fake-sheet-id:${accountsPrevMonth}`);
+
+const prevMonthUrl = `${origin}/view?token=${viewToken}&month=${accountsPrevMonth}`;
+const prevMonthPage = await (await worker.fetch(new Request(prevMonthUrl), env, new FakeExecutionContext())).text();
+check(
+  "?month= shows that month's rows and not the current month's",
+  prevMonthPage.includes("ข้าวเดือนก่อน") && !prevMonthPage.includes("ข้าววันนี้") && prevMonthPage.includes("250")
+);
+check(
+  "and the page says which month it is showing",
+  prevMonthPage.includes(accountsPrevMonth)
+);
+check(
+  "there are links to step a month back and forward",
+  prevMonthPage.includes("เดือนก่อน") && prevMonthPage.includes("เดือนถัดไป") &&
+    // Stepping forward from the previous month lands on this one, not on a
+    // month computed from today — the arithmetic is relative to what is on
+    // screen, which is what makes paging back several months work.
+    prevMonthPage.includes(`month=${encodeURIComponent(accountsThisMonth)}`)
+);
+// Every link out of a past-month row has to carry the month, or the trip
+// through edit or delete silently drops you back on today's month.
+check(
+  "the edit and delete links of a past month's row stay on that month",
+  prevMonthPage.includes(`month=${encodeURIComponent(accountsPrevMonth)}&edit=tx-old`) &&
+    prevMonthPage.includes(`month=${encodeURIComponent(accountsPrevMonth)}&confirmDelete=tx-old`)
+);
+const prevEditingPage = await (await worker.fetch(
+  new Request(`${prevMonthUrl}&edit=tx-old`), env, new FakeExecutionContext()
+)).text();
+check(
+  "a row in a past month opens for editing, and its form posts back to that month",
+  prevEditingPage.includes('name="op" value="update"') &&
+    prevEditingPage.includes(`action="/view?token=${viewToken}&month=${accountsPrevMonth}"`)
+);
+
+const postPrevMonth = (fields) =>
+  worker.fetch(
+    new Request(prevMonthUrl, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+    }),
+    env,
+    new FakeExecutionContext()
+  );
+const prevSavedHtml = await (await postPrevMonth({
+  op: "update", id: "tx-old", date: prevMonthDay, type: "expense", categoryId: "food", amount: "150", note: "ข้าวเดือนก่อน",
+})).text();
+check(
+  "saving an edit in a past month writes it and stays on that month",
+  prevSavedHtml.includes("บันทึกการแก้ไขแล้ว") &&
+    Number(sheetRows.find((r) => r[0] === "tx-old")[3]) === 150 &&
+    // Still looking at the old month afterwards — re-rendering today's would
+    // show the edited row gone and look like the save had failed.
+    prevSavedHtml.includes("ข้าวเดือนก่อน") &&
+    !prevSavedHtml.includes("ข้าววันนี้")
+);
+// Moving a row's date out of the month on screen makes it vanish from the
+// list. A bare "saved" next to a row that is no longer there reads as a bug.
+const movedHtml = await (await postPrevMonth({
+  op: "update", id: "tx-old", date: editToday, type: "expense", categoryId: "food", amount: "150", note: "ข้าวเดือนก่อน",
+})).text();
+check(
+  "moving a row to another month says where it went",
+  movedHtml.includes(accountsThisMonth) && movedHtml.includes("ย้ายไปเดือน") &&
+    sheetRows.find((r) => r[0] === "tx-old")[1] === editToday
+);
+// A hand-edited or half-copied month would otherwise reach shiftMonthKey's
+// Number() parsing and produce "NaN-NaN" links with no way back.
+const badMonthPage = await (await worker.fetch(
+  new Request(`${origin}/view?token=${viewToken}&month=not-a-month`), env, new FakeExecutionContext()
+)).text();
+check(
+  "a malformed ?month= falls back to the current month instead of producing dead links",
+  !badMonthPage.includes("NaN") && badMonthPage.includes(accountsThisMonth)
+);
+
 
 console.log(`\n${pass} passed, ${fail} failed`);
 globalThis.fetch = realFetch;

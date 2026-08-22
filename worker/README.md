@@ -747,9 +747,9 @@ newest row. Log three more things after fat-fingering 600 for 60 and the only wa
 to open Google Sheets and edit the cell by hand — money being the one thing this bot could not
 correct, while diary, calendar and tasks all could.
 
-`/view` is now write-capable, the fourth such page after shifts, budgets and settings. The
-current month is a spreadsheet-shaped table — date, category, note, amount — with **แก้** and
-**ลบ** at the end of each line.
+`/view` is now write-capable, the fourth such page after shifts, budgets and settings. One month
+at a time is a spreadsheet-shaped table — date, category, note, amount — with **แก้** and **ลบ**
+at the end of each line, and **‹ เดือนก่อน / เดือนถัดไป ›** above it.
 
 Rows are read-only until one is opened with **แก้** (PLAN.md 17.64; the first cut made every row
 a live form, which was worse for the common case). A month of always-editable rows is a wall of
@@ -772,6 +772,17 @@ open row's inputs carry `form="tx-edit"` and the form itself sits above the tabl
 - `rawText` and `createdAt` are carried through untouched. The first is what the user originally
   typed and stays a record of that even after the parsed figure is corrected; the second says
   when it was logged, which an edit does not change.
+- **Any month, via `?month=YYYY-MM`** (PLAN.md 17.65), the same as the diary and shift pages.
+  Pinned to the current month, the editing above expired at midnight on the 1st: yesterday's
+  mistyped entry became unreachable exactly when you were most likely still fixing it. The data
+  layer took any month all along — `readTransactionsForMonth` was written for `สรุปเดือนที่แล้ว`
+  — so only the page was pinned. The month travels through `accountsUrl(token, month)`, which
+  every link and form action on the page goes through: drop it from one of them (the form's
+  `action`, say) and saving a row in March returns you to the current month with the edited row
+  apparently vanished, which reads as a failed save. `shiftMonthKey`/`resolveMonthKey` moved into
+  `viewAuth.ts` rather than being copy-pasted a third time. Changing a row's date so it leaves
+  the month on screen says *where it went* instead of a bare "saved" beside a row that is no
+  longer there.
 - The row is found by id in the **raw** values response, never in a filtered list — a blank row
   above the target would otherwise shift every index below it and silently edit a neighbour. Same
   rule, and same reason, as `updateDiaryEntry`.

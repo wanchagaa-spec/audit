@@ -15,16 +15,18 @@
 
 import type { Env } from "./index.ts";
 import { readShiftGrid, saveShiftGrid, SHIFT_TYPES, type ShiftType } from "./sheets.ts";
-import { bangkokMonthKey } from "./thaiDate.ts";
-import { DATA_FETCH_FAILED_MESSAGE, escapeHtml, html, pageShell, renderErrorPage, resolveViewSession } from "./viewAuth.ts";
+import {
+  DATA_FETCH_FAILED_MESSAGE,
+  escapeHtml,
+  html,
+  pageShell,
+  renderErrorPage,
+  resolveMonthKey,
+  resolveViewSession,
+  shiftMonthKey,
+} from "./viewAuth.ts";
 
-const MONTH_KEY_PATTERN = /^\d{4}-\d{2}$/;
 
-function shiftMonthKey(monthKey: string, delta: number): string {
-  const [y, m] = monthKey.split("-").map(Number);
-  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-}
 
 function cellValue(day: number, shiftType: ShiftType): string {
   return `${day}|${shiftType}`;
@@ -93,15 +95,6 @@ ${navLinks}
   );
 }
 
-function resolveMonthKey(url: URL): string {
-  const requested = url.searchParams.get("month");
-  // A malformed month (bad copy-paste, hand-edited URL) would otherwise
-  // flow straight into shiftMonthKey's Number() parsing and produce
-  // "NaN-NaN" prev/next links that can never recover — falls back to the
-  // current month instead of trusting the query param's shape (same
-  // guard viewDiaryPage.ts already uses for the same reason).
-  return requested && MONTH_KEY_PATTERN.test(requested) ? requested : bangkokMonthKey();
-}
 
 export async function handleViewShiftsRequest(request: Request, env: Env): Promise<Response> {
   const session = await resolveViewSession(request, env);

@@ -11,6 +11,12 @@
 // Same two-speed shape the diary page settled on (PLAN.md 17.36): an edit
 // saves immediately, because it is reversible by editing again; a delete
 // goes through a confirm page first, because it is not.
+//
+// The month being viewed comes from `?month=YYYY-MM` (PLAN.md 17.65), the
+// same as the diary and shift pages. Before that this page was pinned to the
+// current month, which quietly capped the editing above: on the 1st of a
+// month, yesterday's mistyped entry became unreachable — the one time you
+// are most likely to still be fixing it.
 
 import { DEFAULT_CATEGORIES } from "./categories.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
@@ -21,13 +27,26 @@ import {
   updateTransaction,
   type TransactionRow,
 } from "./sheets.ts";
-import { bangkokMonthKey, formatThaiDateLabel, bangkokDateKey } from "./thaiDate.ts";
-import { DATA_FETCH_FAILED_MESSAGE, html, escapeHtml, pageShell, renderErrorPage, resolveViewSession } from "./viewAuth.ts";
+import { formatThaiDateLabel, bangkokDateKey } from "./thaiDate.ts";
+import {
+  DATA_FETCH_FAILED_MESSAGE,
+  escapeHtml,
+  html,
+  pageShell,
+  renderErrorPage,
+  resolveMonthKey,
+  resolveViewSession,
+  shiftMonthKey,
+} from "./viewAuth.ts";
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function accountsUrl(token: string): string {
-  return `/view?token=${encodeURIComponent(token)}`;
+/** Every link and form action on this page goes through here, so the month
+ * being viewed survives the whole edit round-trip. Drop it from one of them
+ * — the form's action, say — and saving a row in March silently returns you
+ * to the current month with the edit apparently vanished. */
+function accountsUrl(token: string, month: string): string {
+  return `/view?token=${encodeURIComponent(token)}&month=${encodeURIComponent(month)}`;
 }
 
 /** Only the categories that match the row's own type are offered. A row
@@ -66,18 +85,29 @@ function topCategories(rows: TransactionRow[], limit = 5): Array<{ categoryId: s
 
 function renderAccountsSummaryPage(
   token: string,
+  month: string,
   monthLabel: string,
   monthTx: TransactionRow[],
   notice?: string,
   editId?: string | null
 ): string {
   const nav = { token, active: "accounts" as const };
+  // No upper bound on "next": a month ahead is empty rather than wrong, and
+  // the diary page reached the same conclusion. Guessing where the data ends
+  // would mean a read per click to find out.
+  const navLinks = `<div class="nav-links">
+    <a href="${accountsUrl(token, shiftMonthKey(month, -1))}">‹ เดือนก่อน</a>
+    <a href="${accountsUrl(token, shiftMonthKey(month, 1))}">เดือนถัดไป ›</a>
+  </div>`;
+  const noticeHtml = notice ? `<p class="save-notice">${escapeHtml(notice)}</p>` : "";
 
   if (monthTx.length === 0) {
     return pageShell(
       "สรุปบัญชี",
       `<h1>สรุปบัญชี</h1><p class="subtitle">${escapeHtml(monthLabel)}</p>
-<div class="card"><p class="empty">ยังไม่มีรายรับ-รายจ่ายเดือนนี้</p></div>
+${navLinks}
+${noticeHtml}
+<div class="card"><p class="empty">ไม่มีรายรับ-รายจ่ายเดือนนี้</p></div>
 <p class="footnote">เห็นได้เฉพาะคุณคนเดียว</p>`,
       nav
     );
@@ -120,13 +150,13 @@ function renderAccountsSummaryPage(
   </div>`;
 
   const recentHtml = `<div class="card">
-    <h2>รายการเดือนนี้</h2>
+    <h2>รายการเดือน ${escapeHtml(month)}</h2>
     <p class="subtitle">${editId ? 'แก้ไขแถวที่เลือกแล้วกด "บันทึก"' : 'กด "แก้" ท้ายแถวเพื่อแก้ไข'}</p>
-    ${editId ? `<form id="tx-edit" method="post" action="${accountsUrl(token)}"><input type="hidden" name="op" value="update" /><input type="hidden" name="id" value="${escapeHtml(editId)}" /></form>` : ""}
+    ${editId ? `<form id="tx-edit" method="post" action="${accountsUrl(token, month)}"><input type="hidden" name="op" value="update" /><input type="hidden" name="id" value="${escapeHtml(editId)}" /></form>` : ""}
     <div class="table-scroll"><table class="data-table tx-table">
       <thead><tr><th>วันที่</th><th>หมวด</th><th>รายการ</th><th class="num">จำนวนเงิน</th><th></th></tr></thead>
       <tbody>
-        ${recent.map((r) => (r.id === editId ? renderEditingRow(token, r) : renderReadOnlyRow(token, r))).join("\n")}
+        ${recent.map((r) => (r.id === editId ? renderEditingRow(token, month, r) : renderReadOnlyRow(token, month, r))).join("\n")}
       </tbody>
     </table></div>
   </div>`;
@@ -134,7 +164,8 @@ function renderAccountsSummaryPage(
   return pageShell(
     "สรุปบัญชี",
     `<h1>สรุปบัญชี</h1><p class="subtitle">${escapeHtml(monthLabel)}</p>
-${notice ? `<p class="save-notice">${escapeHtml(notice)}</p>` : ""}
+${navLinks}
+${noticeHtml}
 ${totalsHtml}
 ${topCategoriesHtml}
 ${recentHtml}
@@ -150,12 +181,12 @@ ${recentHtml}
  * form controls to scroll past when all anyone came to do is look, and it
  * makes an accidental tap on a phone a silent change to a figure — the whole
  * page becomes a hazard to read. */
-function renderReadOnlyRow(token: string, r: TransactionRow): string {
+function renderReadOnlyRow(token: string, month: string, r: TransactionRow): string {
   const label = escapeHtml(r.note || r.rawText || categoryLabel(r.categoryId));
   const sign = r.type === "income" ? "+" : "-";
   const cls = r.type === "income" ? "income" : "expense";
-  const editUrl = `${accountsUrl(token)}&edit=${encodeURIComponent(r.id)}`;
-  const confirmUrl = `${accountsUrl(token)}&confirmDelete=${encodeURIComponent(r.id)}`;
+  const editUrl = `${accountsUrl(token, month)}&edit=${encodeURIComponent(r.id)}`;
+  const confirmUrl = `${accountsUrl(token, month)}&confirmDelete=${encodeURIComponent(r.id)}`;
   return `<tr>
     <td>${escapeHtml(r.date)}</td>
     <td>${escapeHtml(categoryLabel(r.categoryId))}</td>
@@ -177,7 +208,7 @@ function renderReadOnlyRow(token: string, r: TransactionRow): string {
  * is still validated server-side on the way in: a browser hint is not a
  * check, and this is money.
  */
-function renderEditingRow(token: string, r: TransactionRow): string {
+function renderEditingRow(token: string, month: string, r: TransactionRow): string {
   const cls = r.type === "income" ? "income" : "expense";
   return `<tr class="tx-editing">
     <td><input form="tx-edit" type="date" name="date" value="${escapeHtml(r.date)}" /></td>
@@ -187,7 +218,7 @@ function renderEditingRow(token: string, r: TransactionRow): string {
     <td class="tx-actions">
       <input form="tx-edit" type="hidden" name="type" value="${escapeHtml(r.type)}" />
       <button form="tx-edit" type="submit">บันทึก</button>
-      <a class="tx-cancel-link" href="${accountsUrl(token)}">ยกเลิก</a>
+      <a class="tx-cancel-link" href="${accountsUrl(token, month)}">ยกเลิก</a>
     </td>
   </tr>`;
 }
@@ -195,7 +226,7 @@ function renderEditingRow(token: string, r: TransactionRow): string {
 /** Deleting is the one irreversible action here, so it gets its own page —
  * the row is shown in full before it goes, the same shape as the diary
  * page's confirm step. */
-function renderConfirmDeletePage(token: string, r: TransactionRow): string {
+function renderConfirmDeletePage(token: string, month: string, r: TransactionRow): string {
   const sign = r.type === "income" ? "+" : "-";
   return pageShell(
     "ยืนยันการลบ",
@@ -205,11 +236,11 @@ function renderConfirmDeletePage(token: string, r: TransactionRow): string {
   <p>${escapeHtml(r.note || r.rawText || "(ไม่มีรายละเอียด)")}</p>
   <p class="${r.type === "income" ? "income" : "expense"}">${sign}${formatBaht(r.amount)} บาท</p>
 </div>
-<form method="post" action="${accountsUrl(token)}" class="confirm-actions">
+<form method="post" action="${accountsUrl(token, month)}" class="confirm-actions">
   <input type="hidden" name="op" value="delete" />
   <input type="hidden" name="id" value="${escapeHtml(r.id)}" />
   <button type="submit">ลบเลย</button>
-  <a href="${accountsUrl(token)}">ยกเลิก</a>
+  <a href="${accountsUrl(token, month)}">ยกเลิก</a>
 </form>`,
     { token, active: "accounts" as const }
   );
@@ -219,14 +250,18 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
   const session = await resolveViewSession(request, env);
   if (session instanceof Response) return session;
 
-  const month = bangkokMonthKey();
+  // Read from the request on POST too, not just GET: the form's action
+  // carries the month, so saving an edit in a past month re-renders that
+  // month rather than jumping back to today's.
+  const url = new URL(request.url);
+  const month = resolveMonthKey(url);
   const monthLabel = `เดือน ${month} · ข้อมูลล่าสุด ณ ${formatThaiDateLabel(bangkokDateKey())}`;
   const renderMonth = async (notice?: string, editId?: string | null) => {
     const monthTx = await readTransactionsForMonth(session.accessToken, session.spreadsheetId, env.ACCOUNTS, month);
     // A row asked for by ?edit= that is no longer in the month falls back to
     // the plain list — a stale link should not leave a row half-open.
     const openId = editId && monthTx.some((r) => r.id === editId) ? editId : null;
-    return html(renderAccountsSummaryPage(session.token, monthLabel, monthTx, notice, openId));
+    return html(renderAccountsSummaryPage(session.token, month, monthLabel, monthTx, notice, openId));
   };
 
   if (request.method === "POST") {
@@ -273,7 +308,14 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
           categoryId,
           note,
         });
-        return renderMonth(updated ? "บันทึกการแก้ไขแล้ว" : "ไม่พบรายการนี้แล้ว อาจถูกลบไปก่อนหน้านี้ เลยไม่ได้บันทึก");
+        if (!updated) return renderMonth("ไม่พบรายการนี้แล้ว อาจถูกลบไปก่อนหน้านี้ เลยไม่ได้บันทึก");
+        // Changing the date can move a row out of the month being viewed, and
+        // it then disappears from this list. Saying where it went beats a
+        // bare "saved" next to a row that is no longer there.
+        const movedTo = date.slice(0, 7);
+        return renderMonth(
+          movedTo === month ? "บันทึกการแก้ไขแล้ว" : `บันทึกแล้ว — รายการนี้ย้ายไปเดือน ${movedTo} แล้ว`
+        );
       }
 
       return html(renderErrorPage("เกิดข้อผิดพลาด", "ไม่รู้จักคำสั่งนี้ ลองกลับไปหน้าบัญชีแล้วลองใหม่นะ"), 400);
@@ -284,16 +326,16 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
   }
 
   try {
-    const confirmDeleteId = new URL(request.url).searchParams.get("confirmDelete");
+    const confirmDeleteId = url.searchParams.get("confirmDelete");
     if (confirmDeleteId) {
       const monthTx = await readTransactionsForMonth(session.accessToken, session.spreadsheetId, env.ACCOUNTS, month);
       const target = monthTx.find((r) => r.id === confirmDeleteId);
       // A stale link (already deleted, or from a different month) falls back
       // to the list rather than a dead end.
-      if (target) return html(renderConfirmDeletePage(session.token, target));
+      if (target) return html(renderConfirmDeletePage(session.token, month, target));
       return renderMonth("ไม่พบรายการนี้แล้ว อาจถูกลบไปก่อนหน้านี้");
     }
-    return renderMonth(undefined, new URL(request.url).searchParams.get("edit"));
+    return renderMonth(undefined, url.searchParams.get("edit"));
   } catch (err) {
     console.error("handleViewAccountsRequest: fetching account summary failed", err);
     return html(renderErrorPage("ดึงข้อมูลไม่สำเร็จ", DATA_FETCH_FAILED_MESSAGE), 502);
