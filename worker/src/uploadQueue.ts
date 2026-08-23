@@ -32,6 +32,72 @@
 
 const QUEUE_PREFIX = "upload-queue:";
 
+/**
+ * "There is probably something in the queue" (PLAN.md 17.66).
+ *
+ * The cron runs every minute so the 07:00 briefing lands on the right one,
+ * and until this the drain opened every single tick with a `kv.list()` —
+ * 1,440 list operations a day against a **free-plan cap of 1,000**, which is
+ * the same ceiling as writes and not the 100,000 that reads get. It went over
+ * by 44% structurally, whether or not anyone used the bot, and once it blew
+ * (roughly 23:40 Bangkok, since the quota resets at 00:00 UTC = 07:00 here)
+ * the queue simply stopped draining until morning.
+ *
+ * So the per-minute question is asked with a `get` instead — 1,440 reads a
+ * day is 1.4% of the read cap — and the list only happens when the answer is
+ * yes, or on the periodic sweep below.
+ *
+ * **Deliberately not under QUEUE_PREFIX.** listQueueBatch JSON.parses every
+ * key the prefix scan returns, so a flag living inside that namespace would
+ * come back as a malformed job on every drain. The name is kept visibly
+ * different rather than merely one character apart.
+ */
+const QUEUE_PENDING_KEY = "uploads-pending";
+
+/**
+ * How often the queue is scanned even with the flag unset.
+ *
+ * The flag is an optimisation, and an optimisation that can lose photos is
+ * not worth having: if its write fails while the job writes succeed, or a
+ * deploy lands between the two, nothing would ever look at those entries
+ * again — the silent-data-loss failure this file's header already spends
+ * three paragraphs guarding against. The sweep bounds that to half an hour
+ * instead of forever, and costs 48 list operations a day.
+ */
+const SWEEP_EVERY_MINUTES = 30;
+
+/** Marks the queue non-empty. Called *before* the jobs are written, not
+ * after: a flag set with no jobs behind it costs exactly one wasted list on
+ * the next tick, while jobs written with no flag set are invisible until the
+ * sweep. The error can only be affordable in one of those two directions. */
+export async function markQueuePending(kv: KVNamespace): Promise<void> {
+  await kv.put(QUEUE_PENDING_KEY, "1");
+}
+
+/**
+ * Should this tick spend a list operation?
+ *
+ * Returns the flag's own state alongside the answer, so the caller can tell a
+ * flag-driven scan from a sweep and avoid a pointless delete on a queue that
+ * was already known to be empty.
+ */
+export async function shouldScanQueue(
+  kv: KVNamespace,
+  now: Date = new Date()
+): Promise<{ scan: boolean; flagged: boolean }> {
+  const flagged = (await kv.get(QUEUE_PENDING_KEY)) !== null;
+  // Minutes are timezone-independent for whole-hour offsets, so this is the
+  // same instant everywhere and needs no Bangkok conversion.
+  const sweep = now.getUTCMinutes() % SWEEP_EVERY_MINUTES === 0;
+  return { scan: flagged || sweep, flagged };
+}
+
+/** Called once the queue is observed empty, so the next 29 ticks cost a read
+ * each instead of a list each. */
+export async function clearQueuePending(kv: KVNamespace): Promise<void> {
+  await kv.delete(QUEUE_PENDING_KEY);
+}
+
 export interface QueuedUpload {
   lineUserId: string;
   // Where drainUploadQueue's final "✅ อัปโหลดแล้ว" confirmation gets pushed
@@ -53,6 +119,9 @@ export interface QueuedUpload {
 }
 
 export async function enqueueUploads(kv: KVNamespace, jobs: QueuedUpload[]): Promise<void> {
+  // Awaited on its own line rather than folded into the Promise.all below —
+  // see markQueuePending for why it has to land first.
+  await markQueuePending(kv);
   await Promise.all(
     jobs.map((job) =>
       kv.put(`${QUEUE_PREFIX}${job.messageId}`, JSON.stringify(job), {
