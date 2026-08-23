@@ -346,18 +346,44 @@ webhook call, and Cloudflare's Workers Free plan caps that at roughly 50 externa
 still lost up to 4 files with the bound in place, and there's no per-file tuning that fixes a
 budget that's simply too small for a big enough batch in one invocation.
 
-The actual fix: **very large batches don't get processed in the webhook invocation at all.**
+The actual fix: **media doesn't get processed in the webhook invocation at all.**
 `src/uploadQueue.ts` adds a simple KV-backed queue (one KV key per queued file, so concurrent
-enqueues can't race each other on a read-modify-write). At/above `IMMEDIATE_MEDIA_BATCH_LIMIT`
-(20) media files in one webhook call, `handleWebhook` queues the whole batch instead of uploading
-anything immediately, and replies once with a "queued, will confirm when done" message instead of
-one reply per file. A `scheduled` handler (wired to a once-a-minute cron trigger in
-`wrangler.toml`) calls `drainUploadQueue`, which works through up to `DRAIN_BATCH_SIZE` (20)
-queued files at a time — **and each cron firing is its own Worker invocation, with its own fresh
-subrequest/CPU budget**, so a batch of any size eventually gets through completely instead of
+enqueues can't race each other on a read-modify-write). **Every** media file goes through it,
+whatever the batch size: `handleWebhook` queues and uploads nothing immediately, and the enqueue
+step sends no reply at all — a size threshold and a "queued, will confirm when done" reply both
+existed at earlier stages of this fix and both turned out to be flood sources of their own, since
+LINE splits one multi-select send into several webhook calls. A `scheduled` handler (wired to a
+once-a-minute cron trigger in `wrangler.toml`) calls `drainUploadQueue`, which works through up
+to `DRAIN_BATCH_SIZE` (10) queued files at a time — **and each cron firing is its own Worker
+invocation, with its own fresh subrequest/CPU budget**, so a batch of any size eventually gets through completely instead of
 losing files to a shared budget. Each drain sends one push message per user summarizing what
 just uploaded and how many files are still queued, ending with a final "all done" message once
 the queue for that user is empty.
+
+**The idle tick has to be cheap** (PLAN.md 17.66). The cron fires every minute because the 07:00
+briefing needs that granularity, and the drain originally opened every tick with a `kv.list()`
+before checking whether anything was queued. That is 1,440 list operations a day against a
+free-plan cap of **1,000** — the same ceiling writes get, not the 100,000 reads get — so it went
+over by 44% structurally, whether or not anyone used the bot. The quota resets at 00:00 UTC
+(07:00 Bangkok), which meant the queue stopped draining from roughly 23:40 every night until
+morning.
+
+The per-minute question is now asked with a `get` against a `uploads-pending` flag instead
+(1,440 reads/day is 1.4% of the read cap), and the list only happens when the flag is set. Three
+details carry the design:
+
+- **The flag is set before the jobs are written, not after.** A flag with no jobs behind it costs
+  one wasted list on the next tick; jobs with no flag are invisible. Only one of those two
+  directions is affordable.
+- **A sweep lists anyway every 30 minutes** (48/day). The flag is an optimisation, and an
+  optimisation that can lose photos is not worth having — if its write is lost while the job
+  writes land, the sweep bounds the damage to half an hour instead of forever.
+- **The flag key deliberately sits outside `QUEUE_PREFIX`.** `listQueueBatch` `JSON.parse`s every
+  key the prefix scan returns, so a flag inside that namespace would come back as a malformed job
+  on every drain.
+
+The test harness's `FakeKV` counts operations per type, because a test that only checked the
+queue drained was exactly as green against the version that blew the cap every day.
 
 Media files below the threshold still upload immediately, but — separately from the queueing
 work — also changed to send **one combined reply per webhook call** (`handleImmediateMediaBatch`)

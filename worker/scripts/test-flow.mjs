@@ -8,11 +8,19 @@ class FakeKV {
   constructor() {
     this.store = new Map();
     this.metadataStore = new Map();
+    // Per-operation counters. Cloudflare's free plan meters list, write and
+    // delete at 1,000/day each and reads at 100,000, so "how many of which"
+    // is a correctness property here, not a performance nicety (PLAN.md
+    // 17.66) — a test that only checked the queue drained would have been
+    // just as green with the version that blew the list cap every day.
+    this.ops = { get: 0, put: 0, delete: 0, list: 0 };
   }
   async get(key) {
+    this.ops.get++;
     return this.store.has(key) ? this.store.get(key) : null;
   }
   async put(key, value, options = {}) {
+    this.ops.put++;
     if (simulateQueuePutFailureOnce && key.startsWith("upload-queue:")) {
       simulateQueuePutFailureOnce = false;
       throw new Error("simulated KV put failure");
@@ -26,10 +34,12 @@ class FakeKV {
     else this.metadataStore.delete(key);
   }
   async delete(key) {
+    this.ops.delete++;
     this.store.delete(key);
     this.metadataStore.delete(key);
   }
   async list({ prefix = "", limit = 1000 } = {}) {
+    this.ops.list++;
     const keys = [...this.store.keys()]
       .filter((name) => name.startsWith(prefix))
       .sort()
@@ -2100,9 +2110,18 @@ check(
 // later tests' queue-count assertions from having to account for cross-test
 // leftovers.
 const totalQueuedBeforeFinalDrain = queuedBeforeFastAck + 1;
-while ((await countQueuedForUser(env.ACCOUNTS, lineUserId)) > 0) {
+// Bounded rather than `while (…) {}`: a drain that stops making progress is
+// a real bug (17.66's pending flag never getting set, say), and an unbounded
+// loop turns that into the whole suite hanging with no failing assertion to
+// point at. The cap is far above the handful of DRAIN_BATCH_SIZE rounds this
+// ever needs.
+for (let round = 0; round < 50 && (await countQueuedForUser(env.ACCOUNTS, lineUserId)) > 0; round++) {
   await drainUploadQueue(env);
 }
+check(
+  "the queue actually drains to empty rather than stalling",
+  (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0
+);
 check(
   "a subsequent drain actually uploads the file that the fast-ack path queued (plus any earlier leftovers)",
   driveUploads.length === uploadsBeforeFastAck + totalQueuedBeforeFinalDrain
@@ -2189,6 +2208,128 @@ const pushesBeforeEmptyDrain = pushes.length;
 const driveUploadsBeforeEmptyDrain = driveUploads.length;
 await drainUploadQueue(env);
 check("draining an empty queue sends no push and uploads nothing", pushes.length === pushesBeforeEmptyDrain && driveUploads.length === driveUploadsBeforeEmptyDrain);
+
+// ---- The idle cron tick must not spend a KV list (PLAN.md 17.66) --------
+// The cron fires every minute so the 07:00 briefing lands on the right one,
+// and the drain used to open every tick with a kv.list(): 1,440 list
+// operations a day against a free-plan cap of 1,000 — the same ceiling as
+// writes, not the 100,000 reads get. It went over by 44% structurally, with
+// or without anyone using the bot, and once it blew (~23:40 Bangkok, the
+// quota resetting at 00:00 UTC = 07:00 here) the queue stopped draining
+// until morning. Now the per-minute question is a read, and the list only
+// happens when there is something to list.
+
+// Deterministic starting point: empty queue, flag cleared, regardless of
+// what the wall clock happened to be during the drains above.
+for (const { name } of (await env.ACCOUNTS.list({ prefix: "upload-queue:" })).keys) {
+  await env.ACCOUNTS.delete(name);
+}
+await env.ACCOUNTS.delete("uploads-pending");
+// Minute 17 is not a multiple of 30, so the periodic sweep is not due.
+const idleMinute = new Date("2026-03-05T09:17:00.000Z");
+const sweepMinute = new Date("2026-03-05T09:30:00.000Z");
+
+const opsBeforeIdleTick = { ...env.ACCOUNTS.ops };
+await drainUploadQueue(env, idleMinute);
+check(
+  "an idle tick spends one KV read and no list at all",
+  env.ACCOUNTS.ops.list === opsBeforeIdleTick.list &&
+    env.ACCOUNTS.ops.get === opsBeforeIdleTick.get + 1
+);
+// The whole point of the flag is that it costs nothing to leave unset —
+// a delete on a key that is not there still burns one of the 1,000 daily
+// deletes, and 1,440 of those would simply move the problem.
+const opsBeforeIdleSweep = { ...env.ACCOUNTS.ops };
+await drainUploadQueue(env, sweepMinute);
+check(
+  "the periodic sweep of an already-empty queue spends no delete",
+  env.ACCOUNTS.ops.list === opsBeforeIdleSweep.list + 1 &&
+    env.ACCOUNTS.ops.delete === opsBeforeIdleSweep.delete
+);
+
+// Queueing sets the flag, so the very next tick still picks the work up
+// within a minute — the latency the cheap check must not cost us.
+const flagBatchEvents = ["flag-img-1", "flag-img-2"].map((id) => ({
+  type: "message",
+  message: { type: "image", id },
+  source: { type: "user", userId: lineUserId },
+  replyToken: `reply-${id}`,
+  timestamp: Date.now(),
+}));
+const flagBatchBody = JSON.stringify({ events: flagBatchEvents });
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(flagBatchBody, env.LINE_CHANNEL_SECRET) },
+    body: flagBatchBody,
+  }),
+  env
+);
+check("queueing marks the queue pending", (await env.ACCOUNTS.get("uploads-pending")) !== null);
+const uploadsBeforeFlagDrain = driveUploads.length;
+const opsBeforeFlagDrain = { ...env.ACCOUNTS.ops };
+await drainUploadQueue(env, idleMinute);
+check(
+  "a flagged tick lists and drains even on a non-sweep minute",
+  driveUploads.length === uploadsBeforeFlagDrain + 2 &&
+    env.ACCOUNTS.ops.list > opsBeforeFlagDrain.list
+);
+// ...and having drained it, goes back to being cheap. Without this the flag
+// would stay set forever after the first photo and every later tick would
+// list again, which is the bug this whole change exists to remove.
+await drainUploadQueue(env, idleMinute);
+check("the flag is cleared once the queue is observed empty", (await env.ACCOUNTS.get("uploads-pending")) === null);
+const opsAfterDrained = { ...env.ACCOUNTS.ops };
+await drainUploadQueue(env, idleMinute);
+check(
+  "ticks after the queue drains are back to costing no list",
+  env.ACCOUNTS.ops.list === opsAfterDrained.list
+);
+
+// The safety net, and the reason the flag is only ever an optimisation.
+// If the flag write is lost while the job writes land — a failed put, or a
+// deploy between the two — nothing would ever look at those entries again.
+// That is the silent-photo-loss failure this queue was built to prevent, so
+// it must not be reintroduced by the thing that made the cron cheaper.
+// Simulated by writing a queue entry with no flag, which is exactly the
+// state that failure leaves behind.
+await env.ACCOUNTS.put(
+  "upload-queue:orphan-img-1",
+  JSON.stringify({
+    lineUserId,
+    pushTarget: lineUserId,
+    kind: "image",
+    messageId: "orphan-img-1",
+    timestampMs: Date.now(),
+    tripFolderId,
+    tripName: "ทะเล",
+  }),
+  { metadata: { lineUserId } }
+);
+const uploadsBeforeOrphanTick = driveUploads.length;
+await drainUploadQueue(env, idleMinute);
+check(
+  "a queue entry whose flag was lost is invisible to an ordinary tick",
+  driveUploads.length === uploadsBeforeOrphanTick
+);
+await drainUploadQueue(env, sweepMinute);
+check(
+  "but the periodic sweep still finds and uploads it",
+  driveUploads.length === uploadsBeforeOrphanTick + 1 &&
+    (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0
+);
+
+// The flag deliberately does not live under the queue's own prefix:
+// listQueueBatch JSON.parses every key the prefix scan returns, so a flag
+// inside that namespace would come back as a malformed job on every drain.
+await env.ACCOUNTS.put("uploads-pending", "1");
+const queueKeysWithFlagSet = (await env.ACCOUNTS.list({ prefix: "upload-queue:" })).keys;
+check(
+  "the pending flag is not picked up by the queue's own prefix scan",
+  queueKeysWithFlagSet.length === 0
+);
+await drainUploadQueue(env, idleMinute);
+
 
 const switchPromptReply = await handleTextMessage(env, lineUserId, "เริ่มทริป ภูเขา", origin);
 check(

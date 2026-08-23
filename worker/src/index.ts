@@ -120,9 +120,11 @@ import { handleViewAccountsRequest } from "./viewPages.ts";
 import { handleViewTasksRequest } from "./viewTasksPage.ts";
 import { handleViewPhotoRequest, handleViewTripsRequest } from "./viewTripsPage.ts";
 import {
+  clearQueuePending,
   countQueuedForUser,
   deleteQueueEntry,
   enqueueUploads,
+  shouldScanQueue,
   listQueueBatch,
   type QueuedUpload,
 } from "./uploadQueue.ts";
@@ -1817,9 +1819,21 @@ interface DrainUserSummary {
 // fresh subrequest/CPU budget, so working through a big backlog a bounded
 // amount at a time — rather than trying to force it all through one webhook
 // call's budget — is what actually gets every file uploaded reliably.
-export async function drainUploadQueue(env: Env): Promise<void> {
+export async function drainUploadQueue(env: Env, now: Date = new Date()): Promise<void> {
+  // Most ticks stop here on a single KV read rather than a list (PLAN.md
+  // 17.66) — see uploadQueue.ts's QUEUE_PENDING_KEY for why the cheap
+  // question is worth asking first.
+  const { scan, flagged } = await shouldScanQueue(env.ACCOUNTS, now);
+  if (!scan) return;
+
   const entries = await listQueueBatch(env.ACCOUNTS, DRAIN_BATCH_SIZE);
-  if (entries.length === 0) return;
+  if (entries.length === 0) {
+    // Only when the flag was actually set — on a sweep of an already-empty
+    // queue there is nothing to clear, and deleting a key that isn't there
+    // still spends one of the 1,000 daily deletes.
+    if (flagged) await clearQueuePending(env.ACCOUNTS);
+    return;
+  }
 
   const tokenCache: TokenCache = new Map();
   // Keyed by lineUserId *and* tripFolderId, not lineUserId alone — a batch
@@ -1912,10 +1926,12 @@ export default {
     }
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Both of these run on the same once-a-minute cron and both open by
+    // deciding they have nothing to do — broadcastMorningBriefings on a clock
+    // check costing no KV at all (PLAN.md 17.21), drainUploadQueue on a single
+    // KV read (PLAN.md 17.66). The minute granularity exists for the 07:00
+    // briefing; the drain is what has to be cheap enough to ride along.
     ctx.waitUntil(drainUploadQueue(env));
-    // Runs on the same once-a-minute cron — broadcastMorningBriefings itself
-    // is a no-op outside the 07:00 Bangkok minute (PLAN.md 17.21), so this
-    // doesn't need its own separate cron trigger entry in wrangler.toml.
     ctx.waitUntil(broadcastMorningBriefings(env, env.ACCOUNTS));
   },
 };
