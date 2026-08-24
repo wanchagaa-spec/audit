@@ -93,6 +93,7 @@ function nextDriveId(prefix) {
   return `${prefix}-${driveIdSeq}`;
 }
 let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
+let simulateTrashFailureOnce = false; // makes the next trashFile call fail, to prove one bad file doesn't abandon the rest
 let simulateDriveDedupLookupFailure = false; // makes the next findUploadedMessageIds lookup fail, to prove the drain still uploads rather than stalling
 let simulateFolderNameFetchFailure = false; // makes the next Drive folder-name (fields=name) lookup fail, to exercise the not-found-vs-transient-failure distinction
 
@@ -589,10 +590,18 @@ globalThis.fetch = async (url, init = {}) => {
       // findFolder/getOrCreateAlbumRoot queries below, matches real
       // uploaded files (driveUploads), not folders.
       if (q.includes("mimeType!=")) {
-        const files = driveUploads.filter((f) => f.parentId === parentId);
+        const files = driveUploads.filter((f) => f.parentId === parentId && !f.trashed);
+        // Paginated the way Drive is (PLAN.md 17.69): a duplicate scan that
+        // only ever saw one page would report "no duplicates" for a folder
+        // whose copies happen to straddle the boundary.
+        const start = Number(parsed.searchParams.get("pageToken") ?? "0");
+        const pageSize = Number(parsed.searchParams.get("pageSize") ?? "60");
+        const slice = files.slice(start, start + pageSize);
+        const nextStart = start + slice.length;
         return new Response(
           JSON.stringify({
-            files: files.map((f) => ({ id: f.id, name: f.name, mimeType: "image/jpeg", createdTime: f.createdTime })),
+            files: slice.map((f) => ({ id: f.id, name: f.name, mimeType: "image/jpeg", createdTime: f.createdTime })),
+            ...(nextStart < files.length ? { nextPageToken: String(nextStart) } : {}),
           }),
           { status: 200 }
         );
@@ -630,6 +639,19 @@ globalThis.fetch = async (url, init = {}) => {
 
       const matches = driveFolders.filter((f) => f.name === name && f.parentId === parentId);
       return new Response(JSON.stringify({ files: matches.map((f) => ({ id: f.id })) }), { status: 200 });
+    }
+    // PATCH /files/:id {trashed:true} — trashFile (PLAN.md 17.69). Marked
+    // rather than removed from driveUploads, so a test can tell "moved to
+    // the trash" apart from "gone", which is the whole point of trashing.
+    if (init.method === "PATCH" && idMatch) {
+      if (simulateTrashFailureOnce) {
+        simulateTrashFailureOnce = false;
+        return new Response("simulated trash failure", { status: 500 });
+      }
+      const file = driveUploads.find((f) => f.id === idMatch[1]);
+      if (!file) return new Response("not found", { status: 404 });
+      if (JSON.parse(init.body).trashed) file.trashed = true;
+      return new Response(JSON.stringify({ id: file.id }), { status: 200 });
     }
     if (init.method === "POST") {
       const body = JSON.parse(init.body);
@@ -4983,6 +5005,115 @@ const missingFolderResponse = await worker.fetch(new Request(`${origin}/view/tri
 check(
   "a trip folder id that doesn't exist (or isn't this account's) shows a friendly not-found page",
   missingFolderResponse.status === 404
+);
+
+// ---- Cleaning up the duplicates 17.68 stopped making (PLAN.md 17.69) ----
+// 17.68 stopped the queue handing the same job out twice. It could not undo
+// what had already happened: a real trip folder was left holding several
+// copies of the same photo, and the bug is as old as the queue, so older
+// trips can be carrying copies too.
+
+// Same name means same file, no heuristics: uploadTripMedia names every
+// upload <date>_<messageId>.<ext> and a LINE messageId identifies exactly
+// one piece of media forever. Two duplicates of one photo, one duplicate of
+// another, and one file that is unique — so the page has to distinguish,
+// not just report "this folder has duplicates".
+const dupBase = driveUploads.filter((f) => f.parentId === tripFolderId).length;
+const dupTripFile = (id, name, createdTime) => {
+  driveUploads.push({ id, name, parentId: tripFolderId, createdTime, mimeType: "image/jpeg" });
+  return id;
+};
+const keptA = dupTripFile("dup-a-original", "2026-08-24_dupmsg-a.jpg", "2026-08-24T01:00:00.000Z");
+const copyA1 = dupTripFile("dup-a-copy-1", "2026-08-24_dupmsg-a.jpg", "2026-08-24T01:02:00.000Z");
+const copyA2 = dupTripFile("dup-a-copy-2", "2026-08-24_dupmsg-a.jpg", "2026-08-24T01:30:00.000Z");
+const keptB = dupTripFile("dup-b-original", "2026-08-24_dupmsg-b.jpg", "2026-08-24T02:00:00.000Z");
+const copyB1 = dupTripFile("dup-b-copy-1", "2026-08-24_dupmsg-b.jpg", "2026-08-24T02:05:00.000Z");
+const uniqueFile = dupTripFile("dup-unique", "2026-08-24_dupmsg-unique.jpg", "2026-08-24T03:00:00.000Z");
+
+const dupUrl = `${origin}/view/trips/${tripFolderId}?token=${viewToken}&duplicates=1`;
+const dupPage = await (await worker.fetch(new Request(dupUrl), env, new FakeExecutionContext())).text();
+check(
+  "the duplicates page reports one entry per repeated file, not one per copy",
+  dupPage.includes("พบ 2 รูปที่มีสำเนาซ้ำ") && dupPage.includes("ลบไฟล์ซ้ำ 3 ไฟล์")
+);
+check(
+  "a file with no copies is left out of the list entirely",
+  dupPage.includes("dupmsg-a") && dupPage.includes("dupmsg-b") && !dupPage.includes("dupmsg-unique")
+);
+// Nothing is deleted by looking. This is the only place the bot proposes
+// deleting something the user never named file by file.
+check(
+  "opening the page deletes nothing",
+  driveUploads.filter((f) => f.parentId === tripFolderId && !f.trashed).length === dupBase + 6
+);
+check("the trip photo grid links to the duplicate scan", tripPhotosHtml.includes("ตรวจหาไฟล์ซ้ำ"));
+
+const postDup = () =>
+  worker.fetch(new Request(dupUrl, { method: "POST" }), env, new FakeExecutionContext());
+const dupDone = await (await postDup()).text();
+const trashedIds = driveUploads.filter((f) => f.trashed).map((f) => f.id).sort();
+check(
+  "confirming trashes every copy except the oldest of each",
+  dupDone.includes("ลบไฟล์ซ้ำแล้ว 3 ไฟล์") &&
+    trashedIds.join(",") === [copyA1, copyA2, copyB1].sort().join(",")
+);
+check(
+  "the surviving copy is the one that was uploaded first, and the unique file is untouched",
+  driveUploads.find((f) => f.id === keptA).trashed !== true &&
+    driveUploads.find((f) => f.id === keptB).trashed !== true &&
+    driveUploads.find((f) => f.id === uniqueFile).trashed !== true
+);
+// Trashed, not deleted — Drive's own 30-day undo stays behind a judgement
+// the bot made on the user's behalf.
+check(
+  "duplicates are moved to Drive's trash rather than deleted outright",
+  driveUploads.filter((f) => f.id === copyA1).length === 1
+);
+check(
+  "and the page re-scans afterwards so it shows what is actually left",
+  dupDone.includes("ไม่พบไฟล์ซ้ำในทริปนี้")
+);
+
+// Pressing it again on a clean folder must be a safe no-op, not a second
+// round of deletes against whatever is left.
+const dupAgain = await (await postDup()).text();
+check(
+  "running it again on a clean folder deletes nothing more",
+  dupAgain.includes("ไม่พบไฟล์ซ้ำ") && driveUploads.filter((f) => f.trashed).length === 3
+);
+
+// Duplicates split across Drive pages are the case a single-page scan gets
+// silently wrong — it reports "no duplicates" for a folder full of them.
+const pagedName = "2026-08-24_dupmsg-paged.jpg";
+dupTripFile("dup-paged-1", pagedName, "2026-08-24T04:00:00.000Z");
+for (let i = 0; i < 60; i++) {
+  dupTripFile(`dup-filler-${i}`, `2026-08-24_filler-${i}.jpg`, "2026-08-24T04:01:00.000Z");
+}
+dupTripFile("dup-paged-2", pagedName, "2026-08-24T04:02:00.000Z");
+const pagedPage = await (await worker.fetch(new Request(dupUrl), env, new FakeExecutionContext())).text();
+check(
+  "duplicates separated by more than one Drive page are still found",
+  pagedPage.includes("ลบไฟล์ซ้ำ 1 ไฟล์") && pagedPage.includes("dupmsg-paged")
+);
+await postDup();
+check(
+  "and trashing them keeps the first of the pair",
+  driveUploads.find((f) => f.id === "dup-paged-2").trashed === true &&
+    driveUploads.find((f) => f.id === "dup-paged-1").trashed !== true
+);
+
+// One file failing must not abandon the rest of the batch — the next scan
+// simply offers whatever is still there.
+dupTripFile("dup-fail-keep", "2026-08-24_dupmsg-fail.jpg", "2026-08-24T05:00:00.000Z");
+dupTripFile("dup-fail-1", "2026-08-24_dupmsg-fail.jpg", "2026-08-24T05:01:00.000Z");
+dupTripFile("dup-fail-2", "2026-08-24_dupmsg-fail.jpg", "2026-08-24T05:02:00.000Z");
+simulateTrashFailureOnce = true;
+const dupPartial = await (await postDup()).text();
+check(
+  "a file that fails to trash is reported without abandoning the others",
+  dupPartial.includes("ลบไฟล์ซ้ำแล้ว 1 ไฟล์") &&
+    dupPartial.includes("อีก 1 ไฟล์ลบไม่สำเร็จ") &&
+    driveUploads.find((f) => f.id === "dup-fail-keep").trashed !== true
 );
 
 const missingPhotoResponse = await worker.fetch(new Request(`${origin}/view/photo/does-not-exist?token=${viewToken}`), env, new FakeExecutionContext());

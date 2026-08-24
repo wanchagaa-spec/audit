@@ -159,6 +159,10 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
   .grid a { display: block; aspect-ratio: 1; border-radius: 10px; overflow: hidden; background: #e5e7eb; }
   .grid img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .grid-caption { text-align: center; color: #9aa0a6; font-size: .68rem; margin-top: .25rem; }
+  .dup-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; display: block; }
+  .dup-name { font-family: ui-monospace, monospace; font-size: .7rem; word-break: break-all; }
+  .dup-keep { color: #1e8e3e; font-size: .7rem; margin-top: .2rem; }
+  .dup-remove { color: #c5221f; font-size: .7rem; }
   .empty { text-align: center; color: #6b6f76; padding: 1.5rem 0; font-size: .9rem; }
   .footnote { text-align: center; color: #9aa0a6; font-size: .75rem; margin-top: 1.5rem; }
   .footnote a { color: #16a34a; }
