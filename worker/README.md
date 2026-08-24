@@ -357,8 +357,28 @@ once-a-minute cron trigger in `wrangler.toml`) calls `drainUploadQueue`, which w
 to `DRAIN_BATCH_SIZE` (10) queued files at a time — **and each cron firing is its own Worker
 invocation, with its own fresh subrequest/CPU budget**, so a batch of any size eventually gets through completely instead of
 losing files to a shared budget. Each drain sends one push message per user summarizing what
-just uploaded and how many files are still queued, ending with a final "all done" message once
-the queue for that user is empty.
+just uploaded and whether more are still coming, ending with a final "all done" message once the
+queue is empty.
+
+That "more are still coming" comes from the listing the drain already did — `listQueueBatch`
+returns a `truncated` flag — and **not** from counting the queue again afterwards (PLAN.md
+17.67). Counting afterwards is what shipped first, and it was wrong in production: 8 photos went
+up and the bot said "เหลืออีก 5 ไฟล์", then uploaded 5 and said "เหลืออีก 4". KV is eventually
+consistent, so a key deleted seconds earlier still comes back from `list` for up to a minute —
+the count was of the entries the drain had just deleted itself.
+
+Two details make the flag exact:
+
+- **The listing asks for `limit + 1` and returns at most `limit`.** Judging "there is more" from
+  a full page is wrong precisely when the queue is a multiple of the batch size: the last full
+  drain promises more files and then never sends the "all done" it just earned, because the drain
+  after it finds nothing and returns without a push.
+- **The peek counts values, not keys.** Stale keys with no value behind them would otherwise
+  inflate it. The same value check is what stops a stale listing from re-uploading a photo that
+  already reached Drive.
+
+`countQueuedForUser` still exists for tests and diagnostics, where a count taken well after the
+fact is meaningful, and carries a comment saying it must not go back into the drain summary.
 
 **The idle tick has to be cheap** (PLAN.md 17.66). The cron fires every minute because the 07:00
 briefing needs that granularity, and the drain originally opened every tick with a `kv.list()`

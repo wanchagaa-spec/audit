@@ -121,7 +121,6 @@ import { handleViewTasksRequest } from "./viewTasksPage.ts";
 import { handleViewPhotoRequest, handleViewTripsRequest } from "./viewTripsPage.ts";
 import {
   clearQueuePending,
-  countQueuedForUser,
   deleteQueueEntry,
   enqueueUploads,
   shouldScanQueue,
@@ -1826,7 +1825,7 @@ export async function drainUploadQueue(env: Env, now: Date = new Date()): Promis
   const { scan, flagged } = await shouldScanQueue(env.ACCOUNTS, now);
   if (!scan) return;
 
-  const entries = await listQueueBatch(env.ACCOUNTS, DRAIN_BATCH_SIZE);
+  const { entries, truncated } = await listQueueBatch(env.ACCOUNTS, DRAIN_BATCH_SIZE);
   if (entries.length === 0) {
     // Only when the flag was actually set — on a sweep of an already-empty
     // queue there is nothing to clear, and deleting a key that isn't there
@@ -1885,17 +1884,27 @@ export async function drainUploadQueue(env: Env, now: Date = new Date()): Promis
 
   // One push per (subject, trip) summary — a batch spanning two trips for
   // the same subject now sends two separate confirmations instead of one
-  // mislabeled combined one. "remaining" is a whole-subject queue depth
-  // (not trip-specific — countQueuedForUser doesn't filter by trip), so it
-  // reads the same across both pushes in that rare case, which is a minor
-  // cosmetic wrinkle next to reporting the wrong trip name outright.
+  // mislabeled combined one.
+  //
+  // Whether anything is left comes from the listing this drain already did,
+  // not from a fresh count (PLAN.md 17.67). Counting afterwards asked KV a
+  // question it cannot answer honestly: the entries were deleted seconds
+  // earlier and `list` can still return deleted keys for up to a minute, so
+  // the count included ghosts and the bot said "เหลืออีก 4 ไฟล์" with an
+  // empty queue. `truncated` is a fact about the page that was read, needs
+  // no extra list operation, and cannot drift.
+  //
+  // It is a whole-queue signal rather than a per-trip one, so in the rare
+  // two-trip batch both pushes say the same thing — the same cosmetic
+  // wrinkle the old count had, and still far better than a wrong number.
   for (const summary of summaries.values()) {
-    const remaining = await countQueuedForUser(env.ACCOUNTS, summary.lineUserId);
     const parts = [`✅ อัปโหลดเพิ่ม ${summary.succeeded} ไฟล์เข้าทริป "${summary.tripName}" แล้ว`];
     if (summary.failed > 0) {
       parts.push(`(อีก ${summary.failed} ไฟล์อัปโหลดไม่สำเร็จ ลองส่งใหม่อีกครั้งได้นะ)`);
     }
-    parts.push(remaining > 0 ? `เหลืออีก ${remaining} ไฟล์ กำลังทยอยอัปโหลดต่อ` : `อัปโหลดครบทุกไฟล์แล้ว`);
+    // No number on the "more coming" side on purpose: the only count
+    // available here is the stale one this change exists to remove.
+    parts.push(truncated ? `ยังมีอีก กำลังทยอยอัปโหลดต่อให้นะ` : `อัปโหลดครบทุกไฟล์แล้ว`);
     // pushTarget, not lineUserId — a group's push target is the real
     // groupId, not the synthesized "group:<groupId>" subject id lineUserId
     // holds in that case (see QueuedUpload's own comment).
