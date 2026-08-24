@@ -93,6 +93,7 @@ function nextDriveId(prefix) {
   return `${prefix}-${driveIdSeq}`;
 }
 let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
+let simulateDriveDedupLookupFailure = false; // makes the next findUploadedMessageIds lookup fail, to prove the drain still uploads rather than stalling
 let simulateFolderNameFetchFailure = false; // makes the next Drive folder-name (fields=name) lookup fail, to exercise the not-found-vs-transient-failure distinction
 
 const calendarEvents = []; // simulates Google Calendar: {id, summary, start:{dateTime}, end:{dateTime}}
@@ -595,6 +596,25 @@ globalThis.fetch = async (url, init = {}) => {
           }),
           { status: 200 }
         );
+      }
+
+      // findUploadedMessageIds (PLAN.md 17.68): "which of these messageIds
+      // already have a file in this folder". Matches real uploaded files by
+      // substring, the way the real query's `name contains` clauses do —
+      // and, like Drive, it answers from what has actually landed, which is
+      // the whole reason the drain can trust it over KV.
+      const containsMatches = [...q.matchAll(/name contains '((?:[^'\\]|\\.)*)'/g)].map((m) =>
+        m[1].replace(/\\'/g, "'")
+      );
+      if (containsMatches.length > 0) {
+        if (simulateDriveDedupLookupFailure) {
+          simulateDriveDedupLookupFailure = false;
+          return new Response("simulated dedup lookup failure", { status: 500 });
+        }
+        const files = driveUploads.filter(
+          (f) => f.parentId === parentId && containsMatches.some((needle) => f.name.includes(needle))
+        );
+        return new Response(JSON.stringify({ files: files.map((f) => ({ name: f.name })) }), { status: 200 });
       }
 
       // listTripFolders has no name='...' clause (it wants every folder
@@ -1994,11 +2014,12 @@ check(
   (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === smallBatchSize
 );
 
-// Draining (DRAIN_BATCH_SIZE is 10, so this clears the whole 8-photo batch
-// in one pass) actually performs the uploads, one Drive subrequest per file,
+// Draining actually performs the uploads, one Drive subrequest per file,
 // and is the only place a confirmation message gets sent for this batch.
+// DRAIN_BATCH_SIZE is 5 (PLAN.md 17.68), so 8 photos take two passes.
 const driveUploadRequestsBeforeSmallBatchDrain = driveUploadRequestCount;
 const pushesBeforeSmallBatchDrain = pushes.length;
+await drainUploadQueue(env);
 await drainUploadQueue(env);
 check(
   `draining uploads all ${smallBatchSize} photos from the small batch`,
@@ -2008,12 +2029,19 @@ check(
   "each file cost exactly one Drive upload subrequest, not two",
   driveUploadRequestCount === driveUploadRequestsBeforeSmallBatchDrain + smallBatchSize
 );
+// One push per pass, each naming what that pass did — and the counts across
+// the passes have to add up to the batch, which is exactly what stopped
+// being true when the drain double-uploaded (PLAN.md 17.68).
+const smallBatchPushes = pushes.slice(pushesBeforeSmallBatchDrain);
+const smallBatchReported = smallBatchPushes
+  .map((p) => Number(p.text.match(/อัปโหลดเพิ่ม (\d+) ไฟล์/)?.[1] ?? 0))
+  .reduce((a, b) => a + b, 0);
 check(
-  "the drain sends exactly one push confirming the batch finished, once it's actually done",
-  pushes.length === pushesBeforeSmallBatchDrain + 1 &&
-    pushes.at(-1).text.includes(`${smallBatchSize}`) &&
-    pushes.at(-1).text.includes('ทริป "ทะเล"') &&
-    pushes.at(-1).text.includes("ครบทุกไฟล์แล้ว")
+  "the drain sends one push per pass, and the passes add up to the batch",
+  smallBatchPushes.length === 2 &&
+    smallBatchReported === smallBatchSize &&
+    smallBatchPushes.at(-1).text.includes('ทริป "ทะเล"') &&
+    smallBatchPushes.at(-1).text.includes("ครบทุกไฟล์แล้ว")
 );
 check(
   "the small batch's queue is empty after draining",
@@ -2153,7 +2181,7 @@ check(
 // notifying the user.
 // Kept in sync manually with DRAIN_BATCH_SIZE in src/index.ts (not exported,
 // since it's an internal tuning constant, not part of that module's API).
-const DRAIN_BATCH_SIZE_FOR_TEST = 10;
+const DRAIN_BATCH_SIZE_FOR_TEST = 5;
 const largeBatchSize = 40;
 const largeBatchEvents = Array.from({ length: largeBatchSize }, (_, i) => ({
   type: "message",
@@ -2414,6 +2442,102 @@ check(
   "and the following drain finishes it and says so",
   pushes.at(-1).text.includes("ครบทุกไฟล์แล้ว") &&
     (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0
+);
+
+// ---- The same photo must never reach Drive twice (PLAN.md 17.68) --------
+// Reported from production, and confirmed by the user finding duplicate
+// files in the trip folder: 8 photos sent, 17 uploads. Two ways the queue
+// can hand the same job out twice, and neither is fixable inside KV —
+//   1. KV is eventually consistent, so an entry deleted right after a
+//      successful upload can still be read back for up to a minute.
+//   2. The cron fires every minute, and a drain of several videos can take
+//      longer than that, so two drains overlap on the same entries.
+// Drive is the only strongly consistent thing in the loop, and the filename
+// already carries the messageId, so it can answer exactly.
+
+const dupJob = (messageId) => {
+  const key = `upload-queue:${messageId}`;
+  env.ACCOUNTS.store.set(
+    key,
+    JSON.stringify({
+      lineUserId,
+      pushTarget: lineUserId,
+      kind: "image",
+      messageId,
+      timestampMs: Date.now(),
+      tripFolderId,
+      tripName: "ทะเล",
+    })
+  );
+  env.ACCOUNTS.metadataStore.set(key, { lineUserId });
+};
+
+// The exact shape of cause (1): the file is in Drive already, and the queue
+// entry that produced it is still readable.
+dupJob("already-uploaded-1");
+await env.ACCOUNTS.put("uploads-pending", "1");
+const uploadsBeforeReplay = driveUploads.length;
+await drainUploadQueue(env, idleMinute);
+const replayedName = driveUploads.at(-1).name;
+check(
+  "a job whose file is already in Drive is uploaded exactly once",
+  driveUploads.length === uploadsBeforeReplay + 1 && replayedName.includes("already-uploaded-1")
+);
+// Now replay the identical job, exactly as a stale read or an overlapping
+// drain would. Before this check it produced a second copy of the same file.
+dupJob("already-uploaded-1");
+await env.ACCOUNTS.put("uploads-pending", "1");
+const uploadsBeforeSecondPass = driveUploads.length;
+const pushesBeforeSecondPass = pushes.length;
+await drainUploadQueue(env, idleMinute);
+check(
+  "replaying that same job uploads nothing a second time",
+  driveUploads.length === uploadsBeforeSecondPass &&
+    driveUploads.filter((f) => f.name.includes("already-uploaded-1")).length === 1
+);
+check(
+  // The drain that really uploaded it already told the user. Counting it
+  // again is how "8 files sent, 17 uploaded" got reported in the first place.
+  "and the skipped job is not counted as a fresh upload in the summary",
+  pushes.length === pushesBeforeSecondPass
+);
+check("the replayed queue entry is dropped rather than retried forever", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0);
+
+// A brand-new file in the same folder must still go up, and — the part a
+// one-job batch cannot prove — it has to still go up while sharing a batch
+// with a job that IS already in Drive. Checked with a mixed batch because
+// "return every id once the folder is non-empty" passes every single-job
+// test there is, and would silently stop uploading anything at all as soon
+// as a trip had one photo in it.
+dupJob("already-uploaded-1");
+dupJob("fresh-after-dedup-1");
+await env.ACCOUNTS.put("uploads-pending", "1");
+const uploadsBeforeFresh = driveUploads.length;
+await drainUploadQueue(env, idleMinute);
+check(
+  "in a batch mixing an already-uploaded job with a new one, only the new one uploads",
+  driveUploads.length === uploadsBeforeFresh + 1 &&
+    driveUploads.at(-1).name.includes("fresh-after-dedup-1") &&
+    driveUploads.filter((f) => f.name.includes("already-uploaded-1")).length === 1
+);
+
+// Best-effort by design: a Drive hiccup on the dedup lookup must not stall
+// the batch. A duplicate is a nuisance; a photo that never uploads is not.
+dupJob("dedup-lookup-fails-1");
+await env.ACCOUNTS.put("uploads-pending", "1");
+simulateDriveDedupLookupFailure = true;
+const uploadsBeforeLookupFailure = driveUploads.length;
+// Wrapped so a lookup failure that escapes shows up as this assertion going
+// red rather than as the whole suite crashing with a stack trace.
+let dedupLookupThrew = false;
+await drainUploadQueue(env, idleMinute).catch(() => {
+  dedupLookupThrew = true;
+});
+check(
+  "a failed dedup lookup still uploads rather than stalling the batch",
+  !dedupLookupThrew &&
+    driveUploads.length === uploadsBeforeLookupFailure + 1 &&
+    driveUploads.at(-1).name.includes("dedup-lookup-fails-1")
 );
 
 // The flag deliberately does not live under the queue's own prefix:
