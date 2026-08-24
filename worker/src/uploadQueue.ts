@@ -131,9 +131,23 @@ export async function enqueueUploads(kv: KVNamespace, jobs: QueuedUpload[]): Pro
   );
 }
 
-// KV list() returns key metadata inline without fetching each value, so this
-// stays cheap even with a decently deep queue. Caps at KV's own 1000-keys-per-call
-// list limit, which a personal bot's queue depth is never remotely close to.
+/**
+ * How many files are queued for one subject.
+ *
+ * **Not for the drain's own "N files left" message.** KV is eventually
+ * consistent: a key deleted moments ago can still be returned by `list` for
+ * up to 60 seconds, so calling this right after a drain deleted its entries
+ * counts ghosts and reports files remaining when the queue is empty — which
+ * is exactly what it used to do (PLAN.md 17.67). The drain uses
+ * QueueBatch.truncated instead, which it already knows for free. This stays
+ * for tests and diagnostics, where a count taken well after the fact is
+ * meaningful.
+ *
+ * KV list() returns key metadata inline without fetching each value, so this
+ * stays cheap even with a decently deep queue. Caps at KV's own
+ * 1000-keys-per-call list limit, which a personal bot's queue depth is never
+ * remotely close to.
+ */
 export async function countQueuedForUser(kv: KVNamespace, lineUserId: string): Promise<number> {
   const { keys } = await kv.list<{ lineUserId: string }>({ prefix: QUEUE_PREFIX });
   return keys.filter((k) => k.metadata?.lineUserId === lineUserId).length;
@@ -144,14 +158,44 @@ export interface QueueEntry {
   job: QueuedUpload;
 }
 
-export async function listQueueBatch(kv: KVNamespace, limit: number): Promise<QueueEntry[]> {
-  const { keys } = await kv.list({ prefix: QUEUE_PREFIX, limit });
-  const entries: QueueEntry[] = [];
+export interface QueueBatch {
+  /** At most `limit` jobs, whatever the peek below turned up. */
+  entries: QueueEntry[];
+  /**
+   * There is real work behind this batch.
+   *
+   * How the drain knows whether to promise more files are coming, derived
+   * from the listing it already did rather than from a fresh count
+   * afterwards (PLAN.md 17.67). A count taken after the drain deleted its
+   * entries is a guess — KV can keep returning a deleted key from `list` for
+   * up to 60 seconds — and it guessed wrong in production, telling someone
+   * "เหลืออีก 4 ไฟล์" with an empty queue.
+   */
+  truncated: boolean;
+}
+
+/**
+ * One page of the queue, plus whether anything real follows it.
+ *
+ * Lists `limit + 1` and returns at most `limit`. Asking for exactly `limit`
+ * and calling a full page "truncated" is wrong precisely when the queue is a
+ * multiple of the batch size — the last full drain would promise more files
+ * and then never send the "all done" it had just earned, because the drain
+ * after it finds nothing and returns without a push.
+ *
+ * The peek is judged on *values*, not on the key listing: a key whose value
+ * is gone is an entry deleted moments ago that this location has not caught
+ * up on. Skipping those is also what stops a stale listing from re-uploading
+ * a photo that already reached Drive.
+ */
+export async function listQueueBatch(kv: KVNamespace, limit: number): Promise<QueueBatch> {
+  const { keys } = await kv.list({ prefix: QUEUE_PREFIX, limit: limit + 1 });
+  const found: QueueEntry[] = [];
   for (const k of keys) {
     const raw = await kv.get(k.name);
-    if (raw) entries.push({ key: k.name, job: JSON.parse(raw) as QueuedUpload });
+    if (raw) found.push({ key: k.name, job: JSON.parse(raw) as QueuedUpload });
   }
-  return entries;
+  return { entries: found.slice(0, limit), truncated: found.length > limit };
 }
 
 export async function deleteQueueEntry(kv: KVNamespace, key: string): Promise<void> {

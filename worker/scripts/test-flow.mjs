@@ -14,9 +14,16 @@ class FakeKV {
     // 17.66) — a test that only checked the queue drained would have been
     // just as green with the version that blew the list cap every day.
     this.ops = { get: 0, put: 0, delete: 0, list: 0 };
+    // Keys that `list` still reports but `get` no longer resolves — real KV
+    // behaviour, not a contrivance: a deleted key can keep coming back from
+    // list for up to 60 seconds while its value is already gone, and longer
+    // at a location that had recently read it. Everything that trusts a
+    // listing has to survive this (PLAN.md 17.67).
+    this.ghostKeys = new Set();
   }
   async get(key) {
     this.ops.get++;
+    if (this.ghostKeys.has(key)) return null;
     return this.store.has(key) ? this.store.get(key) : null;
   }
   async put(key, value, options = {}) {
@@ -40,7 +47,7 @@ class FakeKV {
   }
   async list({ prefix = "", limit = 1000 } = {}) {
     this.ops.list++;
-    const keys = [...this.store.keys()]
+    const keys = [...new Set([...this.store.keys(), ...this.ghostKeys])]
       .filter((name) => name.startsWith(prefix))
       .sort()
       .slice(0, limit)
@@ -2196,7 +2203,7 @@ for (let round = 1; round <= drainRounds; round++) {
   check(
     `drain round ${round}'s push summary says the right thing`,
     expectedRemaining > 0
-      ? summaryText.includes(`เหลืออีก ${expectedRemaining} ไฟล์`)
+      ? summaryText.includes("ยังมีอีก")
       : summaryText.includes("อัปโหลดครบทุกไฟล์แล้ว")
   );
 }
@@ -2316,6 +2323,96 @@ await drainUploadQueue(env, sweepMinute);
 check(
   "but the periodic sweep still finds and uploads it",
   driveUploads.length === uploadsBeforeOrphanTick + 1 &&
+    (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0
+);
+
+// ---- "เหลืออีก N ไฟล์" with an empty queue (PLAN.md 17.67) --------------
+// Reported from production: 8 photos sent, the bot said "อัปโหลดเพิ่ม 8 ไฟล์
+// ... เหลืออีก 5 ไฟล์", then "อัปโหลดเพิ่ม 5 ไฟล์ ... เหลืออีก 4 ไฟล์" — which
+// cannot both be true. The drain counted what was left by listing the queue
+// again *immediately after deleting the entries it had just uploaded*, and
+// KV keeps returning deleted keys from `list` for up to 60 seconds, so the
+// count was of ghosts.
+
+const queueGhostJob = (messageId) => {
+  const key = `upload-queue:${messageId}`;
+  env.ACCOUNTS.store.set(
+    key,
+    JSON.stringify({
+      lineUserId,
+      pushTarget: lineUserId,
+      kind: "image",
+      messageId,
+      timestampMs: Date.now(),
+      tripFolderId,
+      tripName: "ทะเล",
+    })
+  );
+  env.ACCOUNTS.metadataStore.set(key, { lineUserId });
+  return key;
+};
+
+// One real file, and enough keys the listing still reports with their values
+// already gone to push the *key* count past the batch peek — exactly the
+// state a just-finished drain of a big batch leaves behind. Deliberately
+// more ghosts than the batch size: with only a handful, judging the peek on
+// keys instead of values gives the same answer as judging it correctly, and
+// the test passes against both.
+const realKey = queueGhostJob("consistency-real-1");
+for (let i = 0; i < DRAIN_BATCH_SIZE_FOR_TEST + 2; i++) {
+  env.ACCOUNTS.ghostKeys.add(`upload-queue:ghost-${i}`);
+}
+await env.ACCOUNTS.put("uploads-pending", "1");
+const uploadsBeforeGhostDrain = driveUploads.length;
+const pushesBeforeGhostDrain = pushes.length;
+await drainUploadQueue(env, idleMinute);
+check(
+  "a stale listing's ghost keys are never uploaded",
+  driveUploads.length === uploadsBeforeGhostDrain + 1
+);
+check(
+  "and the summary says the queue is done rather than counting the ghosts",
+  pushes.length === pushesBeforeGhostDrain + 1 &&
+    pushes.at(-1).text.includes("ครบทุกไฟล์แล้ว") &&
+    !pushes.at(-1).text.includes("เหลืออีก")
+);
+env.ACCOUNTS.ghostKeys.clear();
+env.ACCOUNTS.store.delete(realKey);
+env.ACCOUNTS.metadataStore.delete(realKey);
+
+// The boundary the first attempt at this fix got wrong: a queue that is an
+// exact multiple of DRAIN_BATCH_SIZE. Calling a full page "there is more"
+// makes the last full drain promise files it has already finished, and the
+// drain after it finds an empty queue and returns without a push — so the
+// "all done" the user is waiting for never arrives at all.
+const exactBatchKeys = Array.from({ length: DRAIN_BATCH_SIZE_FOR_TEST }, (_, i) =>
+  queueGhostJob(`exact-batch-${i}`)
+);
+await env.ACCOUNTS.put("uploads-pending", "1");
+const pushesBeforeExactDrain = pushes.length;
+await drainUploadQueue(env, idleMinute);
+check(
+  `a queue of exactly ${DRAIN_BATCH_SIZE_FOR_TEST} files says it is done in that same drain`,
+  pushes.length === pushesBeforeExactDrain + 1 &&
+    pushes.at(-1).text.includes("ครบทุกไฟล์แล้ว")
+);
+check("and it really did empty the queue", (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0);
+void exactBatchKeys;
+
+// More than one batch still promises more — the peek has to work in both
+// directions, or every large trip would claim to be finished after 10 files.
+for (let i = 0; i < DRAIN_BATCH_SIZE_FOR_TEST + 1; i++) queueGhostJob(`over-batch-${i}`);
+await env.ACCOUNTS.put("uploads-pending", "1");
+const pushesBeforeOverDrain = pushes.length;
+await drainUploadQueue(env, idleMinute);
+check(
+  "a queue of one more than a full batch says there is more coming",
+  pushes.length === pushesBeforeOverDrain + 1 && pushes.at(-1).text.includes("ยังมีอีก")
+);
+await drainUploadQueue(env, idleMinute);
+check(
+  "and the following drain finishes it and says so",
+  pushes.at(-1).text.includes("ครบทุกไฟล์แล้ว") &&
     (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === 0
 );
 
