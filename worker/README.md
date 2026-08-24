@@ -1352,6 +1352,29 @@ specifically checks that the signed `state` param on the generated Google auth l
 decodes back to the same LINE user id the webhook event carried, which is the exact bug
 class the LIFF removal above fixed.
 
+### Duplicate cleanup (`/view/trips/:folderId?duplicates=1`)
+
+17.68 stopped the upload queue producing duplicate photos; it could not undo the ones already in
+Drive, and the bug is as old as the queue, so older trips can be carrying copies too. This scans
+one trip folder and offers to remove them (PLAN.md 17.69).
+
+- **Same filename means same file, with no heuristics.** `uploadTripMedia` names every upload
+  `<date>_<messageId>.<ext>`, and a LINE messageId identifies exactly one piece of media forever,
+  so two files sharing a name are always two copies of one photo. That exactness is what makes
+  offering to delete one of them safe. Anything fuzzier — same size, same minute, similar image —
+  is a guess, and a guess here throws away someone's only copy.
+- **The oldest copy always survives**: it is the upload the user was told about, the one existing
+  links point at, and the only choice that doesn't depend on the order Drive listed the folder in.
+- **Trashed, not deleted.** `files.delete` is permanent; this feature rests on the bot's own
+  judgement about which copy is redundant, so Drive's 30-day undo stays behind that judgement.
+- **The scan follows Drive's pagination** (bounded at 20 pages). The photo grid pages deliberately;
+  a duplicate scan cannot, because two copies routinely land on different pages and a single-page
+  check reports "no duplicates" for a folder full of them. A truncated scan says so, because
+  "no duplicates" from a partial scan is a different statement from "no duplicates".
+- **The POST re-runs the scan instead of trusting file ids posted back.** A form is not a promise:
+  ids from a stale tab or edited by hand would be a request to trash arbitrary files in the user's
+  Drive, and the page would look identical either way.
+
 ### Settings (`/view/settings`)
 
 The bot's name, its character, what it calls you, and your weather province

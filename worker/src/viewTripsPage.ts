@@ -19,11 +19,14 @@
 import {
   fetchDriveFileContent,
   getFileName,
+  listAllFilesInFolder,
   listFilesInFolder,
   listTripFolders,
+  trashFile,
   type DriveFileListPage,
   type DriveFolderSummary,
 } from "./drive.ts";
+import { duplicateFileCount, findDuplicateGroups, type DuplicateGroup } from "./tripDuplicates.ts";
 import type { Env } from "./index.ts";
 import { bangkokDateKey, formatThaiDateLabel } from "./thaiDate.ts";
 import {
@@ -83,10 +86,98 @@ function renderTripPhotoGrid(token: string, folderName: string, folderId: string
     ? `<div class="nav-links"><a href="/view/trips/${encodeURIComponent(folderId)}?token=${encodeURIComponent(token)}&page=${encodeURIComponent(page.nextPageToken)}">ดูรูปเพิ่มเติม ›</a></div>`
     : "";
 
+  const duplicatesLink = `<div class="nav-links"><a href="${duplicatesUrl(token, folderId)}">ตรวจหาไฟล์ซ้ำในทริปนี้ ›</a></div>`;
+
   return pageShell(
     folderName,
-    `<h1>${escapeHtml(folderName)}</h1>${backLink}${gridHtml}${loadMoreHtml}
+    `<h1>${escapeHtml(folderName)}</h1>${backLink}${gridHtml}${loadMoreHtml}${duplicatesLink}
 <p class="footnote">เห็นได้เฉพาะคุณคนเดียว · แตะรูปเพื่อดูขนาดเต็ม</p>`,
+    nav
+  );
+}
+
+function tripUrl(token: string, folderId: string): string {
+  return `/view/trips/${encodeURIComponent(folderId)}?token=${encodeURIComponent(token)}`;
+}
+
+function duplicatesUrl(token: string, folderId: string): string {
+  return `${tripUrl(token, folderId)}&duplicates=1`;
+}
+
+/**
+ * What would be removed, shown in full before anything is.
+ *
+ * The same two-speed rule the diary and accounts pages settled on, and with
+ * more reason than either: this is the only place the bot proposes deleting
+ * something the user never asked it about file by file. Every copy is named,
+ * dated, and shown, and the one that survives is labelled — so the decision
+ * being confirmed is visible rather than described.
+ */
+function renderDuplicatesPage(
+  token: string,
+  folderName: string,
+  folderId: string,
+  groups: DuplicateGroup[],
+  truncated: boolean,
+  notice?: string
+): string {
+  const nav = { token, active: "trips" as const };
+  const backLink = `<div class="nav-links"><a href="${tripUrl(token, folderId)}">‹ กลับไปดูรูปทริป</a></div>`;
+  const noticeHtml = notice ? `<p class="save-notice">${escapeHtml(notice)}</p>` : "";
+  // Said whenever the scan stopped early, not only when duplicates were
+  // found: "no duplicates" from a partial scan is a different statement from
+  // "no duplicates", and the user cannot tell them apart otherwise.
+  const truncatedHtml = truncated
+    ? `<p class="footnote">ทริปนี้มีไฟล์เยอะมาก ตรวจได้แค่บางส่วน — ลบรอบนี้แล้วกดตรวจซ้ำอีกครั้งเพื่อดูส่วนที่เหลือ</p>`
+    : "";
+
+  if (groups.length === 0) {
+    return pageShell(
+      `ไฟล์ซ้ำ · ${folderName}`,
+      `<h1>ไฟล์ซ้ำ</h1><p class="subtitle">${escapeHtml(folderName)}</p>
+${backLink}
+${noticeHtml}
+<div class="card"><p class="empty">ไม่พบไฟล์ซ้ำในทริปนี้</p></div>
+${truncatedHtml}
+<p class="footnote">เห็นได้เฉพาะคุณคนเดียว</p>`,
+      nav
+    );
+  }
+
+  const total = duplicateFileCount(groups);
+  const rows = groups
+    .map((g) => {
+      const kept = `<div class="dup-keep">เก็บไว้ · ${escapeHtml(formatThaiDateLabel(bangkokDateKey(new Date(g.keep.createdTime))))}</div>`;
+      const thumb = `<a href="/view/photo/${encodeURIComponent(g.keep.id)}?token=${encodeURIComponent(token)}" target="_blank" rel="noopener"><img class="dup-thumb" src="/view/photo/${encodeURIComponent(g.keep.id)}?token=${encodeURIComponent(token)}" loading="lazy" alt="${escapeHtml(g.name)}" /></a>`;
+      return `<tr>
+    <td>${thumb}</td>
+    <td class="note"><div class="dup-name">${escapeHtml(g.name)}</div>${kept}</td>
+    <td class="num">${g.remove.length + 1} ใบ<div class="dup-remove">ลบ ${g.remove.length}</div></td>
+  </tr>`;
+    })
+    .join("\n");
+
+  return pageShell(
+    `ไฟล์ซ้ำ · ${folderName}`,
+    `<h1>ไฟล์ซ้ำ</h1><p class="subtitle">${escapeHtml(folderName)}</p>
+${backLink}
+${noticeHtml}
+<div class="card">
+  <h2>พบ ${groups.length} รูปที่มีสำเนาซ้ำ</h2>
+  <p class="subtitle">ชื่อไฟล์ซ้ำกันแปลว่าเป็นรูปเดียวกันแน่นอน (ชื่อมีรหัสข้อความของ LINE อยู่) · เก็บใบที่อัปขึ้นก่อนไว้เสมอ</p>
+  <div class="table-scroll"><table class="data-table">
+    <thead><tr><th></th><th>ไฟล์</th><th class="num">มีอยู่</th></tr></thead>
+    <tbody>
+${rows}
+    </tbody>
+  </table></div>
+</div>
+<form method="post" action="${duplicatesUrl(token, folderId)}" class="confirm-actions">
+  <button type="submit">ลบไฟล์ซ้ำ ${total} ไฟล์</button>
+  <a href="${tripUrl(token, folderId)}">ยกเลิก</a>
+</form>
+<p class="footnote">ไฟล์ที่ลบจะไปอยู่ในถังขยะของ Google Drive กู้คืนได้ภายใน 30 วัน</p>
+${truncatedHtml}`,
     nav
   );
 }
@@ -118,6 +209,10 @@ export async function handleViewTripsRequest(request: Request, env: Env): Promis
       const folderName = await getFileName(session.accessToken, folderId);
       if (!folderName) return html(renderErrorPage("ไม่พบทริป", "ไม่พบทริปนี้ หรือไม่มีสิทธิ์เข้าถึง"), 404);
 
+      if (url.searchParams.get("duplicates")) {
+        return handleTripDuplicates(request, session, folderName, folderId);
+      }
+
       const page = await listFilesInFolder(session.accessToken, folderId, pageToken);
       return html(renderTripPhotoGrid(session.token, folderName, folderId, page));
     } catch (err) {
@@ -127,6 +222,70 @@ export async function handleViewTripsRequest(request: Request, env: Env): Promis
   }
 
   return html(renderErrorPage("ไม่พบหน้านี้", "ไม่พบหน้าที่ขอ"), 404);
+}
+
+
+/**
+ * The duplicate scan, and the delete behind it.
+ *
+ * The scan is re-run on the POST rather than trusting a list of file ids
+ * posted back from the page. A form is not a promise: ids from a stale tab —
+ * or edited by hand — would be a request to trash arbitrary files in the
+ * user's Drive, and the page would look exactly the same either way. Doing
+ * the work again costs a few Drive requests and means the only files that
+ * can ever be trashed are ones the current state of the folder says are
+ * redundant.
+ */
+async function handleTripDuplicates(
+  request: Request,
+  session: { token: string; accessToken: string },
+  folderName: string,
+  folderId: string
+): Promise<Response> {
+  const { files, truncated } = await listAllFilesInFolder(session.accessToken, folderId);
+  const groups = findDuplicateGroups(files);
+
+  if (request.method !== "POST") {
+    return html(renderDuplicatesPage(session.token, folderName, folderId, groups, truncated));
+  }
+
+  let trashed = 0;
+  let failed = 0;
+  for (const group of groups) {
+    for (const file of group.remove) {
+      try {
+        await trashFile(session.accessToken, file.id);
+        trashed++;
+      } catch (err) {
+        // One file failing must not abandon the rest — the next scan will
+        // simply offer whatever is still there.
+        console.error("handleTripDuplicates: trashing a duplicate failed", file.id, err);
+        failed++;
+      }
+    }
+  }
+
+  const notice =
+    trashed === 0 && failed === 0
+      ? "ไม่พบไฟล์ซ้ำที่ต้องลบแล้ว"
+      : failed > 0
+        ? `ลบไฟล์ซ้ำแล้ว ${trashed} ไฟล์ (อีก ${failed} ไฟล์ลบไม่สำเร็จ ลองกดใหม่อีกครั้งได้)`
+        : `ลบไฟล์ซ้ำแล้ว ${trashed} ไฟล์`;
+
+  // Re-scanned from Drive rather than reusing the groups above, so the page
+  // shows what is actually left after the deletes instead of what was there
+  // before them.
+  const after = await listAllFilesInFolder(session.accessToken, folderId);
+  return html(
+    renderDuplicatesPage(
+      session.token,
+      folderName,
+      folderId,
+      findDuplicateGroups(after.files),
+      after.truncated,
+      notice
+    )
+  );
 }
 
 const PHOTO_PATH_PREFIX = "/view/photo/";

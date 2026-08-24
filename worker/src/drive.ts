@@ -167,6 +167,52 @@ export async function listFilesInFolder(
   };
 }
 
+/**
+ * Every file in a trip folder, following Drive's pagination (PLAN.md 17.69).
+ *
+ * The photo grid deliberately pages — a trip can hold more files than are
+ * worth loading at once — but duplicate detection cannot: two copies of the
+ * same photo can easily land on different pages, and a check that only looks
+ * at one page reports "no duplicates" for a folder full of them.
+ *
+ * Bounded rather than looping until Drive says stop. A runaway pagination
+ * loop inside a Worker is a request that never returns, and a trip folder
+ * large enough to hit this ceiling is well past what one confirm page can
+ * usefully show anyway.
+ */
+const MAX_DUPLICATE_SCAN_PAGES = 20;
+
+export async function listAllFilesInFolder(
+  accessToken: string,
+  folderId: string
+): Promise<{ files: DriveFileSummary[]; truncated: boolean }> {
+  const files: DriveFileSummary[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_DUPLICATE_SCAN_PAGES; page++) {
+    const result = await listFilesInFolder(accessToken, folderId, pageToken);
+    files.push(...result.files);
+    if (!result.nextPageToken) return { files, truncated: false };
+    pageToken = result.nextPageToken;
+  }
+  return { files, truncated: true };
+}
+
+/**
+ * Moves a file to Drive's trash rather than deleting it (PLAN.md 17.69).
+ *
+ * `files.delete` is permanent and immediate; this is somebody's photo, and
+ * the whole feature is built on the bot's own judgement about which copy is
+ * redundant. Trashing keeps Drive's own 30-day undo behind that judgement,
+ * at no cost to the thing the user actually wanted — the duplicate stops
+ * being in the trip folder either way.
+ */
+export async function trashFile(accessToken: string, fileId: string): Promise<void> {
+  await driveFetch(accessToken, `/files/${encodeURIComponent(fileId)}?fields=id`, {
+    method: "PATCH",
+    body: JSON.stringify({ trashed: true }),
+  });
+}
+
 /** A trip folder's display name, or null specifically when it doesn't
  * exist (or isn't reachable with this access token — same 404 either
  * way). Any other failure throws instead, same distinction
