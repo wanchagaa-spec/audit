@@ -354,7 +354,7 @@ step sends no reply at all — a size threshold and a "queued, will confirm when
 existed at earlier stages of this fix and both turned out to be flood sources of their own, since
 LINE splits one multi-select send into several webhook calls. A `scheduled` handler (wired to a
 once-a-minute cron trigger in `wrangler.toml`) calls `drainUploadQueue`, which works through up
-to `DRAIN_BATCH_SIZE` (10) queued files at a time — **and each cron firing is its own Worker
+to `DRAIN_BATCH_SIZE` (5) queued files at a time — **and each cron firing is its own Worker
 invocation, with its own fresh subrequest/CPU budget**, so a batch of any size eventually gets through completely instead of
 losing files to a shared budget. Each drain sends one push message per user summarizing what
 just uploaded and whether more are still coming, ending with a final "all done" message once the
@@ -379,6 +379,27 @@ Two details make the flag exact:
 
 `countQueuedForUser` still exists for tests and diagnostics, where a count taken well after the
 fact is meaningful, and carries a comment saying it must not go back into the drain summary.
+
+**The same photo must never reach Drive twice** (PLAN.md 17.68). Getting the count right did not
+stop the queue handing the same job out twice, which it did in production — 8 photos sent, 17
+uploads, and duplicate files in the trip folder. There are two routes to it and neither can be
+closed inside KV:
+
+1. KV's eventual consistency again — an entry deleted right after a successful upload can still
+   be read back for up to a minute, and uploaded again.
+2. The cron fires every minute while a drain of several videos can take longer than that, so two
+   drains overlap and work through the same entries.
+
+Drive is the only strongly consistent thing in the loop, and the filename already carries the
+messageId (`YYYY-MM-DD_<messageId>.<ext>`), so it can answer "did this one already land?"
+exactly. `findUploadedMessageIds` asks once per drain batch, OR-ing the ids into a single query
+rather than asking per file — the subrequest budget is the reason the queue exists at all. A
+failed lookup is treated as "not uploaded" and the drain proceeds: a duplicate is a nuisance, a
+photo that never uploads is not.
+
+`DRAIN_BATCH_SIZE` dropped from 10 to 5 alongside it, which shortens the window in which a drain
+can still be running when the next one starts. That makes an overlap *rarer*; the Drive check is
+what makes it *harmless*. Both are needed.
 
 **The idle tick has to be cheap** (PLAN.md 17.66). The cron fires every minute because the 07:00
 briefing needs that granularity, and the drain originally opened every tick with a `kv.list()`

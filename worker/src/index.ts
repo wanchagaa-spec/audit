@@ -25,7 +25,7 @@ import {
   matchDiaryCommand,
   promptDiaryCreateFromDraft,
 } from "./diaryCommands.ts";
-import { uploadFileToFolder } from "./drive.ts";
+import { findUploadedMessageIds, uploadFileToFolder } from "./drive.ts";
 import { buildGoogleAuthorizeUrl, exchangeCodeForTokens, refreshAccessToken } from "./googleAuth.ts";
 import {
   answerTaskList,
@@ -125,6 +125,7 @@ import {
   enqueueUploads,
   shouldScanQueue,
   listQueueBatch,
+  type QueueEntry,
   type QueuedUpload,
 } from "./uploadQueue.ts";
 
@@ -1487,7 +1488,15 @@ async function processWithConcurrencyLimit<T>(
 // ride out), most or all files in one drain could need a retry at once.
 // Even fully pessimistic (every single item retries) — 10 × 4 + a couple of
 // housekeeping requests ≈ low 40s — stays clear of the ceiling.
-const DRAIN_BATCH_SIZE = 10;
+// Deliberately smaller than the subrequest budget would allow (PLAN.md
+// 17.68). The cron fires every minute; a drain that takes longer than that
+// is still running when the next one starts, and two drains working the same
+// entries upload every one of them twice. Halving the batch halves the
+// window a drain is exposed to that. It costs nothing in throughput that
+// matters — 5 files a minute is 300 an hour, far past any real trip — and
+// the Drive check in findAlreadyUploaded is what makes an overlap harmless
+// rather than merely rarer.
+const DRAIN_BATCH_SIZE = 5;
 
 // Resolves the account link and active trip once per sender instead of once
 // per file, replying with the appropriate prompt and returning null if
@@ -1812,6 +1821,38 @@ interface DrainUserSummary {
   failed: number;
 }
 
+/**
+ * The subset of a drain batch that is already in Drive.
+ *
+ * Best-effort by design: a failed lookup returns an empty set, so the drain
+ * behaves exactly as it did before this check existed rather than stalling a
+ * whole batch over a Drive hiccup. A duplicate is a nuisance; a photo that
+ * never uploads is not.
+ */
+async function findAlreadyUploaded(env: Env, entries: QueueEntry[]): Promise<Set<string>> {
+  const byFolder = new Map<string, { lineUserId: string; messageIds: string[] }>();
+  for (const { job } of entries) {
+    const group = byFolder.get(job.tripFolderId) ?? { lineUserId: job.lineUserId, messageIds: [] };
+    group.messageIds.push(job.messageId);
+    byFolder.set(job.tripFolderId, group);
+  }
+
+  const uploaded = new Set<string>();
+  for (const [folderId, { lineUserId, messageIds }] of byFolder) {
+    try {
+      const link = await getAccountLink(env.ACCOUNTS, lineUserId);
+      if (!link) continue;
+      const found = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+        findUploadedMessageIds(accessToken, folderId, messageIds)
+      );
+      for (const id of found) uploaded.add(id);
+    } catch (err) {
+      console.error("upload queue: checking Drive for already-uploaded files failed", folderId, err);
+    }
+  }
+  return uploaded;
+}
+
 // Called on the cron trigger configured in wrangler.toml (see
 // DRAIN_BATCH_SIZE above for the full story of why this exists). Each firing
 // is its own Worker invocation with its own
@@ -1843,6 +1884,11 @@ export async function drainUploadQueue(env: Env, now: Date = new Date()): Promis
   // whichever files didn't belong to the last-processed job.
   const summaries = new Map<string, DrainUserSummary>();
 
+  // One Drive lookup for the whole batch, before any of it is uploaded:
+  // which of these files are already in their trip folder? See
+  // findUploadedMessageIds for why KV alone cannot answer this.
+  const alreadyUploaded = await findAlreadyUploaded(env, entries);
+
   for (const { key, job } of entries) {
     const summaryKey = `${job.lineUserId} ${job.tripFolderId}`;
     const summary = summaries.get(summaryKey) ?? {
@@ -1857,6 +1903,15 @@ export async function drainUploadQueue(env: Env, now: Date = new Date()): Promis
       failed: 0,
     };
     try {
+      // Already in Drive — uploading again is exactly how a duplicate gets
+      // made, so drop the queue entry and say nothing. Not counted as
+      // succeeded: the drain that actually uploaded it already told the
+      // user, and counting it twice would inflate the very totals that made
+      // this bug visible.
+      if (alreadyUploaded.has(job.messageId)) {
+        console.log(`upload queue: ${job.messageId} is already in Drive, skipping`);
+        continue;
+      }
       const link = await getAccountLink(env.ACCOUNTS, job.lineUserId);
       // A missing link means this file cannot be uploaded at all (the
       // account was unlinked while the file sat in the queue) — it must

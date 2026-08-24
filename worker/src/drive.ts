@@ -54,6 +54,54 @@ export async function getOrCreateAlbumRoot(accessToken: string): Promise<string>
   return created.id;
 }
 
+/**
+ * Which of these messageIds already have a file in the trip folder
+ * (PLAN.md 17.68).
+ *
+ * The upload queue cannot promise exactly-once on its own. KV is eventually
+ * consistent, so an entry deleted after a successful upload can still be
+ * read back for up to a minute and uploaded again; and because the cron
+ * fires every minute while a drain of several videos can take longer than
+ * that, two drains can overlap and work through the same entries. Both were
+ * observed in production as duplicate photos in one trip folder.
+ *
+ * Drive is the one strongly consistent thing in the loop, and the filename
+ * already carries the messageId (see uploadTripMedia), so it can answer
+ * "did this one already land?" exactly. One request covers a whole drain
+ * batch — the messageIds are OR-ed into a single query rather than asked one
+ * at a time, because the subrequest budget is the reason the queue exists.
+ *
+ * A failure here is not fatal to the drain: the caller treats "don't know"
+ * as "not uploaded" and proceeds, which is the same behaviour as before this
+ * existed.
+ */
+export async function findUploadedMessageIds(
+  accessToken: string,
+  folderId: string,
+  messageIds: string[]
+): Promise<Set<string>> {
+  if (messageIds.length === 0) return new Set();
+  const nameClauses = messageIds
+    .map((id) => `name contains '${escapeDriveQueryValue(id)}'`)
+    .join(" or ");
+  const q = `trashed=false and '${escapeDriveQueryValue(folderId)}' in parents and (${nameClauses})`;
+  const params = new URLSearchParams({
+    q,
+    fields: "files(name)",
+    // One page is always enough: at most one file per requested id can match,
+    // and a drain batch is far smaller than Drive's page size.
+    pageSize: String(Math.max(messageIds.length, 10)),
+    spaces: "drive",
+  });
+  const data = await driveFetch(accessToken, `/files?${params}`);
+  const names: string[] = (data.files ?? []).map((f: any) => f.name ?? "");
+  // Matched back by substring rather than by reconstructing the filename:
+  // the extension depends on the content type Drive was handed, which is
+  // only known after the media has been fetched from LINE — the whole thing
+  // this check exists to avoid doing twice.
+  return new Set(messageIds.filter((id) => names.some((name) => name.includes(id))));
+}
+
 // Everything below is for the web viewer (PLAN.md 16) reading trip photos
 // back — nothing above this point ever needed to list or read a file back,
 // only create folders and upload into them.
