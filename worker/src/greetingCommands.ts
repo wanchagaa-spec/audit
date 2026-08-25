@@ -15,6 +15,7 @@ import { fetchNewsSummary } from "./news.ts";
 import { applyPersona } from "./persona.ts";
 import { buildRecurringStatus, recurringDueLines } from "./recurring.ts";
 import { readAllDiaryEntries, readRecurringWithPaid, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
+import { listStuckUploads, type StuckUploads } from "./uploadQueue.ts";
 import { getBotSettings, wantsMorningBriefing } from "./settings.ts";
 import { geocodeProvince, fetchWeatherSummary } from "./weather.ts";
 import {
@@ -205,6 +206,31 @@ async function buildTodayShiftLine(
   }
 }
 
+/**
+ * Photos that should have uploaded by now (PLAN.md 17.70).
+ *
+ * The one line here that reports on the bot rather than on the day. It
+ * exists because the KV quota failure went unnoticed for an unknown number
+ * of days — the queue stalled every night and nothing said so, until
+ * Cloudflare sent an email. The evidence was in the bot's own queue the
+ * whole time.
+ *
+ * Deliberately outside the Google-token block below: a revoked or expired
+ * refresh token is itself a reason uploads stop, and a warning that
+ * disappears exactly when one of its causes fires is not a warning.
+ */
+function buildStuckUploadsLine(stuck: StuckUploads | undefined, now: Date): string {
+  if (!stuck) return "";
+  const hours = Math.floor((now.getTime() - stuck.oldestQueuedAtMs) / (60 * 60 * 1000));
+  // "ตั้งแต่เมื่อวาน" reads better than "24 ชั่วโมง" and is the case that
+  // actually matters — a queue that has survived a whole night is stalled,
+  // not busy. Entries with no recorded time land here too (see
+  // listStuckUploads), which is the honest reading of "we don't know, but
+  // it predates the deploy".
+  const since = hours >= 24 || stuck.oldestQueuedAtMs === 0 ? "ตั้งแต่เมื่อวาน" : `มา ${Math.max(hours, 1)} ชั่วโมงแล้ว`;
+  return `⚠️ มีรูป/คลิป ${stuck.count} ไฟล์ค้างอยู่ในคิวอัปโหลด${since} ปกติควรขึ้น Drive ภายในไม่กี่นาที — บอทจะพยายามอัปต่อให้เอง ถ้าพรุ่งนี้ยังเห็นข้อความนี้อยู่แปลว่ามีอะไรผิดปกติจริง`;
+}
+
 /** Due and overdue bills for the 7:00 briefing (PLAN.md 17.61). Best-effort
  * like every other line here: a failure omits this one line rather than
  * costing the user their whole briefing. */
@@ -291,12 +317,22 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
   const marketLines = buildGoldBtcLines(marketSnapshot);
   const marketBlock = marketLines.length > 0 ? marketLines.join("\n") : null;
   const yesterday = addDaysToDateKey(today, -1);
+  // One KV list for the whole broadcast, alongside the other shared fetches
+  // above rather than one per person (PLAN.md 17.70).
+  const stuckUploads = await listStuckUploads(kv, now).catch((err) => {
+    console.error("broadcastMorningBriefings: checking for stuck uploads failed", err);
+    return new Map<string, StuckUploads>();
+  });
 
   await processInBatches(personalUserIds, BROADCAST_CONCURRENCY_LIMIT, async (lineUserId) => {
     try {
       const body = await buildBriefingBody(env, kv, lineUserId, newsBlock);
       const extras: string[] = [];
       if (marketBlock) extras.push(marketBlock);
+      // Needs no Google token, so it is pushed here rather than inside the
+      // block below — see buildStuckUploadsLine.
+      const stuckLine = buildStuckUploadsLine(stuckUploads.get(lineUserId), now);
+      if (stuckLine) extras.push(stuckLine);
 
       // The Calendar/shift/diary extras need a fresh Google access token —
       // unlike weather/news above, which need none at all. A failure here

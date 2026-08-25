@@ -93,6 +93,7 @@ function nextDriveId(prefix) {
   return `${prefix}-${driveIdSeq}`;
 }
 let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
+let simulateRefreshFailure = false; // makes every Google token refresh fail, to simulate a revoked account link
 let simulateTrashFailureOnce = false; // makes the next trashFile call fail, to prove one bad file doesn't abandon the rest
 let simulateDriveDedupLookupFailure = false; // makes the next findUploadedMessageIds lookup fail, to prove the drain still uploads rather than stalling
 let simulateFolderNameFetchFailure = false; // makes the next Drive folder-name (fields=name) lookup fail, to exercise the not-found-vs-transient-failure distinction
@@ -306,6 +307,9 @@ globalThis.fetch = async (url, init = {}) => {
   }
 
   if (u.includes("oauth2.googleapis.com/token")) {
+    if (simulateRefreshFailure) {
+      return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+    }
     const params = new URLSearchParams(init.body);
     const body = { access_token: "fake-access-token", expires_in: 3600 };
     // Only the initial code exchange (exchangeCodeForTokens) returns a
@@ -1336,7 +1340,7 @@ const {
 const { setAccountLink, getAccountLink, getPending } = await import("../src/state.ts");
 const { verifyState, signState, signViewToken, verifyViewToken } = await import("../src/signedState.ts");
 const { bangkokDateKey, bangkokMonthKey, addDaysToDateKey, formatThaiDateLabel, formatThaiDateLabelFull, bangkokStartOfDayIso } = await import("../src/thaiDate.ts");
-const { countQueuedForUser } = await import("../src/uploadQueue.ts");
+const { countQueuedForUser, listStuckUploads } = await import("../src/uploadQueue.ts");
 const { getGroupMemberProfile, getGroupSummary } = await import("../src/line.ts");
 const { buildReturnGreeting, broadcastMorningBriefings } = await import("../src/greetingCommands.ts");
 const { buildHelpText } = await import("../src/commands.ts");
@@ -1859,11 +1863,105 @@ check(
   "the broadcast's diary line is an AI reflection built from yesterday's real diary text",
   broadcastPushes[0]?.text.includes("เมื่อวานไปวิ่งออกกำลังกายมา")
 );
+// A clean queue must say nothing at all. A daily warning that fires when
+// nothing is wrong is one people learn to skip, which costs the line the
+// only job it has.
+check(
+  "the briefing says nothing about uploads when the queue is empty",
+  !broadcastPushes[0]?.text.includes("ค้างอยู่ในคิวอัปโหลด")
+);
+
+// ---- Warning about photos that should have uploaded (PLAN.md 17.70) -----
+// The KV quota failure went unnoticed for an unknown number of days: the
+// queue stalled every night between roughly 23:40 and 07:00 and nothing said
+// so, until Cloudflare sent an email. The evidence was sitting in the bot's
+// own queue the whole time.
+
+const stuckQueueEntry = (messageId, queuedAtMs) => {
+  const key = `upload-queue:${messageId}`;
+  env.ACCOUNTS.store.set(
+    key,
+    // The body is never read by the stuck check — it answers entirely from
+    // the listing's metadata, which is the point (no read per queued file).
+    JSON.stringify({ lineUserId, pushTarget: lineUserId, kind: "image", messageId, timestampMs: queuedAtMs, tripFolderId: "trip-folder-placeholder", tripName: "ทะเล" })
+  );
+  env.ACCOUNTS.metadataStore.set(key, { lineUserId, queuedAtMs });
+};
+
+const broadcastNowMs = bangkok0700TodayUtc.getTime();
+// Queued two minutes ago: mid-flight, not stuck. The drain runs every
+// minute, so warning about this would fire at every normal photo send that
+// happened to straddle 07:00.
+stuckQueueEntry("fresh-queued-1", broadcastNowMs - 2 * 60 * 1000);
+await kv.delete("last-broadcast-date");
+let pushesBeforeFreshCheck = pushes.length;
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check(
+  "a file queued moments ago is treated as in flight, not as stuck",
+  pushes.length === pushesBeforeFreshCheck + 1 && !pushes.at(-1).text.includes("ค้างอยู่ในคิวอัปโหลด")
+);
+
+// Older than the sweep interval: the periodic sweep has had a full chance to
+// pick this up, so it is not waiting its turn — the drain is not running.
+stuckQueueEntry("stuck-queued-1", broadcastNowMs - 90 * 60 * 1000);
+stuckQueueEntry("stuck-queued-2", broadcastNowMs - 45 * 60 * 1000);
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const stuckBriefing = pushes.at(-1).text;
+check(
+  "the briefing counts the files that are genuinely stuck and leaves the fresh one out",
+  stuckBriefing.includes("2 ไฟล์ค้างอยู่ในคิวอัปโหลด")
+);
+check(
+  "and it reports the age of the oldest one, not the newest",
+  stuckBriefing.includes("1 ชั่วโมง")
+);
+
+// Entries written before this shipped carry no queuedAtMs. Counting them as
+// stuck is the right direction to be wrong in — they predate the deploy, so
+// they are old by definition.
+env.ACCOUNTS.store.set(
+  "upload-queue:legacy-no-timestamp",
+  JSON.stringify({ lineUserId, pushTarget: lineUserId, kind: "image", messageId: "legacy-no-timestamp", timestampMs: 0, tripFolderId: "trip-folder-placeholder", tripName: "ทะเล" })
+);
+env.ACCOUNTS.metadataStore.set("upload-queue:legacy-no-timestamp", { lineUserId });
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check(
+  "a queue entry with no recorded time counts as stuck rather than being skipped",
+  pushes.at(-1).text.includes("3 ไฟล์ค้างอยู่ในคิวอัปโหลด") && pushes.at(-1).text.includes("ตั้งแต่เมื่อวาน")
+);
+
+// A revoked Google token is itself a reason uploads stop, so the warning has
+// to survive one — it is built before the token refresh, not inside it.
+simulateRefreshFailure = true;
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check(
+  "the warning still goes out when the Google token cannot be refreshed",
+  pushes.at(-1).text.includes("ค้างอยู่ในคิวอัปโหลด")
+);
+simulateRefreshFailure = false;
+
+for (const key of [...env.ACCOUNTS.store.keys()].filter((k) => k.startsWith("upload-queue:"))) {
+  await env.ACCOUNTS.delete(key);
+}
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check(
+  "once the queue drains, the warning stops on its own",
+  !pushes.at(-1).text.includes("ค้างอยู่ในคิวอัปโหลด")
+);
+
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
 
+// Compared against the count immediately before this call rather than the
+// section's original baseline: the stuck-upload tests above deliberately
+// clear the once-a-day guard and broadcast again, so the baseline has moved.
+const pushesBeforeDuplicateCheck = pushes.length;
 await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
-check("a second 07:00 firing the same day doesn't send a duplicate broadcast", pushes.length === pushesBeforeBroadcast + 1);
+check("a second 07:00 firing the same day doesn't send a duplicate broadcast", pushes.length === pushesBeforeDuplicateCheck);
 
 const returnGreetingAfterBroadcastReply = await handleTextMessage(env, lineUserId, "สวัสดี", origin);
 check(
@@ -2034,6 +2132,24 @@ check(
 check(
   `all ${smallBatchSize} photos were queued`,
   (await countQueuedForUser(env.ACCOUNTS, lineUserId)) === smallBatchSize
+);
+
+// The stuck-upload warning (PLAN.md 17.70) reads the queued-at time from KV
+// metadata that enqueueUploads has to write. Driven through the real enqueue
+// here rather than by planting metadata by hand: a test that writes the
+// metadata itself passes just as well against an enqueue that stopped
+// recording it, and every file would then look stuck from the moment it was
+// queued.
+const justQueuedAt = Date.now();
+check(
+  "files queued moments ago are not reported as stuck",
+  (await listStuckUploads(env.ACCOUNTS, new Date(justQueuedAt))).size === 0
+);
+const stuckLater = await listStuckUploads(env.ACCOUNTS, new Date(justQueuedAt + 90 * 60 * 1000));
+check(
+  "the same files are reported as stuck once they have sat there long enough",
+  stuckLater.get(lineUserId)?.count === smallBatchSize &&
+    Math.abs((stuckLater.get(lineUserId)?.oldestQueuedAtMs ?? 0) - justQueuedAt) < 60 * 1000
 );
 
 // Draining actually performs the uploads, one Drive subrequest per file,
