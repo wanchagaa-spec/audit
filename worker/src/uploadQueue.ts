@@ -122,10 +122,16 @@ export async function enqueueUploads(kv: KVNamespace, jobs: QueuedUpload[]): Pro
   // Awaited on its own line rather than folded into the Promise.all below —
   // see markQueuePending for why it has to land first.
   await markQueuePending(kv);
+  const queuedAtMs = Date.now();
   await Promise.all(
     jobs.map((job) =>
       kv.put(`${QUEUE_PREFIX}${job.messageId}`, JSON.stringify(job), {
-        metadata: { lineUserId: job.lineUserId },
+        // queuedAtMs rides in the metadata, not just in the job body, so the
+        // stuck-upload check can answer "how long has this been sitting
+        // here" from the listing alone — kv.list returns metadata inline,
+        // and reading every value to find out would cost one read per queued
+        // file (PLAN.md 17.70).
+        metadata: { lineUserId: job.lineUserId, queuedAtMs },
       })
     )
   );
@@ -200,4 +206,59 @@ export async function listQueueBatch(kv: KVNamespace, limit: number): Promise<Qu
 
 export async function deleteQueueEntry(kv: KVNamespace, key: string): Promise<void> {
   await kv.delete(key);
+}
+
+/** How long a file may sit in the queue before it counts as stuck.
+ *
+ * Matched to SWEEP_EVERY_MINUTES: by then the periodic sweep has had a full
+ * chance to pick the file up even with the pending flag lost, so anything
+ * still queued is not "waiting its turn", it is a drain that is not running.
+ * Anything shorter would fire at a large batch that is simply mid-flight. */
+const STUCK_AFTER_MS = SWEEP_EVERY_MINUTES * 60 * 1000;
+
+export interface StuckUploads {
+  count: number;
+  oldestQueuedAtMs: number;
+}
+
+/**
+ * Files that should have uploaded by now, per subject (PLAN.md 17.70).
+ *
+ * Exists because of how the KV quota failure was found: the queue stopped
+ * draining every night between roughly 23:40 and 07:00 for an unknown number
+ * of days, and nothing noticed. It took an email from Cloudflare. The bot
+ * held the evidence the whole time — files sitting in its own queue — and
+ * never looked.
+ *
+ * One list for the whole broadcast rather than one per person: the caller
+ * already fetches the shared parts of the briefing once, and this belongs
+ * with them.
+ *
+ * Entries written before this shipped carry no queuedAtMs and are counted as
+ * stuck. That is the right direction to be wrong in — they predate the
+ * deploy, so they are old by definition, and a warning about a file that
+ * turns out to be fine costs a line of text while silence about a stalled
+ * queue costs the photos.
+ */
+export async function listStuckUploads(
+  kv: KVNamespace,
+  now: Date = new Date()
+): Promise<Map<string, StuckUploads>> {
+  const cutoff = now.getTime() - STUCK_AFTER_MS;
+  const { keys } = await kv.list<{ lineUserId?: string; queuedAtMs?: number }>({ prefix: QUEUE_PREFIX });
+  const bySubject = new Map<string, StuckUploads>();
+  for (const key of keys) {
+    const lineUserId = key.metadata?.lineUserId;
+    if (!lineUserId) continue;
+    const queuedAtMs = key.metadata?.queuedAtMs ?? 0;
+    if (queuedAtMs > cutoff) continue;
+    const existing = bySubject.get(lineUserId);
+    if (existing) {
+      existing.count++;
+      existing.oldestQueuedAtMs = Math.min(existing.oldestQueuedAtMs, queuedAtMs);
+    } else {
+      bySubject.set(lineUserId, { count: 1, oldestQueuedAtMs: queuedAtMs });
+    }
+  }
+  return bySubject;
 }

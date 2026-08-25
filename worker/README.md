@@ -898,6 +898,26 @@ Why the bot does not work out for itself which bills are paid: it would have to 
 against `Transactions`, and two bills of the same size in the same category are
 indistinguishable that way. A wrong guess in a money feature is worse than no answer.
 
+**The briefing also reports on the bot itself** (PLAN.md 17.70): if photos are still sitting in
+the upload queue, it says so. This exists because of how the KV quota failure was found — the
+queue stopped draining every night between roughly 23:40 and 07:00 for an unknown number of days
+and nothing noticed, until Cloudflare sent an email. The evidence was in the bot's own queue the
+whole time and the bot never looked. It rides the same free push as the bill line, and costs one
+KV list a day for the whole broadcast.
+
+- **"Stuck" means older than 30 minutes**, tied to `SWEEP_EVERY_MINUTES`: past that, the periodic
+  sweep has had a full chance to pick the file up even with the pending flag lost, so what is left
+  is not waiting its turn — the drain is not running. Anything shorter fires at a large batch
+  that is simply mid-flight.
+- **The queued-at time lives in KV metadata**, not only in the job body. `kv.list` returns
+  metadata inline; reading it from the body would cost one read per queued file, against
+  everything 17.66 was for.
+- **The line is built outside the Google-token block.** A revoked refresh token is itself a
+  reason uploads stop, and a warning that vanishes exactly when one of its causes fires is not a
+  warning.
+- **An empty queue says nothing at all.** A daily warning that fires when nothing is wrong is one
+  people learn to skip, which costs the line the only job it has.
+
 Two tabs, `Recurring` (the definitions) and `RecurringPaid` (one row per bill per month) —
 the same shape `Budgets` already uses, so they share its upsert/delete code. Both are created
 lazily and cached in KV like `Budgets` and `Diary`, which is what makes this safe for books
