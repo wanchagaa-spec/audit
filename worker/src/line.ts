@@ -70,15 +70,30 @@ export interface LineWebhookBody {
     | LineImageMessageEvent
     | LineVideoMessageEvent
     | LineLocationMessageEvent
+    | LineAudioMessageEvent
     | LineUnsupportedMessageEvent
     | { type: string; [key: string]: unknown }
   >;
 }
 
-function toBase64(bytes: ArrayBuffer): string {
-  const arr = new Uint8Array(bytes);
+/**
+ * Shared with voice.ts, which base64s whole audio files (PLAN.md 17.74).
+ *
+ * Chunked rather than byte-by-byte because of that second caller: the
+ * obvious `String.fromCharCode(...bytes)` spreads a million arguments onto
+ * the call stack for a megabyte of audio and throws, and appending one
+ * character at a time across a million iterations is slow enough to matter
+ * inside a webhook. Neither shows up on the 32-byte signature this was
+ * originally written for, which is exactly why it is one function now
+ * instead of two that look alike.
+ */
+export function toBase64(bytes: ArrayBuffer | Uint8Array): string {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const CHUNK = 0x8000;
   let binary = "";
-  for (const byte of arr) binary += String.fromCharCode(byte);
+  for (let i = 0; i < arr.length; i += CHUNK) {
+    binary += String.fromCharCode(...arr.subarray(i, i + CHUNK));
+  }
   return btoa(binary);
 }
 
@@ -192,6 +207,25 @@ export function isLocationMessageEvent(
  * for stickers/audio/files the way there is for photos, so there's no
  * unambiguous signal that would justify replying to one of these in a
  * group (see the image/video comment above for that reasoning in full). */
+export interface LineAudioMessageEvent {
+  type: "message";
+  message: { type: "audio"; id: string; duration?: number };
+  source: LineEventSource;
+  replyToken: string;
+  timestamp: number;
+}
+
+export function isAudioMessageEvent(
+  event: LineWebhookBody["events"][number]
+): event is LineAudioMessageEvent {
+  return (
+    event.type === "message" &&
+    "message" in event &&
+    (event as LineAudioMessageEvent).message?.type === "audio" &&
+    typeof (event as LineAudioMessageEvent).message?.id === "string"
+  );
+}
+
 export function isUnsupportedMessageEvent(
   event: LineWebhookBody["events"][number]
 ): event is LineUnsupportedMessageEvent {
@@ -199,7 +233,7 @@ export function isUnsupportedMessageEvent(
     event.type === "message" &&
     "message" in event &&
     typeof (event as LineUnsupportedMessageEvent).message?.type === "string" &&
-    !["text", "image", "video", "location"].includes((event as LineUnsupportedMessageEvent).message.type) &&
+    !["text", "image", "video", "location", "audio"].includes((event as LineUnsupportedMessageEvent).message.type) &&
     (event as LineUnsupportedMessageEvent).source?.type === "user"
   );
 }

@@ -52,6 +52,7 @@ import {
   findSelfMention,
   getGroupMemberProfile,
   getGroupSummary,
+  isAudioMessageEvent,
   isImageMessageEvent,
   isLocationMessageEvent,
   isTextMessageEvent,
@@ -62,6 +63,7 @@ import {
   stripSelfMention,
   verifyLineSignature,
   type LineEventSource,
+  type LineAudioMessageEvent,
   type LineImageMessageEvent,
   type LineVideoMessageEvent,
   type LineWebhookBody,
@@ -114,6 +116,7 @@ import { handleViewSettingsRequest } from "./viewSettingsPage.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, matchViewLinkCommand } from "./viewCommands.ts";
 import { answerLotteryCheck, answerLotteryResult, matchLotteryCommand } from "./lotteryCommands.ts";
+import { transcribeVoiceMessage } from "./voice.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewHelpRequest } from "./viewHelpPage.ts";
 import { handleViewMoviesRequest } from "./viewMoviesPage.ts";
@@ -1573,6 +1576,43 @@ async function resolveMediaBatchContext(
   return { refreshToken: link.refreshToken, trip };
 }
 
+/**
+ * A voice note, handled by turning it into text and then doing nothing
+ * special with it (PLAN.md 17.74).
+ *
+ * The transcript is fed straight into handleTextMessage, so speaking
+ * "ค่ากาแฟ 60" is the same event as typing it: same interpreter, same
+ * confirm-before-save, same everything. Every feature this bot has works by
+ * voice without any of them being told about audio.
+ *
+ * The transcript is echoed back above the answer. A misheard number is a
+ * wrong amount in someone's accounts, and the confirm step can only protect
+ * against that if the user can see what was heard — "60" misheard as "16"
+ * produces a perfectly confident, perfectly wrong confirmation otherwise.
+ */
+async function handleAudioMessage(env: Env, event: LineAudioMessageEvent, origin: string): Promise<string> {
+  const subjectId = subjectIdForSource(event.source);
+  try {
+    const transcript = await transcribeVoiceMessage(
+      event.message.id,
+      env.LINE_CHANNEL_ACCESS_TOKEN,
+      env.GEMINI_API_KEY,
+      env.ACCOUNTS
+    );
+    // Nothing heard is said plainly rather than guessed at. Acting on words
+    // nobody spoke is the worst failure available to a bot that records
+    // money.
+    if (!transcript) {
+      return "ฟังข้อความเสียงไม่ออกเลย ลองพูดใหม่อีกทีหรือพิมพ์มาก็ได้นะ";
+    }
+    const reply = await handleTextMessage(env, subjectId, transcript, origin);
+    return `🎤 "${transcript}"\n\n${reply}`;
+  } catch (err) {
+    console.error("handleAudioMessage failed", err);
+    return "ตอนนี้ฟังข้อความเสียงไม่ได้ ลองพิมพ์มาแทนได้นะ";
+  }
+}
+
 async function handleQueuedMediaBatch(
   env: Env,
   subjectId: string,
@@ -1706,8 +1746,10 @@ async function handleOneOtherEvent(
       if (reply !== null) {
         await replyOrPush(event, reply, env);
       }
+    } else if (isAudioMessageEvent(event)) {
+      await replyOrPush(event, await handleAudioMessage(env, event, origin), env);
     } else if (isUnsupportedMessageEvent(event)) {
-      await replyOrPush(event, "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพและวิดีโอ", env);
+      await replyOrPush(event, "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพ วิดีโอ และข้อความเสียง", env);
     }
   } catch (err) {
     if (isTextMessageEvent(event) || isLocationMessageEvent(event) || isUnsupportedMessageEvent(event)) {
