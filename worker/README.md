@@ -1430,6 +1430,35 @@ one trip folder and offers to remove them (PLAN.md 17.69).
   ids from a stale tab or edited by hand would be a request to trash arbitrary files in the user's
   Drive, and the page would look identical either way.
 
+### Thai lottery results (PLAN.md 17.73)
+
+`ผลหวย` gives the latest draw; `ตรวจหวย <เลข>` checks a number against it. Source is
+[rayriffy/thai-lotto-api](https://github.com/rayriffy/thai-lotto-api) — free, no key, no account,
+the same rule every integration here follows.
+
+What makes this different from the movie or hotel lookups: it is the only thing the bot says that
+someone might act on financially, and the upstream is a **community service that scrapes a news
+site**, not the Government Lottery Office's own feed. That distinction is load-bearing, not
+trivia.
+
+- **The matching rules are the real ones.** Prizes 1–5 and the neighbouring prize compare all six
+  digits; เลขหน้า 3 ตัว compares the first three; เลขท้าย 3 ตัว the last three; เลขท้าย 2 ตัว
+  the last two. One ticket can win several at once, so a check reports every match rather than
+  stopping at the first. A 3-digit entry also wins the เลขท้าย 2 ตัว it implies — an earlier
+  version filtered that out, which told people they had won less than they had.
+- **Categories are keyed off the upstream's `id`, not its display names.** A wording change on
+  the site it scrapes would otherwise turn a last-two-digits prize into a full-number one,
+  silently.
+- **The draw date is on both answers.** "ไม่ถูก" against last month's draw is a wrong answer that
+  reads exactly like a right one.
+- **The pointer to the official source appears only on a win**, not on a plain results listing. A
+  disclaimer attached to every reply is one nobody reads by the time it matters.
+- **`หวย` alone is not a trigger**, unlike `ฝุ่น`: it sits inside "ซื้อหวย 200", an expense this
+  bot has recorded far longer and that people use far more often. The interpreter is told the
+  same — buying a ticket with an amount is a `transaction`.
+- **A failure never produces a number.** Unreachable source, or a "successful" response with no
+  numbers in it (what a broken scrape looks like), both say so.
+
 ### Settings (`/view/settings`)
 
 The bot's name, its character, what it calls you, and your weather province

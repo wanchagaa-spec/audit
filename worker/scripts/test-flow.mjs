@@ -93,6 +93,24 @@ function nextDriveId(prefix) {
   return `${prefix}-${driveIdSeq}`;
 }
 let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
+let simulateLotteryFailure = false; // one-shot: fails the next lottery request
+let simulateLotteryGarbage = false; // one-shot: returns a "successful" but empty draw, the shape a broken scrape produces
+let mockLotteryDraw = {
+  status: "success",
+  response: {
+    date: "16 สิงหาคม 2569",
+    prizes: [
+      { id: "prizeFirst", name: "รางวัลที่ 1", reward: "6000000", amount: 1, number: ["735867"] },
+      { id: "prizeFirstNear", name: "รางวัลข้างเคียงรางวัลที่ 1", reward: "100000", amount: 2, number: ["735866", "735868"] },
+      { id: "prizeSecond", name: "รางวัลที่ 2", reward: "200000", amount: 2, number: ["123456", "999888"] },
+    ],
+    runningNumbers: [
+      { id: "runningNumberFrontThree", name: "รางวัลเลขหน้า 3 ตัว", reward: "4000", amount: 2, number: ["701", "884"] },
+      { id: "runningNumberBackThree", name: "รางวัลเลขท้าย 3 ตัว", reward: "4000", amount: 2, number: ["867", "412"] },
+      { id: "runningNumberBackTwo", name: "รางวัลเลขท้าย 2 ตัว", reward: "2000", amount: 1, number: ["67"] },
+    ],
+  },
+};
 let simulateAirQualityFailure = false; // one-shot: fails the next Open-Meteo air-quality call
 let mockPm25 = 42.3; // orange band by default, so the briefing test sees a real reading and its advice
 let mockPm10 = 58.9;
@@ -1230,6 +1248,24 @@ globalThis.fetch = async (url, init = {}) => {
     const found = GEOCODE_RESULTS[parsed.searchParams.get("name")];
     return new Response(JSON.stringify({ results: found ? [found] : [] }), { status: 200 });
   }
+  // Thai lottery (PLAN.md 17.73). Shaped exactly like rayriffy/thai-lotto-api's
+  // /latest, including the `id` fields the matching rules key off — using the
+  // display names instead would let a wording change upstream silently turn a
+  // last-two-digits prize into a full-number one.
+  if (u.includes("lotto.api.rayriffy.com/latest")) {
+    if (simulateLotteryFailure) {
+      simulateLotteryFailure = false;
+      return new Response("simulated lottery service failure", { status: 500 });
+    }
+    if (simulateLotteryGarbage) {
+      simulateLotteryGarbage = false;
+      // The realistic broken-scrape shape: the page loaded and the date
+      // parsed, but no numbers came out. An empty date would be caught a
+      // step earlier and would leave this case untested.
+      return new Response(JSON.stringify({ status: "success", response: { date: "16 สิงหาคม 2569", prizes: [], runningNumbers: [] } }), { status: 200 });
+    }
+    return new Response(JSON.stringify(mockLotteryDraw), { status: 200 });
+  }
   // Open-Meteo Air Quality (PLAN.md 17.71) — same provider as the forecast
   // below, different host and path, and no API key on either.
   if (u.includes("air-quality-api.open-meteo.com/v1/air-quality")) {
@@ -2128,6 +2164,169 @@ check(
   pushes.at(-1).text.includes("°C") && !pushes.at(-1).text.includes("PM2.5")
 );
 mockPm25 = 42.3;
+
+// ---- ผลสลากกินแบ่งรัฐบาล (PLAN.md 17.73) --------------------------------
+// The one thing this bot says that someone might act on financially, so the
+// matching rules are the real ones and are pinned here rather than left to
+// whatever the formatter happens to produce. In the fixture: รางวัลที่ 1 is
+// 735867, เลขหน้า 3 ตัว are 701/884, เลขท้าย 3 ตัว are 867/412, เลขท้าย 2 ตัว
+// is 67.
+
+const { fetchLatestDraw, findMatches, normalizeTicket } = await import("../src/lottery.ts");
+// Fetched through the real parser rather than handed the raw fixture. The
+// first version of this test passed the upstream JSON straight to
+// findMatches, which matched nothing in production because the only caller
+// passes a *parsed* draw whose fields are named differently — the same shape
+// of mistake as 17.72, a test exercising a path production never takes.
+const drawForMatching = await fetchLatestDraw();
+check("the draw parses into the shape the matcher actually receives", drawForMatching !== null);
+
+// A full ticket can win in more than one category at once — 735867 is the
+// first prize AND ends in 867 AND ends in 67. Reporting only the first match
+// found would understate what someone actually won.
+const jackpotMatches = findMatches(drawForMatching, "735867");
+check(
+  "a ticket that wins several categories is reported for all of them",
+  jackpotMatches.length === 3 &&
+    jackpotMatches.some((m) => m.prizeName.includes("รางวัลที่ 1")) &&
+    jackpotMatches.some((m) => m.prizeName.includes("เลขท้าย 3 ตัว")) &&
+    jackpotMatches.some((m) => m.prizeName.includes("เลขท้าย 2 ตัว"))
+);
+check(
+  "a ticket next to the first prize wins the neighbouring prize, not the first",
+  findMatches(drawForMatching, "735866").some((m) => m.prizeName.includes("ข้างเคียง")) &&
+    !findMatches(drawForMatching, "735866").some((m) => m.prizeName === "รางวัลที่ 1")
+);
+// The digits each category is compared against are the whole feature. Get
+// เลขหน้า and เลขท้าย the wrong way round and the bot tells people they won
+// when they didn't.
+check(
+  "เลขหน้า 3 ตัว matches the first three digits, not the last three",
+  findMatches(drawForMatching, "701999").some((m) => m.prizeName.includes("เลขหน้า 3 ตัว")) &&
+    !findMatches(drawForMatching, "999701").some((m) => m.prizeName.includes("เลขหน้า 3 ตัว"))
+);
+check(
+  "เลขท้าย 3 ตัว matches the last three digits, not the first three",
+  findMatches(drawForMatching, "999412").some((m) => m.prizeName.includes("เลขท้าย 3 ตัว")) &&
+    !findMatches(drawForMatching, "412999").some((m) => m.prizeName.includes("เลขท้าย 3 ตัว"))
+);
+check("a losing ticket wins nothing at all", findMatches(drawForMatching, "111111").length === 0);
+
+// A 2- or 3-digit entry is only ever compared against the category of its
+// own width. Comparing "67" against a 6-digit prize can never match, but it
+// must also not be silently dropped from the category it *can* win.
+check(
+  "two digits are checked against เลขท้าย 2 ตัว only",
+  findMatches(drawForMatching, "67").length === 1 &&
+    findMatches(drawForMatching, "67")[0].prizeName.includes("เลขท้าย 2 ตัว")
+);
+// A 3-digit entry determines the last two digits as well, so it wins both
+// when both hit. An earlier version suppressed the two-digit prize here,
+// which told someone they had won less than they actually had.
+const threeDigitMatches = findMatches(drawForMatching, "867");
+check(
+  "three digits win เลขท้าย 3 ตัว and the เลขท้าย 2 ตัว they imply",
+  threeDigitMatches.length === 2 &&
+    threeDigitMatches.some((m) => m.prizeName.includes("เลขท้าย 3 ตัว")) &&
+    threeDigitMatches.some((m) => m.prizeName.includes("เลขท้าย 2 ตัว"))
+);
+check(
+  "a three-digit entry never matches a six-digit prize category",
+  findMatches(drawForMatching, "701").length === 1 &&
+    findMatches(drawForMatching, "701")[0].prizeName.includes("เลขหน้า 3 ตัว")
+);
+
+// Guessing which digits were meant is how "you didn't win" gets reported for
+// a number nobody entered.
+check(
+  "only 2, 3 and 6 digit tickets are accepted",
+  normalizeTicket("735867") === "735867" &&
+    normalizeTicket("67") === "67" &&
+    normalizeTicket("867") === "867" &&
+    normalizeTicket("1234") === null &&
+    normalizeTicket("73586") === null &&
+    normalizeTicket("abc123") === null
+);
+check("spaces and dashes in a typed number are tolerated", normalizeTicket("735-867") === "735867");
+
+const lottoResultReply = await handleTextMessage(env, lineUserId, "ผลหวย", origin);
+check(
+  "asking for the results gives the first prize and all three running numbers",
+  lottoResultReply.includes("735867") &&
+    lottoResultReply.includes("701") &&
+    lottoResultReply.includes("867") &&
+    lottoResultReply.includes("67") &&
+    lottoResultReply.includes("16 สิงหาคม 2569")
+);
+
+const lottoWinReply = await handleTextMessage(env, lineUserId, "ตรวจหวย 735867", origin);
+check(
+  "checking a winning number names the prizes and the draw it was checked against",
+  lottoWinReply.includes("ถูกรางวัล") &&
+    lottoWinReply.includes("รางวัลที่ 1") &&
+    lottoWinReply.includes("16 สิงหาคม 2569")
+);
+// Only on the answer someone might act on. A disclaimer attached to every
+// reply is one nobody reads by the time it matters.
+check(
+  "a win points at the official source, and a plain results listing does not",
+  lottoWinReply.includes("สำนักงานสลากฯ") && !lottoResultReply.includes("สำนักงานสลากฯ")
+);
+const lottoLoseReply = await handleTextMessage(env, lineUserId, "ตรวจหวย 111111", origin);
+check(
+  // "ไม่ถูก" against last month's draw is a wrong answer that reads exactly
+  // like a right one, so the date is on both outcomes.
+  "a losing number is told which draw it lost in",
+  lottoLoseReply.includes("ไม่ถูกรางวัล") && lottoLoseReply.includes("16 สิงหาคม 2569")
+);
+
+// "หวย" alone is deliberately not a trigger: it sits inside "ซื้อหวย 200",
+// an expense this bot has recorded since long before this feature existed
+// and which people use far more often.
+const { matchLotteryCommand } = await import("../src/lotteryCommands.ts");
+check(
+  "buying a lottery ticket stays an expense rather than becoming a results lookup",
+  matchLotteryCommand("ซื้อหวย 200") === null && matchLotteryCommand("ผลหวย") !== null
+);
+
+// Never a number when the source is unreachable or came back broken — a
+// wrong "you didn't win" is indistinguishable from a right one.
+simulateLotteryFailure = true;
+const lottoDownReply = await handleTextMessage(env, lineUserId, "ตรวจหวย 735867", origin);
+check(
+  "an unreachable source says so instead of reporting a result",
+  lottoDownReply.includes("ไม่ได้") && !lottoDownReply.includes("ถูกรางวัล")
+);
+simulateLotteryGarbage = true;
+const lottoGarbageReply = await handleTextMessage(env, lineUserId, "ผลหวย", origin);
+check(
+  "a successful response with no numbers in it is treated as a failure, not an empty draw",
+  lottoGarbageReply.includes("ไม่ได้")
+);
+
+// The path production actually takes. 17.71 shipped a feature that passed
+// every matcher test and did not work at all, because the interpreter runs
+// first and had never been taught the intent — so a matcher-only test is not
+// evidence a feature works.
+simulateInterpreterResult = { intent: "lottery_result" };
+const aiLottoResult = await handleTextMessage(env, lineUserId, "งวดนี้ออกเลขอะไรบ้าง", origin);
+check("a phrasing the matcher doesn't know still reaches the results, via the interpreter", aiLottoResult.includes("735867"));
+simulateInterpreterResult = { intent: "lottery_check", lotteryNumber: "735867" };
+const aiLottoCheck = await handleTextMessage(env, lineUserId, "ซื้อไว้ 735867 ถูกรางวัลรึเปล่า", origin);
+check("and a number given conversationally is checked the same way", aiLottoCheck.includes("ถูกรางวัล") && aiLottoCheck.includes("รางวัลที่ 1"));
+const lotteryInterpreterPrompt = geminiRequests.filter((r) => r.systemInstruction.includes(INTERPRETER_MARKER)).at(-1).systemInstruction;
+check(
+  "the interpreter is taught both lottery intents",
+  lotteryInterpreterPrompt.includes("lottery_result") && lotteryInterpreterPrompt.includes("lottery_check")
+);
+check(
+  "and told that buying a ticket is a transaction, not a lottery check",
+  lotteryInterpreterPrompt.includes('"intent":"transaction"')
+);
+// A malformed intent must not reach the matcher with an empty number.
+simulateInterpreterResult = { intent: "lottery_check" };
+const aiLottoNoNumber = await handleTextMessage(env, lineUserId, "ตรวจให้หน่อย", origin);
+check("a lottery_check intent with no number is rejected rather than checked", !aiLottoNoNumber.includes("ถูกรางวัล"));
 
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
