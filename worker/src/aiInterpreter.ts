@@ -69,6 +69,7 @@ export type InterpretedIntent =
   | { intent: "email_send"; emailTo: string; emailSubject: string; emailBody: string }
   | { intent: "contact_lookup"; contactName: string }
   | { intent: "contact_list" }
+  | { intent: "air_quality" }
   | { intent: "find_nearby_places"; placeKeyword: string }
   // Movies and series (PLAN.md 17.57/17.58). Three intents rather than one,
   // because TMDb answers them from three different endpoints and the model
@@ -265,6 +266,8 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
     }
     case "contact_list":
       return { intent: "contact_list" };
+    case "air_quality":
+      return { intent: "air_quality" };
     case "contact_lookup": {
       if (!isNonEmptyString(r.contactName)) return null;
       return { intent: "contact_lookup", contactName: r.contactName };
@@ -477,6 +480,12 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     // answered contact_lookup with no name, failed validation, and the
     // message fell through to "I don't understand".
     '{"intent":"contact_list"} — ขอดู**รายชื่อผู้ติดต่อทั้งหมด**ที่มีอีเมล ไม่ได้เจาะจงคนใดคนหนึ่ง (เช่น "ขอรายชื่ออีเมลที่มีหน่อย", "มีอีเมลใครบ้าง", "ผู้ติดต่อทั้งหมด")',
+    // Its own intent rather than letting the Q&A path field it: askGemini has
+    // weather but has never had a PM2.5 number to answer from, so it replied
+    // "ไม่มีข้อมูลเรื่องฝุ่นโดยตรง" while the bot could in fact fetch one
+    // (PLAN.md 17.72). The deterministic matcher alone was not enough — the
+    // interpreter runs first (PLAN.md 17.11) and never reached it.
+    '{"intent":"air_quality"} — ถาม**ค่าฝุ่น PM2.5 / คุณภาพอากาศ / อากาศเป็นพิษไหม** (เช่น "ฝุ่น", "ค่าฝุ่นวันนี้", "PM2.5 เท่าไหร่", "วันนี้ฝุ่นเยอะไหม", "อากาศข้างนอกโอเคไหม") — คนละอย่างกับถามสภาพอากาศ/ฝนตกไหม/อุณหภูมิ ซึ่งเป็น {"intent":"question"}',
     '{"intent":"contact_lookup","contactName":string} — ถามหาอีเมลของผู้ติดต่อคนนี้โดยตรง ไม่ใช่ตอนจะส่งอีเมล เช่น "อีเมลของสมชาย", "ขออีเมลสมหญิงหน่อย" (contactName ต้องเป็นชื่อจริงที่ผู้ใช้พิมพ์มาเท่านั้น ห้ามเดา)',
     'ทุก intent ที่ขึ้นต้นด้วย movie_ ใช้ได้ทั้งหนังและซีรีส์ ต้องใส่ "mediaType" ด้วยเสมอ: "movie" = หนัง/ภาพยนตร์, "tv" = ซีรีส์/ซีรีย์/รายการทีวี/อนิเมะที่เป็นตอนๆ ถ้าผู้ใช้ไม่ได้บอกชัดให้ใช้ "movie"',
     '{"intent":"movie_list","mediaType":"movie"|"tv","movieListKind":"now_playing"|"upcoming"|"trending"|"streaming"} — อยากรู้ว่ามีหนัง/ซีรีส์อะไร โดยไม่ได้เจาะจงเรื่องหรือเนื้อหา: now_playing = กำลังฉายอยู่ตอนนี้ ("หนังใหม่", "ซีรีส์ใหม่", "โรงหนังมีอะไรฉายบ้าง"), upcoming = ยังไม่เริ่มฉาย ("หนังที่กำลังจะเข้า", "ซีรีส์ที่กำลังจะมา"), trending = กำลังฮิต/แนะนำอะไรก็ได้ ("มีอะไรน่าดูบ้าง", "แนะนำซีรีส์หน่อย", "แนะนำหนังมันๆ"), streaming = ในแอปสตรีมมิ่ง ("หนังใหม่ใน Netflix", "มีซีรีส์อะไรดูใน Disney+ บ้าง") ห้ามตอบชื่อเรื่องเองเด็ดขาด เพราะข้อมูลที่กำลังฉายเปลี่ยนทุกสัปดาห์และคุณไม่มีข้อมูลจริง',

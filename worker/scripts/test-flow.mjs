@@ -2059,6 +2059,46 @@ check(
     matchAirQualityCommand("ฝุ่น") !== null
 );
 
+// ---- The AI route to the same answer (PLAN.md 17.72) --------------------
+// Shipped broken: typing "ฝุ่น" in production came back with the weather and
+// "ไม่มีข้อมูลเรื่องฝุ่น PM2.5 โดยตรง", while the bot could in fact fetch a
+// number. The deterministic matcher was never reached — the AI interpreter
+// runs *first* on every fresh message (PLAN.md 17.11), classified it as a
+// general question, and the Q&A path has weather but no PM2.5.
+//
+// It passed its tests because the interpreter mock returns non-JSON unless a
+// test opts in, so every matcher test falls straight through to the matcher
+// chain and never exercises the path production actually takes. That is a
+// blind spot for any feature added as a matcher, not just this one.
+
+mockPm25 = 88.4;
+simulateInterpreterResult = { intent: "air_quality" };
+const aiDustReply = await handleTextMessage(env, lineUserId, "วันนี้ฝุ่นเยอะไหม", origin);
+check(
+  "a phrasing the matcher doesn't know still reaches the reading, via the interpreter",
+  aiDustReply.includes("88.4") && aiDustReply.includes("µg/m³")
+);
+// Same handler behind both, so the two phrasings cannot drift into two
+// different features.
+const typedDustReply = await handleTextMessage(env, lineUserId, "ฝุ่น", origin);
+check("and gives the identical answer to the typed command", aiDustReply === typedDustReply);
+
+// The model can only pick an intent it has been told about. Without this the
+// interpreter keeps classifying ฝุ่น as a general question and the bug is
+// exactly back, with every test above still green.
+const interpreterPrompts = geminiRequests.filter((r) => r.systemInstruction.includes(INTERPRETER_MARKER));
+check(
+  "the interpreter is actually taught the air_quality intent",
+  interpreterPrompts.length > 0 && interpreterPrompts.at(-1).systemInstruction.includes("air_quality")
+);
+// Asking about the weather is a different question and must stay one — the
+// Q&A path is where "ฝนจะตกไหม" belongs.
+check(
+  "the prompt tells the model to keep weather questions separate from dust ones",
+  interpreterPrompts.at(-1).systemInstruction.includes('{"intent":"air_quality"}') &&
+    interpreterPrompts.at(-1).systemInstruction.includes("คนละอย่างกับถามสภาพอากาศ")
+);
+
 // A number this wrong to guess at is one to refuse: it is the input to a
 // decision about whether to go outside.
 simulateAirQualityFailure = true;
