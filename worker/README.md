@@ -1430,6 +1430,30 @@ one trip folder and offers to remove them (PLAN.md 17.69).
   ids from a stale tab or edited by hand would be a request to trash arbitrary files in the user's
   Drive, and the page would look identical either way.
 
+### Voice messages (PLAN.md 17.74)
+
+Send a voice note instead of typing. The audio is transcribed by Gemini and the transcript is fed
+straight into `handleTextMessage`, so speaking "ค่ากาแฟ 60" is the same event as typing it — same
+interpreter, same confirm-before-save, same everything. **Every feature the bot already has works
+by voice without any of them being told about audio.**
+
+- **The transcript is echoed above the answer.** A misheard number is a wrong amount in someone's
+  accounts, and the confirm step can only protect against that if the user can see what was heard
+  — "60" misheard as "16" produces a perfectly confident, perfectly wrong confirmation otherwise.
+- **Sent inline, not via the Files API.** That API would mean an upload, a poll until the file
+  becomes ACTIVE, and a delete: three more round trips inside a webhook that has to answer before
+  LINE's reply token expires. The 20 MB inline ceiling is far above a voice note, and anything
+  past `MAX_AUDIO_BYTES` is refused before the encode rather than after paying to upload it.
+- **LINE reports m4a as `audio/x-m4a`**, which is not in Gemini's accepted list; the same bytes as
+  `audio/mp4` are accepted, and m4a *is* an MP4 container. Passing the reported type through
+  unchanged fails the call outright.
+- **Nothing heard is said plainly**, never guessed at. Acting on words nobody spoke is the worst
+  failure available to a bot whose main job is recording money.
+- `toBase64` moved out of the signature helper and is now shared. The obvious
+  `String.fromCharCode(...bytes)` works on a 32-byte HMAC and throws on a megabyte of audio, and
+  appending a character at a time is slow enough to matter inside a webhook — one implementation
+  now serves both, instead of two that look alike.
+
 ### Thai lottery results (PLAN.md 17.73)
 
 `ผลหวย` gives the latest draw; `ตรวจหวย <เลข>` checks a number against it. Source is

@@ -231,6 +231,13 @@ const geminiRequests = []; // captures {systemInstruction, question, apiKey} per
 // Must match aiInterpreter.ts's INTERPRETER_MARKER exactly — identifies an
 // AI-interpreter call (PLAN.md 17.11) the same way persona.ts's calls are
 // identified by "ห้ามเปลี่ยนตัวเลข" below.
+// Must match voice.ts's transcription instruction — identifies a
+// speech-to-text call the same way INTERPRETER_MARKER identifies an
+// interpreter one.
+const TRANSCRIBE_MARKER = "ระบบถอดเสียงเป็นข้อความภาษาไทย";
+const transcriptionRequests = []; // captures {mimeType, hasAudio, base64Length} per transcription call
+let mockTranscript = "ค่ากาแฟ 60";
+let simulateTranscriptionFailure = false; // one-shot: fails the next transcription call
 const INTERPRETER_MARKER = "ระบบตีความข้อความแชท";
 // one-shot: the structured intent object the *next* AI interpreter call
 // returns (JSON-stringified for the mocked Gemini response). Left null by
@@ -562,16 +569,27 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.startsWith("https://api-data.line.me/v2/bot/message/") && u.endsWith("/content")) {
     const isVideo = u.includes("vid-");
+    // messageIds containing "aud-" are voice notes (PLAN.md 17.74), reported
+    // as audio/x-m4a the way LINE reports them — a type Gemini does not
+    // list, so voice.ts has to translate it.
+    const isAudio = u.includes("aud-");
     // messageIds containing "big-" simulate a longer clip, to exercise the
-    // streaming upload path with something bigger than a few bytes.
+    // streaming upload path with something bigger than a few bytes — and,
+    // for audio, a payload large enough that a byte-at-a-time base64 would
+    // be visibly wrong.
     const isBig = u.includes("big-");
-    const payload = isBig ? new Uint8Array(2 * 1024 * 1024).fill(7) : new Uint8Array([1, 2, 3, 4]);
+    // "huge-" is past voice.ts's MAX_AUDIO_BYTES, so it must be refused
+    // before the base64 and the upload rather than after.
+    const isHuge = u.includes("huge-");
+    const payload = isHuge
+      ? new Uint8Array(9 * 1024 * 1024).fill(7)
+      : isBig
+        ? new Uint8Array(2 * 1024 * 1024).fill(7)
+        : new Uint8Array([1, 2, 3, 4]);
+    const contentType = isAudio ? "audio/x-m4a" : isVideo ? "video/mp4" : "image/jpeg";
     return new Response(payload.buffer, {
       status: 200,
-      headers: {
-        "content-type": isVideo ? "video/mp4" : "image/jpeg",
-        "content-length": String(payload.byteLength),
-      },
+      headers: { "content-type": contentType, "content-length": String(payload.byteLength) },
     });
   }
   if (u.startsWith("https://www.googleapis.com/drive/v3/files")) {
@@ -1076,6 +1094,25 @@ globalThis.fetch = async (url, init = {}) => {
     // not eaten by this earlier, unrelated one. See simulateInterpreterResult's
     // own comment above for why the no-mock-configured default is
     // deliberately non-JSON.
+    // Voice transcription (PLAN.md 17.74) — answered before the interpreter
+    // branch below, because a transcription call is its own thing and must
+    // not consume a simulateInterpreterResult armed for the *text* the
+    // transcript turns into.
+    if (systemInstruction.includes(TRANSCRIBE_MARKER)) {
+      transcriptionRequests.push({
+        mimeType: body.contents?.[0]?.parts?.[0]?.inlineData?.mimeType,
+        hasAudio: Boolean(body.contents?.[0]?.parts?.[0]?.inlineData?.data),
+        base64Length: body.contents?.[0]?.parts?.[0]?.inlineData?.data?.length ?? 0,
+      });
+      if (simulateTranscriptionFailure) {
+        simulateTranscriptionFailure = false;
+        return new Response("simulated transcription failure", { status: 500 });
+      }
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: mockTranscript }] }, finishReason: "STOP" }] }),
+        { status: 200 }
+      );
+    }
     if (systemInstruction.includes(INTERPRETER_MARKER)) {
       geminiRequests.push({
         systemInstruction,
@@ -2327,6 +2364,143 @@ check(
 simulateInterpreterResult = { intent: "lottery_check" };
 const aiLottoNoNumber = await handleTextMessage(env, lineUserId, "ตรวจให้หน่อย", origin);
 check("a lottery_check intent with no number is rejected rather than checked", !aiLottoNoNumber.includes("ถูกรางวัล"));
+
+// ---- ข้อความเสียง (PLAN.md 17.74) ---------------------------------------
+// The point is not transcription for its own sake: the transcript goes
+// through handleTextMessage, so speaking "ค่ากาแฟ 60" is the same event as
+// typing it and every existing feature works by voice without being told
+// about audio.
+
+const voiceEvent = (messageId) => ({
+  type: "message",
+  message: { type: "audio", id: messageId, duration: 3000 },
+  source: { type: "user", userId: lineUserId },
+  replyToken: `reply-${messageId}`,
+  timestamp: Date.now(),
+});
+const sendVoice = async (messageId) => {
+  const rawBody = JSON.stringify({ events: [voiceEvent(messageId)] });
+  const repliesBefore = replies.length;
+  await handleWebhook(
+    new Request("http://localhost:8787/webhook", {
+      method: "POST",
+      headers: { "x-line-signature": await signLineBody(rawBody, env.LINE_CHANNEL_SECRET) },
+      body: rawBody,
+    }),
+    env
+  );
+  // `replies` holds the reply text directly, not an object.
+  return replies.length > repliesBefore ? replies.at(-1) : "";
+};
+
+transcriptionRequests.length = 0;
+mockTranscript = "ค่ากาแฟ 60";
+const voiceExpenseReply = await sendVoice("aud-expense-1");
+check(
+  "a voice note runs through the same pipeline as typing the same words",
+  voiceExpenseReply.includes("60") && voiceExpenseReply.includes("ยืนยัน")
+);
+// A misheard number is a wrong amount in someone's accounts, and the confirm
+// step can only protect against that if the user can see what was heard —
+// "60" misheard as "16" produces a perfectly confident, perfectly wrong
+// confirmation otherwise.
+check(
+  // Asserted on the 🎤 marker, not just the words: the expense confirmation
+  // repeats "ค่ากาแฟ" and "60" by itself, so looking for those alone passes
+  // just as well with the echo removed.
+  "and the transcript is shown back so a mishearing is visible",
+  voiceExpenseReply.startsWith('🎤 "ค่ากาแฟ 60"')
+);
+// Confirming afterwards must behave exactly as it does for typed text —
+// the voice note left a normal pending confirmation, not a special one.
+const voiceConfirmReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("confirming a spoken expense saves it like any other", voiceConfirmReply.includes("บันทึก") || voiceConfirmReply.includes("60"));
+
+// LINE reports m4a as audio/x-m4a, which Gemini's accepted list does not
+// contain. Sending it through unchanged fails the call outright.
+check(
+  "the audio reaches Gemini as a type it actually accepts",
+  transcriptionRequests.length > 0 &&
+    transcriptionRequests[0].hasAudio &&
+    transcriptionRequests[0].mimeType === "audio/mp4"
+);
+
+// Not only an expense — the transcript is ordinary text, so anything the bot
+// understands typed it understands spoken.
+mockTranscript = "ฝุ่น";
+const voiceDustReply = await sendVoice("aud-dust-1");
+check("a spoken question reaches the same handler a typed one does", voiceDustReply.includes("µg/m³"));
+
+// Acting on words nobody said is the worst failure available to a bot that
+// records money, so "heard nothing" is said plainly rather than guessed at.
+mockTranscript = "(ฟังไม่ออก)";
+const voiceUnclearReply = await sendVoice("aud-unclear-1");
+check(
+  "audio the model could not make out is reported, not acted on",
+  voiceUnclearReply.includes("ฟังข้อความเสียงไม่ออก") && !voiceUnclearReply.includes("ยืนยัน")
+);
+// An empty response is a failed call, not a silent one — callGemini throws
+// on it, so this lands on the error path rather than the "heard nothing"
+// one. Either way the user is told and nothing is acted on, which is the
+// property that matters.
+mockTranscript = "   ";
+const voiceEmptyReply = await sendVoice("aud-empty-1");
+check(
+  "an empty model response is reported rather than acted on",
+  voiceEmptyReply.includes("ฟังข้อความเสียง") && !voiceEmptyReply.includes("ยืนยัน")
+);
+
+simulateTranscriptionFailure = true;
+mockTranscript = "ค่ากาแฟ 60";
+const voiceFailureReply = await sendVoice("aud-fail-1");
+check(
+  "a transcription failure degrades to a friendly reply instead of silence",
+  voiceFailureReply.includes("ฟังข้อความเสียง") && !voiceFailureReply.includes("ยืนยัน")
+);
+
+// A megabyte of audio is where the obvious base64 one-liner falls over:
+// String.fromCharCode(...bytes) spreads a million arguments onto the call
+// stack and throws, which a four-byte fixture never shows.
+transcriptionRequests.length = 0;
+mockTranscript = "ค่าข้าว 50";
+const voiceBigReply = await sendVoice("aud-big-1");
+check(
+  "a megabyte-scale voice note is encoded without blowing the stack",
+  transcriptionRequests.length === 1 &&
+    transcriptionRequests[0].base64Length > 2_000_000 &&
+    voiceBigReply.includes("50")
+);
+await handleTextMessage(env, lineUserId, "ไม่ใช่", origin); // clear the pending confirmation
+
+// Refused before anything is sent anywhere. Past the inline ceiling the
+// request fails at Gemini regardless — after paying to upload it.
+transcriptionRequests.length = 0;
+const voiceHugeReply = await sendVoice("aud-huge-1");
+check(
+  "audio past the size ceiling is refused without being sent",
+  transcriptionRequests.length === 0 && voiceHugeReply.includes("ฟังข้อความเสียงไม่ออก")
+);
+
+// Audio used to fall into the unsupported-file bucket. Other file types
+// still must.
+const stickerBody = JSON.stringify({
+  events: [{ type: "message", message: { type: "sticker", id: "stk-1" }, source: { type: "user", userId: lineUserId }, replyToken: "reply-stk-1", timestamp: Date.now() }],
+});
+const repliesBeforeSticker = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(stickerBody, env.LINE_CHANNEL_SECRET) },
+    body: stickerBody,
+  }),
+  env
+);
+check(
+  "a file type that really is unsupported still says so, and now names audio as supported",
+  replies.length === repliesBeforeSticker + 1 &&
+    replies.at(-1).includes("ยังไม่รองรับ") &&
+    replies.at(-1).includes("ข้อความเสียง")
+);
 
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty

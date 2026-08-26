@@ -153,8 +153,22 @@ export const PERSONA_MAX_OUTPUT_TOKENS = 2000;
 export const ANSWER_MAX_OUTPUT_TOKENS = 1200;
 export const SEARCH_MAX_OUTPUT_TOKENS = 2000;
 
+/** One inline media part, base64-encoded (PLAN.md 17.74). Inline rather
+ * than via the Files API because that would mean an upload request, a poll
+ * for the file to become ACTIVE, and a delete — three more round trips
+ * inside a webhook that has to answer quickly. The 20 MB request ceiling
+ * that comes with inline data is far above a LINE voice note. */
+export interface GeminiInlineMedia {
+  mimeType: string;
+  data: string;
+}
+
 export interface AskGeminiOptions {
   signal?: AbortSignal;
+  /** Sent alongside the text prompt, before it — the model reads the media
+   * first and the instruction second, which is the order the prompt is
+   * written for. */
+  media?: GeminiInlineMedia;
   // Set by aiInterpreter.ts: constrains Gemini to emit valid JSON syntax
   // (still no guarantee it matches *our* schema — validateIntent there
   // checks that separately, the same "verify, don't just trust" pattern as
@@ -216,7 +230,7 @@ async function callGemini(
   userQuestion: string,
   options: AskGeminiOptions = {}
 ): Promise<GeminiResult> {
-  const { signal, jsonMode, googleSearch, kv, model = DEFAULT_MODEL, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
+  const { signal, jsonMode, googleSearch, kv, media, model = DEFAULT_MODEL, maxOutputTokens = INTERPRETER_MAX_OUTPUT_TOKENS } = options;
 
   // Checked here rather than at each call site so no future Gemini caller
   // can forget it, and so the existing fallbacks do the work: the
@@ -236,7 +250,12 @@ async function callGemini(
     },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: "user", parts: [{ text: userQuestion }] }],
+      contents: [
+        {
+          role: "user",
+          parts: media ? [{ inlineData: { mimeType: media.mimeType, data: media.data } }, { text: userQuestion }] : [{ text: userQuestion }],
+        },
+      ],
       ...(googleSearch ? { tools: [{ google_search: {} }] } : {}),
       // Keeps replies within LINE's comfortable message length without
       // relying on the model to police its own length.
