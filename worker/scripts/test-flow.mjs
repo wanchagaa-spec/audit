@@ -93,6 +93,9 @@ function nextDriveId(prefix) {
   return `${prefix}-${driveIdSeq}`;
 }
 let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
+let simulateAirQualityFailure = false; // one-shot: fails the next Open-Meteo air-quality call
+let mockPm25 = 42.3; // orange band by default, so the briefing test sees a real reading and its advice
+let mockPm10 = 58.9;
 let simulateRefreshFailure = false; // makes every Google token refresh fail, to simulate a revoked account link
 let simulateTrashFailureOnce = false; // makes the next trashFile call fail, to prove one bad file doesn't abandon the rest
 let simulateDriveDedupLookupFailure = false; // makes the next findUploadedMessageIds lookup fail, to prove the drain still uploads rather than stalling
@@ -1227,6 +1230,18 @@ globalThis.fetch = async (url, init = {}) => {
     const found = GEOCODE_RESULTS[parsed.searchParams.get("name")];
     return new Response(JSON.stringify({ results: found ? [found] : [] }), { status: 200 });
   }
+  // Open-Meteo Air Quality (PLAN.md 17.71) — same provider as the forecast
+  // below, different host and path, and no API key on either.
+  if (u.includes("air-quality-api.open-meteo.com/v1/air-quality")) {
+    if (simulateAirQualityFailure) {
+      simulateAirQualityFailure = false;
+      return new Response("simulated air quality service failure", { status: 500 });
+    }
+    return new Response(
+      JSON.stringify({ current: { pm2_5: mockPm25, pm10: mockPm10 } }),
+      { status: 200 }
+    );
+  }
   if (u.includes("api.open-meteo.com/v1/forecast")) {
     if (simulateWeatherFetchFailure) {
       simulateWeatherFetchFailure = false;
@@ -1952,6 +1967,127 @@ check(
   "once the queue drains, the warning stops on its own",
   !pushes.at(-1).text.includes("ค้างอยู่ในคิวอัปโหลด")
 );
+
+// ---- PM2.5 (PLAN.md 17.71) ---------------------------------------------
+// Open-Meteo's air-quality endpoint: the same provider as the weather above,
+// and like it, no API key, no account, no quota. That is the whole reason it
+// was picked over IQAir/WAQI — every other integration this bot gained
+// needed a signup and a GitHub secret, and one of them shipped broken
+// because the secret never reached the Worker.
+
+const { pm25Band, fetchAirQuality, formatAirQualityLine } = await import("../src/airQuality.ts");
+
+// The band boundaries decide what someone is told to do about going
+// outside, so they are pinned to the Pollution Control Department's 2566
+// table rather than left to whatever the formatter happens to produce.
+// 37.5 is the 24-hour standard and 75.1 is where the red band starts; both
+// are the boundaries that change the advice.
+for (const [pm25, expected] of [
+  [0, "ดีมาก"],
+  [15, "ดีมาก"],
+  [15.1, "ดี"],
+  [25, "ดี"],
+  [25.1, "ปานกลาง"],
+  [37.5, "ปานกลาง"],
+  [37.6, "เริ่มมีผลต่อสุขภาพ"],
+  [75, "เริ่มมีผลต่อสุขภาพ"],
+  [75.1, "มีผลต่อสุขภาพ"],
+  [300, "มีผลต่อสุขภาพ"],
+]) {
+  check(`PM2.5 ${pm25} is "${expected}"`, pm25Band(pm25).label === expected);
+}
+// Clean air gets no instruction at all. Inventing one ("อากาศดี ออกไปเดินเล่นได้")
+// is how a line that appears every single morning turns into one people skip
+// — and it has to still be read on the morning it says something.
+check(
+  "the two clean bands carry no advice, and every band above them does",
+  pm25Band(10).advice === "" &&
+    pm25Band(20).advice === "" &&
+    pm25Band(30).advice !== "" &&
+    pm25Band(50).advice !== "" &&
+    pm25Band(100).advice !== ""
+);
+
+// A real reading of 0 is clean air, not a missing value — the difference
+// between reporting "ดีมาก" and dropping the line entirely.
+mockPm25 = 0;
+const zeroReading = await fetchAirQuality({ name: "เชียงใหม่", lat: 18.79, lon: 98.98 });
+check("a PM2.5 reading of zero is kept, not discarded as missing", zeroReading?.pm25 === 0);
+mockPm25 = 42.3;
+
+// One decimal, because the band boundaries are written with one (37.5,
+// 75.1) — rounding 37.6 to "38" would print a number that looks like it
+// contradicts the band beside it.
+check(
+  "the line states the number, the band, and what to do about it",
+  formatAirQualityLine({ pm25: 42.3, pm10: null }, "เชียงใหม่") ===
+    "🧡 ฝุ่น PM2.5 ที่เชียงใหม่ 42.3 µg/m³ — เริ่มมีผลต่อสุขภาพ\nใส่หน้ากากกันฝุ่นถ้าต้องอยู่กลางแจ้งนาน"
+);
+
+check(
+  "the 07:00 briefing carries the PM2.5 reading next to the weather",
+  broadcastPushes[0]?.text.includes("PM2.5") &&
+    broadcastPushes[0]?.text.includes("42.3") &&
+    broadcastPushes[0]?.text.includes("เริ่มมีผลต่อสุขภาพ")
+);
+
+// Asked on demand, because that is the question people actually have: not
+// "how was it at 7am" but "is it bad right now, before I go out" — which in
+// the north changes hour to hour during burning season.
+mockPm25 = 88.4;
+const dustReply = await handleTextMessage(env, lineUserId, "ฝุ่น", origin);
+check(
+  "asking about ฝุ่น gives the current reading, not the one from this morning",
+  dustReply.includes("88.4") && dustReply.includes("มีผลต่อสุขภาพ") && dustReply.includes("N95")
+);
+check("and it includes PM10 when the API returns one", dustReply.includes("PM10"));
+for (const phrase of ["ค่าฝุ่น", "PM2.5", "pm25", "ฝุ่นวันนี้เป็นไง"]) {
+  const reply = await handleTextMessage(env, lineUserId, phrase, origin);
+  check(`"${phrase}" is understood as the same question`, reply.includes("88.4"));
+}
+// Whole-phrase matching, not substring: this codebase has been bitten three
+// times by short Thai fragments swallowing unrelated messages, and "ฝุ่น"
+// sits inside plenty of ordinary sentences. Checked against the matcher
+// rather than through handleTextMessage on purpose — driving a real expense
+// through here would leave a pending confirmation behind and break the next
+// three tests, which is exactly what happened the first time.
+const { matchAirQualityCommand } = await import("../src/greetingCommands.ts");
+check(
+  "a sentence that merely contains ฝุ่น is not hijacked into an air-quality answer",
+  matchAirQualityCommand("ซื้อผ้าเช็ดฝุ่น 50") === null &&
+    matchAirQualityCommand("เครื่องฟอกฝุ่นราคาเท่าไหร่") === null &&
+    matchAirQualityCommand("ฝุ่น") !== null
+);
+
+// A number this wrong to guess at is one to refuse: it is the input to a
+// decision about whether to go outside.
+simulateAirQualityFailure = true;
+const dustFailureReply = await handleTextMessage(env, lineUserId, "ฝุ่น", origin);
+check(
+  "a failed lookup says so instead of reporting a stale or invented number",
+  dustFailureReply.includes("ไม่ได้") && !dustFailureReply.includes("µg/m³")
+);
+
+// The two answer different questions and must fail independently — losing
+// the forecast is no reason to lose the air reading.
+simulateWeatherFetchFailure = true;
+await kv.delete("last-broadcast-date");
+const pushesBeforeWeatherless = pushes.length;
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check(
+  "the PM2.5 line still goes out when the weather fetch fails",
+  pushes.length === pushesBeforeWeatherless + 1 &&
+    pushes.at(-1).text.includes("PM2.5") &&
+    !pushes.at(-1).text.includes("°C")
+);
+simulateAirQualityFailure = true;
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check(
+  "and the briefing still goes out, minus that line, when the air lookup fails",
+  pushes.at(-1).text.includes("°C") && !pushes.at(-1).text.includes("PM2.5")
+);
+mockPm25 = 42.3;
 
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty

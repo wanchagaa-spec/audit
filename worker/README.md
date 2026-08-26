@@ -1032,11 +1032,33 @@ set yet and no context for why they're suddenly getting a weather/news briefing.
   forever" approach even better than Gemini does (nothing to sign up for, nothing to leak).
   Purely rule-based: a weather code from the API maps to a fixed Thai description, no AI
   involved.
+- **PM2.5 comes from the same provider** — Open-Meteo's Air Quality API (PLAN.md 17.71), also
+  free with no key, no account and no quota, and taking the same coordinates the province is
+  already stored with. It was picked over IQAir/WAQI for exactly that: every other integration
+  this bot has gained needed a signup and a GitHub secret first, and TMDb shipped to production
+  broken because the secret never reached the Worker. This one needs nothing from the user.
+  `ฝุ่น` / `ค่าฝุ่น` / `PM2.5` asks for it on demand, which is the question people actually
+  have — not "how was it at 7am" but "is it bad right now", which during the northern burning
+  season changes hour to hour.
+
+  It reports **Thailand's own five colour bands** (ดัชนีคุณภาพอากาศ พ.ศ. 2566), not the US or
+  European AQI the same endpoint can return: a Thai reader knows what "ฝุ่นสีส้ม" means and does
+  not know what "US AQI 142" means. Because the bands end in health advice, their provenance is
+  recorded in `airQuality.ts` — the 15, 37.5 and 75.1 boundaries are confirmed against the
+  Pollution Control Department's 2566 announcement, while the 25.0 green/yellow boundary could
+  not be read from a primary source in the build sandbox and is the widely published figure. It
+  is also the only boundary where being wrong is harmless: it separates "ดีมาก" from "ดี", where
+  the advice is the same either way. Every boundary that changes what someone should *do* is
+  verified. The two clean bands deliberately carry no advice at all — inventing one is how a
+  line that appears every morning becomes one people skip.
 - News is fetched from [Bangkok Post's official RSS feed](https://www.bangkokpost.com/rss/)
   (no key needed) and summarized/translated into Thai by Gemini — a normal, low-risk use of a
   language model (summarizing text handed to it in full), unlike `aiCommands.ts`'s money/date
   guardrails, which exist specifically because those tasks *would* let the model guess at a
   fact the code already knows for certain.
+- Weather and air quality are fetched in parallel and fail independently: they answer different
+  questions ("will I get rained on" / "can I breathe out there") and losing one is no reason to
+  lose the other.
 - Weather and news are independent and both best-effort: either one failing doesn't take the
   other down, and neither ever blocks the greeting itself — worst case, the briefing still goes
   out with just the date.

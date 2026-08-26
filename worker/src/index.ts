@@ -42,6 +42,7 @@ import {
   buildMorningBriefing,
   buildReturnGreeting,
   classifyGreeting,
+  matchAirQualityCommand,
   matchProvinceCommand,
   setProvinceByName,
 } from "./greetingCommands.ts";
@@ -805,6 +806,13 @@ async function dispatchLegacyCommands(
     const provinceHandler = matchProvinceCommand(text);
     if (provinceHandler) {
       return await provinceHandler(env.ACCOUNTS, subjectId);
+    }
+
+    // Same again: PM2.5 comes from Open-Meteo with no key and no Google
+    // auth, so this needs no access token either (PLAN.md 17.71).
+    const airQualityHandler = matchAirQualityCommand(text);
+    if (airQualityHandler) {
+      return await airQualityHandler(env.ACCOUNTS, subjectId);
     }
 
     // Same reasoning as the province handler above: Places search (PLAN.md
