@@ -36,6 +36,11 @@ export const NETWORK_TIMEOUTS = {
    * term, then discover), so the per-call budget has to leave room for the
    * whole chain inside one reply. */
   tmdb: 6_000,
+  /** Thai lottery results (PLAN.md 17.73). Same budget as TMDb, and for the
+   * opposite reason: only ever one call per reply, but the upstream is a
+   * community service that scrapes a news site, so it is the slowest thing
+   * here on a bad day and the one most worth cutting off. */
+  lottery: 6_000,
 };
 
 export class NetworkTimeoutError extends Error {}

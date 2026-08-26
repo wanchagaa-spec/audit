@@ -113,6 +113,7 @@ import { handleViewBudgetsRequest } from "./viewBudgetsPage.ts";
 import { handleViewSettingsRequest } from "./viewSettingsPage.ts";
 import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, matchViewLinkCommand } from "./viewCommands.ts";
+import { answerLotteryCheck, answerLotteryResult, matchLotteryCommand } from "./lotteryCommands.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewHelpRequest } from "./viewHelpPage.ts";
 import { handleViewMoviesRequest } from "./viewMoviesPage.ts";
@@ -547,6 +548,11 @@ async function runInterpretedIntent(
       // give the identical answer rather than two that can drift apart.
       case "air_quality":
         return await answerAirQuality(env.ACCOUNTS, subjectId);
+      // No Google token and no key of any kind (PLAN.md 17.73).
+      case "lottery_result":
+        return await answerLotteryResult();
+      case "lottery_check":
+        return await answerLotteryCheck(intent.lotteryNumber);
       case "contact_lookup":
         return await withToken((ctx) => answerContactEmail(ctx, intent.contactName));
       case "find_nearby_places":
@@ -819,6 +825,12 @@ async function dispatchLegacyCommands(
     const airQualityHandler = matchAirQualityCommand(text);
     if (airQualityHandler) {
       return await airQualityHandler(env.ACCOUNTS, subjectId);
+    }
+
+    // Same again — the lottery API needs no auth at all (PLAN.md 17.73).
+    const lotteryHandler = matchLotteryCommand(text);
+    if (lotteryHandler) {
+      return await lotteryHandler();
     }
 
     // Same reasoning as the province handler above: Places search (PLAN.md

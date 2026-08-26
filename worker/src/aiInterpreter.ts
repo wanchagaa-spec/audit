@@ -70,6 +70,8 @@ export type InterpretedIntent =
   | { intent: "contact_lookup"; contactName: string }
   | { intent: "contact_list" }
   | { intent: "air_quality" }
+  | { intent: "lottery_result" }
+  | { intent: "lottery_check"; lotteryNumber: string }
   | { intent: "find_nearby_places"; placeKeyword: string }
   // Movies and series (PLAN.md 17.57/17.58). Three intents rather than one,
   // because TMDb answers them from three different endpoints and the model
@@ -268,6 +270,15 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       return { intent: "contact_list" };
     case "air_quality":
       return { intent: "air_quality" };
+    case "lottery_result":
+      return { intent: "lottery_result" };
+    case "lottery_check": {
+      // The number is validated again in lottery.ts before anything is
+      // compared against a draw — this only rejects an intent with nothing
+      // in the field at all.
+      if (!isNonEmptyString(r.lotteryNumber)) return null;
+      return { intent: "lottery_check", lotteryNumber: r.lotteryNumber };
+    }
     case "contact_lookup": {
       if (!isNonEmptyString(r.contactName)) return null;
       return { intent: "contact_lookup", contactName: r.contactName };
@@ -480,6 +491,9 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     // answered contact_lookup with no name, failed validation, and the
     // message fell through to "I don't understand".
     '{"intent":"contact_list"} — ขอดู**รายชื่อผู้ติดต่อทั้งหมด**ที่มีอีเมล ไม่ได้เจาะจงคนใดคนหนึ่ง (เช่น "ขอรายชื่ออีเมลที่มีหน่อย", "มีอีเมลใครบ้าง", "ผู้ติดต่อทั้งหมด")',
+    '{"intent":"lottery_result"} — ขอ**ผลสลากกินแบ่งรัฐบาลงวดล่าสุด** ไม่ได้ให้เลขมาตรวจ (เช่น "ผลหวย", "หวยออกอะไร", "ขอผลสลากหน่อย")',
+    // lotteryNumber ต้องเป็นตัวเลขล้วน ห้ามเดาหรือเติมเลขที่ผู้ใช้ไม่ได้พิมพ์
+    '{"intent":"lottery_check","lotteryNumber":"735867"} — ให้**เลขมาตรวจ**ว่าถูกรางวัลไหม (เช่น "ตรวจหวย 735867", "เลข 12 ถูกไหม", "ซื้อไว้ 735867 ถูกรางวัลรึเปล่า") — ถ้าเป็นการ**ซื้อ**หวยพร้อมจำนวนเงิน เช่น "ซื้อหวย 200" นั่นคือ {"intent":"transaction"} ไม่ใช่อันนี้',
     // Its own intent rather than letting the Q&A path field it: askGemini has
     // weather but has never had a PM2.5 number to answer from, so it replied
     // "ไม่มีข้อมูลเรื่องฝุ่นโดยตรง" while the bot could in fact fetch one
