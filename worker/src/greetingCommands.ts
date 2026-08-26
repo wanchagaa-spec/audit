@@ -17,6 +17,7 @@ import { buildRecurringStatus, recurringDueLines } from "./recurring.ts";
 import { readAllDiaryEntries, readRecurringWithPaid, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
 import { listStuckUploads, type StuckUploads } from "./uploadQueue.ts";
 import { getBotSettings, wantsMorningBriefing } from "./settings.ts";
+import { fetchAirQuality, formatAirQualityLine } from "./airQuality.ts";
 import { geocodeProvince, fetchWeatherSummary } from "./weather.ts";
 import {
   getAccountLink,
@@ -61,6 +62,55 @@ export async function setProvinceByName(kv: KVNamespace, lineUserId: string, req
   return `ตั้งพื้นที่พยากรณ์อากาศเป็น "${geocoded.name}" ให้แล้วนะ จะใช้บอกสภาพอากาศตอนทักทายครั้งแรกของวัน`;
 }
 
+/**
+ * "ฝุ่นวันนี้" / "PM2.5" — the air-quality line on demand (PLAN.md 17.71).
+ *
+ * The briefing already carries it once a day, but the question people
+ * actually ask is "is it bad *right now*, before I go out" — and in the
+ * north that changes hour to hour during burning season. A once-a-morning
+ * number cannot answer it.
+ *
+ * Whole-phrase matching, not a substring. This codebase has been bitten
+ * three times by short Thai fragments swallowing unrelated messages ("นัด",
+ * "ข่าว", "ยา"), and "ฝุ่น" alone sits inside plenty of ordinary sentences
+ * — "ซื้อผ้าเช็ดฝุ่น 50" is an expense, not a weather question.
+ */
+const AIR_QUALITY_PHRASES = [
+  "ฝุ่น",
+  "ฝุ่นวันนี้",
+  "ค่าฝุ่น",
+  "ค่าฝุ่นวันนี้",
+  "ฝุ่นเป็นไง",
+  "ฝุ่นเป็นยังไง",
+  "ฝุ่นวันนี้เป็นไง",
+  "ฝุ่นวันนี้เป็นยังไง",
+  "pm2.5",
+  "pm25",
+  "อากาศเป็นพิษไหม",
+];
+
+export function matchAirQualityCommand(
+  text: string
+): ((kv: KVNamespace, lineUserId: string) => Promise<string>) | null {
+  const normalized = text.trim().toLowerCase().replace(/[?？!]/g, "").trim();
+  if (!AIR_QUALITY_PHRASES.includes(normalized)) return null;
+  return async (kv, lineUserId) => {
+    const province = await getUserProvince(kv, lineUserId);
+    if (!province) return 'ยังไม่รู้พื้นที่ของคุณเลย พิมพ์ "ตั้งจังหวัด <ชื่อ>" ก่อนนะ แล้วจะบอกค่าฝุ่นให้ได้';
+    try {
+      const reading = await fetchAirQuality(province);
+      // No number rather than a stale or invented one: this is the input to
+      // a decision about going outside.
+      if (!reading) return `ตอนนี้ดึงค่าฝุ่นที่${province.name}ไม่ได้ ลองใหม่อีกทีนะ`;
+      const pm10Part = reading.pm10 !== null ? `\n(PM10 ${reading.pm10.toFixed(1)} µg/m³)` : "";
+      return `${formatAirQualityLine(reading, province.name)}${pm10Part}`;
+    } catch (err) {
+      console.error("matchAirQualityCommand: air quality fetch failed", err);
+      return `ตอนนี้ดึงค่าฝุ่นที่${province.name}ไม่ได้ ลองใหม่อีกทีนะ`;
+    }
+  };
+}
+
 export function matchProvinceCommand(text: string): ((kv: KVNamespace, lineUserId: string) => Promise<string>) | null {
   const m = text.trim().match(/^ตั้งจังหวัด\s+(.+)$/s);
   if (!m) return null;
@@ -89,11 +139,21 @@ async function buildBriefingBody(
 
   const province = await getUserProvince(kv, lineUserId);
   let weatherLine: string | null = null;
+  let airLine: string | null = null;
   if (province) {
-    try {
-      weatherLine = await fetchWeatherSummary(province);
-    } catch (err) {
-      console.error("buildBriefingBody: weather fetch failed", err);
+    // In parallel, and each failing on its own: the two answer different
+    // questions ("will I get rained on" / "can I breathe out there"), and
+    // losing one is no reason to lose the other.
+    const [weather, air] = await Promise.allSettled([
+      fetchWeatherSummary(province),
+      fetchAirQuality(province),
+    ]);
+    if (weather.status === "fulfilled") weatherLine = weather.value;
+    else console.error("buildBriefingBody: weather fetch failed", weather.reason);
+    if (air.status === "fulfilled") {
+      airLine = air.value ? formatAirQualityLine(air.value, province.name) : null;
+    } else {
+      console.error("buildBriefingBody: air quality fetch failed", air.reason);
     }
   }
 
@@ -101,7 +161,10 @@ async function buildBriefingBody(
 
   const parts = [`สวัสดีตอนเช้า ☀️ วันนี้${dateLine}`];
   if (weatherLine) parts.push(weatherLine);
-  else if (!province) parts.push('ยังไม่รู้พื้นที่ของคุณเลย พิมพ์ "ตั้งจังหวัด <ชื่อ>" ถ้าอยากให้บอกสภาพอากาศด้วยนะ');
+  else if (!province) parts.push('ยังไม่รู้พื้นที่ของคุณเลย พิมพ์ "ตั้งจังหวัด <ชื่อ>" ถ้าอยากให้บอกสภาพอากาศกับค่าฝุ่นด้วยนะ');
+  // Right after the weather, because it is the same decision: what to wear
+  // and whether to go out.
+  if (airLine) parts.push(airLine);
   if (newsBlock) parts.push(`📰 ข่าวเช้านี้:\n${newsBlock}`);
   return parts.join("\n\n");
 }
