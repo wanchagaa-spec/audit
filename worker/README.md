@@ -1041,6 +1041,19 @@ set yet and no context for why they're suddenly getting a weather/news briefing.
   have — not "how was it at 7am" but "is it bad right now", which during the northern burning
   season changes hour to hour.
 
+  **Both routes reach the same handler** (PLAN.md 17.72). The typed phrases are matched
+  deterministically, and the AI interpreter has its own `air_quality` intent for everything else
+  someone might say. The first version shipped with only the matcher and did not work at all in
+  production: the interpreter runs *first* on every fresh message (PLAN.md 17.11), classified
+  "ฝุ่น" as a general question, and the Q&A path has weather but no PM2.5 — so the bot replied
+  "ไม่มีข้อมูลเรื่องฝุ่น PM2.5 โดยตรง" about a number it could fetch. The matcher was never
+  reached. It is kept anyway, as the fallback for when Gemini is down or out of quota.
+
+  It passed its tests because the interpreter mock returns non-JSON unless a test opts in, so
+  every matcher test falls straight through to the matcher chain and never exercises the path
+  production takes. That is a blind spot for **any** feature added as a matcher, not just this
+  one.
+
   It reports **Thailand's own five colour bands** (ดัชนีคุณภาพอากาศ พ.ศ. 2566), not the US or
   European AQI the same endpoint can return: a Thai reader knows what "ฝุ่นสีส้ม" means and does
   not know what "US AQI 142" means. Because the bands end in health advice, their provenance is

@@ -89,26 +89,37 @@ const AIR_QUALITY_PHRASES = [
   "อากาศเป็นพิษไหม",
 ];
 
+/**
+ * The answer itself, shared by the typed command and the AI interpreter's
+ * `air_quality` intent (PLAN.md 17.72).
+ *
+ * One function for both on purpose: the matcher only ever catches the exact
+ * phrases listed above, and the interpreter is what catches everything else
+ * someone might say. Two implementations would drift, and the phrasing that
+ * got the worse one would look like a different feature.
+ */
+export async function answerAirQuality(kv: KVNamespace, lineUserId: string): Promise<string> {
+  const province = await getUserProvince(kv, lineUserId);
+  if (!province) return 'ยังไม่รู้พื้นที่ของคุณเลย พิมพ์ "ตั้งจังหวัด <ชื่อ>" ก่อนนะ แล้วจะบอกค่าฝุ่นให้ได้';
+  try {
+    const reading = await fetchAirQuality(province);
+    // No number rather than a stale or invented one: this is the input to a
+    // decision about going outside.
+    if (!reading) return `ตอนนี้ดึงค่าฝุ่นที่${province.name}ไม่ได้ ลองใหม่อีกทีนะ`;
+    const pm10Part = reading.pm10 !== null ? `\n(PM10 ${reading.pm10.toFixed(1)} µg/m³)` : "";
+    return `${formatAirQualityLine(reading, province.name)}${pm10Part}`;
+  } catch (err) {
+    console.error("answerAirQuality: air quality fetch failed", err);
+    return `ตอนนี้ดึงค่าฝุ่นที่${province.name}ไม่ได้ ลองใหม่อีกทีนะ`;
+  }
+}
+
 export function matchAirQualityCommand(
   text: string
 ): ((kv: KVNamespace, lineUserId: string) => Promise<string>) | null {
   const normalized = text.trim().toLowerCase().replace(/[?？!]/g, "").trim();
   if (!AIR_QUALITY_PHRASES.includes(normalized)) return null;
-  return async (kv, lineUserId) => {
-    const province = await getUserProvince(kv, lineUserId);
-    if (!province) return 'ยังไม่รู้พื้นที่ของคุณเลย พิมพ์ "ตั้งจังหวัด <ชื่อ>" ก่อนนะ แล้วจะบอกค่าฝุ่นให้ได้';
-    try {
-      const reading = await fetchAirQuality(province);
-      // No number rather than a stale or invented one: this is the input to
-      // a decision about going outside.
-      if (!reading) return `ตอนนี้ดึงค่าฝุ่นที่${province.name}ไม่ได้ ลองใหม่อีกทีนะ`;
-      const pm10Part = reading.pm10 !== null ? `\n(PM10 ${reading.pm10.toFixed(1)} µg/m³)` : "";
-      return `${formatAirQualityLine(reading, province.name)}${pm10Part}`;
-    } catch (err) {
-      console.error("matchAirQualityCommand: air quality fetch failed", err);
-      return `ตอนนี้ดึงค่าฝุ่นที่${province.name}ไม่ได้ ลองใหม่อีกทีนะ`;
-    }
-  };
+  return answerAirQuality;
 }
 
 export function matchProvinceCommand(text: string): ((kv: KVNamespace, lineUserId: string) => Promise<string>) | null {

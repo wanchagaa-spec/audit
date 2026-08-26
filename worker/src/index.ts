@@ -42,6 +42,7 @@ import {
   buildMorningBriefing,
   buildReturnGreeting,
   classifyGreeting,
+  answerAirQuality,
   matchAirQualityCommand,
   matchProvinceCommand,
   setProvinceByName,
@@ -541,6 +542,11 @@ async function runInterpretedIntent(
         );
       case "contact_list":
         return await withToken((ctx) => answerContactList(ctx));
+      // No Google token: Open-Meteo needs no auth at all (PLAN.md 17.71).
+      // Routed to the same handler the typed command uses, so both phrasings
+      // give the identical answer rather than two that can drift apart.
+      case "air_quality":
+        return await answerAirQuality(env.ACCOUNTS, subjectId);
       case "contact_lookup":
         return await withToken((ctx) => answerContactEmail(ctx, intent.contactName));
       case "find_nearby_places":
