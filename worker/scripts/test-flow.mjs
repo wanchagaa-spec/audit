@@ -1100,6 +1100,7 @@ globalThis.fetch = async (url, init = {}) => {
     // transcript turns into.
     if (systemInstruction.includes(TRANSCRIBE_MARKER)) {
       transcriptionRequests.push({
+        systemInstruction,
         mimeType: body.contents?.[0]?.parts?.[0]?.inlineData?.mimeType,
         hasAudio: Boolean(body.contents?.[0]?.parts?.[0]?.inlineData?.data),
         base64Length: body.contents?.[0]?.parts?.[0]?.inlineData?.data?.length ?? 0,
@@ -2501,6 +2502,121 @@ check(
     replies.at(-1).includes("ยังไม่รองรับ") &&
     replies.at(-1).includes("ข้อความเสียง")
 );
+
+// ---- Four faults the first voice release showed (PLAN.md 17.75) ---------
+// From a real conversation: a voice note mentioning "ตอน 16:00 น." was
+// proposed as a 16-baht expense, the transcript came back with a space
+// between every word, answering "ยกเลิก" was met with "ยกเลิกอะไรคะ", and
+// the Gemini free tier ran out mid-conversation.
+
+// A time is the one number in an ordinary Thai sentence that looks most like
+// an amount, and this is money: the confirm step is the last thing between a
+// misread and a wrong figure in someone's accounts.
+const clockTimeIntent = { intent: "transaction", transactions: [{ amount: 16, type: "expense", categoryId: "food", note: "คิมชาบู" }] };
+check(
+  "an amount that appears only as the hour of a time is rejected",
+  validateIntent(clockTimeIntent, "พรุ่งนี้เป็นคิมชาบูตอน 16:00 น.") === null &&
+    validateIntent(clockTimeIntent, "พรุ่งนี้เป็นคิมชาบูตอน 16.00 น.") === null
+);
+// Narrow on purpose — the same number appearing as a real amount elsewhere
+// in the sentence is a real amount.
+check(
+  "the same number is accepted when it also appears as an actual amount",
+  validateIntent(clockTimeIntent, "ค่ากาแฟ 16 บาท ตอน 16:00 น.") !== null &&
+    validateIntent(clockTimeIntent, "ค่าคิมชาบู 16") !== null
+);
+// "16.00 บาท" is sixteen baht written with a decimal, not four in the
+// afternoon. Only the trailing น. makes the dotted form a time.
+check(
+  "a dotted amount with no น. after it is still money",
+  validateIntent(clockTimeIntent, "จ่ายไป 16.00 บาท") !== null
+);
+// And the whole intent goes back, rather than half of a multi-row message
+// being acted on.
+check(
+  "one bad row rejects the whole batch rather than saving the rest",
+  validateIntent(
+    { intent: "transaction", transactions: [{ amount: 60, type: "expense", categoryId: "food", note: "กาแฟ" }, { amount: 16, type: "expense", categoryId: "food", note: "ชาบู" }] },
+    "ค่ากาแฟ 60 แล้วนัดกินชาบูตอน 16:00 น."
+  ) === null
+);
+// The prompt is what stops the model producing it in the first place; the
+// check above is what stops it reaching the sheet when the prompt does not.
+simulateInterpreterResult = { intent: "chitchat", chitchatReply: "ok" };
+await handleTextMessage(env, lineUserId, "ทดสอบ prompt", origin);
+const moneyPrompt = geminiRequests.filter((r) => r.systemInstruction.includes(INTERPRETER_MARKER)).at(-1).systemInstruction;
+check("the interpreter is told outright that a time is not an amount", moneyPrompt.includes("เวลาไม่ใช่จำนวนเงิน"));
+
+// Thai does not put a space between every word, and the spacing is not just
+// ugly: it is a second reading of the sentence, inherited by whatever reads
+// the transcript next.
+transcriptionRequests.length = 0;
+mockTranscript = "ค่ากาแฟ 60";
+await sendVoice("aud-spacing-1");
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin); // clear the confirmation it leaves
+check(
+  "the transcription prompt forbids spacing every word apart",
+  transcriptionRequests.length === 1 &&
+    transcriptionRequests[0].systemInstruction.includes("ห้ามเว้นวรรคระหว่างทุกคำ")
+);
+
+// Answering "ยกเลิก" already cleared the draft; what was wrong was being
+// told otherwise. "ยกเลิกอะไรคะ" says the cancel failed when it worked.
+await handleTextMessage(env, lineUserId, "ค่าขนม 25", origin);
+const cancelReply = await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+check(
+  "cancelling a confirmation says it was cancelled",
+  cancelReply.includes("ยกเลิกแล้ว") && !cancelReply.includes("ยกเลิกอะไร")
+);
+const rowsAfterCancel = sheetRows.length;
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("and nothing is saved afterwards, because the draft really is gone", sheetRows.length === rowsAfterCancel);
+for (const word of ["ไม่", "ไม่เอา", "ไม่ต้องแล้วค่ะ", "cancel"]) {
+  await handleTextMessage(env, lineUserId, "ค่าขนม 25", origin);
+  const reply = await handleTextMessage(env, lineUserId, word, origin);
+  check(`"${word}" is understood as cancelling too`, reply.includes("ยกเลิกแล้ว"));
+}
+// An unrelated message still falls through and gets handled normally — the
+// draft is dropped either way, but it must not be mistaken for a cancel.
+await handleTextMessage(env, lineUserId, "ค่าขนม 25", origin);
+const unrelatedReply = await handleTextMessage(env, lineUserId, "ฝุ่น", origin);
+check(
+  "an unrelated reply to a confirmation is still answered on its own terms",
+  unrelatedReply.includes("µg/m³") && !unrelatedReply.includes("ยกเลิกแล้ว")
+);
+
+// A voice message already costs a Gemini call the typed path does not.
+// Styling it as well is what ran the free tier out mid-conversation.
+// Asserted on the absence of a styling call, not on a call *count*: voice
+// costs transcribe + interpret and typing costs interpret + style, so the
+// totals happen to match and a count comparison passes with the styling
+// still there.
+const personaCallsIn = (from) =>
+  geminiRequests.slice(from).filter((r) => r.systemInstruction.includes("ห้ามเปลี่ยนตัวเลข")).length;
+const geminiCallsBeforeVoice = geminiRequests.length;
+mockTranscript = "สรุปเดือนนี้";
+await sendVoice("aud-quota-1");
+check(
+  "a voice reply is not sent through the styling pass as well",
+  personaCallsIn(geminiCallsBeforeVoice) === 0
+);
+// Typed replies keep it — the saving is scoped to the path that pays for a
+// transcription, not applied to the whole bot. Sent through the webhook
+// rather than handleTextMessage directly, because styling happens in
+// replyOrPush and a direct call never reaches it.
+const typedBody = JSON.stringify({
+  events: [{ type: "message", message: { type: "text", id: "txt-persona-1", text: "สรุปเดือนนี้" }, source: { type: "user", userId: lineUserId }, replyToken: "reply-txt-persona-1", timestamp: Date.now() }],
+});
+const geminiCallsBeforeTyped = geminiRequests.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(typedBody, env.LINE_CHANNEL_SECRET) },
+    body: typedBody,
+  }),
+  env
+);
+check("while a typed reply still is", personaCallsIn(geminiCallsBeforeTyped) >= 1);
 
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty

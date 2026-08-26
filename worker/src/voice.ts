@@ -28,6 +28,11 @@ const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const TRANSCRIBE_INSTRUCTION = [
   "คุณเป็นระบบถอดเสียงเป็นข้อความภาษาไทย",
   "ถอดสิ่งที่ได้ยินออกมาเป็นข้อความให้ตรงที่สุด โดยเฉพาะ**ตัวเลข** ให้เขียนเป็นเลขอารบิก เช่น หกสิบ → 60",
+  // The first version produced "ไป โหลด เพิ่ม มา ชา หน่อย" — a space between
+  // every single word (PLAN.md 17.75). Thai does not space between words,
+  // and the spacing does not just look wrong: it is a second reading of the
+  // sentence, and whatever reads the transcript next inherits it.
+  "เขียนภาษาไทยแบบปกติ **ห้ามเว้นวรรคระหว่างทุกคำ** เว้นวรรคเฉพาะที่ภาษาไทยเว้นจริงๆ เช่น ระหว่างประโยค",
   "ตอบเฉพาะข้อความที่ถอดได้เท่านั้น ห้ามใส่คำอธิบาย ห้ามใส่เครื่องหมายคำพูด ห้ามสรุป ห้ามตอบคำถามในเสียง",
   "ถ้าฟังไม่ออกเลยหรือไม่มีเสียงพูด ให้ตอบว่า (ฟังไม่ออก)",
 ].join("\n");

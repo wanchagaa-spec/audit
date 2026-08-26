@@ -33,6 +33,41 @@ const POLITE_SUFFIXES = ["นะครับ", "นะคะ", "ครับผ�
 // one trailing particle before the exact-match check, rather than a looser
 // substring/startsWith match, so unrelated text that happens to merely
 // *contain* an affirmative word doesn't get misread as a confirmation.
+/**
+ * An explicit "no", as opposed to merely not saying yes.
+ *
+ * Both clear the pending question — resolveConfirmation already does that
+ * for anything non-affirmative. The difference is what the user is told
+ * afterwards: answering "ยกเลิก" to a confirmation used to clear the draft
+ * and then hand the word to the interpreter as a fresh message, which
+ * replied "ยกเลิกอะไรคะ" (PLAN.md 17.75). The cancel had worked; the answer
+ * said it had not, which is the one thing worse than not cancelling.
+ *
+ * Same particle-stripping as isAffirmative, for the same reason: real Thai
+ * carries "ครับ"/"ค่ะ" and an exact-match list without it rejects most
+ * genuine replies.
+ */
+const NEGATIVE = ["ไม่", "ไม่ใช่", "ยกเลิก", "ไม่เอา", "ไม่ต้อง", "no", "cancel", "ยัง"];
+
+export function isExplicitCancel(text: string): boolean {
+  let trimmed = text.trim().toLowerCase();
+  for (const suffix of POLITE_SUFFIXES) {
+    if (trimmed.endsWith(suffix)) {
+      trimmed = trimmed.slice(0, -suffix.length).trim();
+      break;
+    }
+  }
+  // "แล้ว" rides on the end of nearly every spoken refusal —
+  // "ไม่ต้องแล้วค่ะ", "ไม่เอาแล้ว" — so it is stripped as well rather than
+  // listing each combination. Safe to be looser here than isAffirmative is:
+  // a non-affirmative reply has already cleared the draft by this point, so
+  // this decides only what the user is *told*. Reading a cancel where there
+  // was none costs a slightly wrong sentence; missing one costs the
+  // "ยกเลิกอะไรคะ" that started this.
+  if (trimmed.endsWith("แล้ว")) trimmed = trimmed.slice(0, -"แล้ว".length).trim();
+  return NEGATIVE.includes(trimmed);
+}
+
 export function isAffirmative(text: string): boolean {
   let trimmed = text.trim().toLowerCase();
   for (const suffix of POLITE_SUFFIXES) {
