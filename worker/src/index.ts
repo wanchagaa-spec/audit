@@ -17,7 +17,7 @@ import {
 import { matchBudgetCommand, promptBudgetDelete, promptBudgetSet, answerBudgetList } from "./budgetCommands.ts";
 import { buildCapabilityText, buildHelpReply, matchCommand } from "./commands.ts";
 import { appendConversationTurn, getConversationHistory } from "./conversationHistory.ts";
-import { resolveConfirmation } from "./confirmations.ts";
+import { isExplicitCancel, resolveConfirmation } from "./confirmations.ts";
 import {
   answerDiaryByDate,
   answerDiaryMonthSummary,
@@ -456,6 +456,12 @@ async function resolvePendingConfirmation(
     // null means "not an affirmative reply" — the pending question is
     // already cleared (see confirmations.ts), fall through and handle
     // `text` normally.
+    //
+    // Except when the reply was an outright "no": the draft is gone either
+    // way, but handing "ยกเลิก" onward as a fresh message got it answered
+    // with "ยกเลิกอะไรคะ", telling the user the cancel had not worked when
+    // it had (PLAN.md 17.75).
+    if (reply === null && isExplicitCancel(text)) return "ยกเลิกแล้ว ไม่ได้บันทึกอะไรนะ";
     return reply;
   } catch (err) {
     if (err instanceof CalendarApiDisabledError) return CALENDAR_API_DISABLED_MESSAGE;
@@ -1452,10 +1458,18 @@ function subjectIdForSource(source: LineEventSource): string {
 async function replyOrPush(
   event: { replyToken: string; source: LineEventSource },
   text: string,
-  env: Env
+  env: Env,
+  // Voice replies skip the styling pass (PLAN.md 17.75). A voice message
+  // already costs a Gemini call the typed path does not — transcribe, then
+  // interpret, then style — and the free tier ran out mid-conversation
+  // because of it, which turns the whole feature off. An unstyled reply is a
+  // cosmetic loss; "ระบบ AI ตอบไม่ได้ชั่วคราว" is the feature not working.
+  options: { skipPersona?: boolean } = {}
 ): Promise<void> {
   const settings = await getBotSettings(env.ACCOUNTS, subjectIdForSource(event.source));
-  const styledText = await applyPersona(text, env.GEMINI_API_KEY, settings, env.ACCOUNTS);
+  const styledText = options.skipPersona
+    ? text
+    : await applyPersona(text, env.GEMINI_API_KEY, settings, env.ACCOUNTS);
   try {
     await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
   } catch (err) {
@@ -1747,7 +1761,7 @@ async function handleOneOtherEvent(
         await replyOrPush(event, reply, env);
       }
     } else if (isAudioMessageEvent(event)) {
-      await replyOrPush(event, await handleAudioMessage(env, event, origin), env);
+      await replyOrPush(event, await handleAudioMessage(env, event, origin), env, { skipPersona: true });
     } else if (isUnsupportedMessageEvent(event)) {
       await replyOrPush(event, "ขอโทษด้วย ไฟล์ประเภทนี้ยังไม่รองรับนะ ตอนนี้รองรับแค่รูปภาพ วิดีโอ และข้อความเสียง", env);
     }

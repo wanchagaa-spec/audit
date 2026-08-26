@@ -183,7 +183,36 @@ function validateTransaction(raw: unknown): InterpretedTransaction | null {
 // can emit syntactically valid JSON that's still semantically wrong (an
 // invented categoryId, an impossible date), and this is the one place that
 // stands between that and an action actually firing.
-export function validateIntent(raw: unknown): InterpretedIntent | null {
+/**
+ * A clock time written the way Thai writes it.
+ *
+ * The colon form needs no marker — nobody writes an amount as "16:00". The
+ * dotted form does: "16.00 บาท" is a perfectly ordinary sixteen baht, and
+ * only the trailing "น." makes it four in the afternoon instead.
+ */
+const CLOCK_TIME = /\d{1,2}:\d{2}|\d{1,2}\.\d{2}\s*น\./g;
+
+/**
+ * Does this amount appear in the message *only* as the hour of a clock time?
+ *
+ * Written after a voice note about meeting "ตอน 16:00 น." was proposed as a
+ * 16-baht expense (PLAN.md 17.75). The prompt now says times are not
+ * amounts, but a prompt is a request, and this is money: the confirm step is
+ * the last thing between a misread and a wrong number in someone's accounts,
+ * and it only helps if they read it carefully.
+ *
+ * Deliberately narrow. If the number appears anywhere outside a time as
+ * well — "ค่ากาแฟ 16 บาท ตอน 16:00 น." — it is a real amount and passes.
+ */
+function amountIsOnlyAClockTime(amount: number, sourceText: string): boolean {
+  // Escaped because a decimal amount puts a "." in the pattern.
+  const digits = String(amount).replace(/[.]/g, "\\.");
+  const standalone = new RegExp(`(?<!\\d)${digits}(?!\\d)`);
+  if (!standalone.test(sourceText)) return false;
+  return !standalone.test(sourceText.replace(CLOCK_TIME, " "));
+}
+
+export function validateIntent(raw: unknown, sourceText = ""): InterpretedIntent | null {
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
 
@@ -192,6 +221,10 @@ export function validateIntent(raw: unknown): InterpretedIntent | null {
       if (!Array.isArray(r.transactions) || r.transactions.length === 0) return null;
       const transactions = r.transactions.map(validateTransaction);
       if (transactions.some((t) => t === null)) return null;
+      // Rejecting the whole intent rather than dropping the one bad row:
+      // a message the model read this wrongly is one to hand back to the
+      // deterministic matchers, not to half-act on.
+      if (transactions.some((t) => amountIsOnlyAClockTime(t!.amount, sourceText))) return null;
       return { intent: "transaction", transactions: transactions as InterpretedTransaction[] };
     }
     case "calendar_create": {
@@ -472,6 +505,10 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     "อ่านข้อความล่าสุดของผู้ใช้ (ข้อความเดียว ไม่ใช่ทั้งประวัติ) แล้วตอบกลับเป็น JSON ล้วนๆ เท่านั้น (ห้ามมี markdown, ห้ามมีคำอธิบายอื่นนอก JSON) ตาม schema ต่อไปนี้ โดยเลือก intent ที่ตรงที่สุดหนึ่งอย่าง:",
     "",
     '{"intent":"transaction","transactions":[{"amount":number,"type":"income"หรือ"expense","categoryId":string,"note":string}]} — มีจำนวนเงินเกี่ยวข้อง (ซื้อของ รายรับ รายจ่าย) note คือคำอธิบายสั้นๆของรายการ',
+    // Added after a voice note containing "ตอน 16:00 น." was turned into a
+    // 16-baht expense (PLAN.md 17.75). A time is the one number in an
+    // ordinary Thai sentence that looks most like an amount.
+    '**เวลาไม่ใช่จำนวนเงิน** — "16:00 น.", "16.00 น.", "บ่ายสามโมง" คือเวลา ห้ามเอาไปใส่เป็น amount เด็ดขาด ถ้าข้อความมีแต่เวลาไม่มีจำนวนเงินจริง อย่าตอบ transaction',
     '{"intent":"calendar_create","calendarTitle":string,"calendarDateKey":"YYYY-MM-DD","calendarTime":"HH:MM"} — สร้างนัดใหม่ ต้องรู้ทั้งวันที่และเวลาแน่ชัด',
     '{"intent":"calendar_delete","calendarKeyword":string} — ลบนัดที่มีคำค้นหานี้',
     '{"intent":"calendar_edit","calendarKeyword":string,"calendarDateKey"?:"YYYY-MM-DD","calendarTime"?:"HH:MM"} — แก้วันที่/เวลาของนัดที่มีคำค้นหานี้',
@@ -659,7 +696,7 @@ export async function interpretMessage(
       maxOutputTokens: INTERPRETER_MAX_OUTPUT_TOKENS,
     });
     const parsed: unknown = JSON.parse(raw);
-    const intent = validateIntent(parsed);
+    const intent = validateIntent(parsed, text);
     if (!intent) {
       console.error("interpretMessage: model returned a well-formed but invalid/unrecognized intent, falling back", raw);
       return { kind: "unusable" };

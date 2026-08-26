@@ -894,6 +894,17 @@ gives up after a day can be missed by being busy on exactly the wrong morning. `
 clamps a due day to one that exists in the month, so a bill due on the 31st comes due on 30 April
 and on the last day of February instead of never coming due at all.
 
+**A clock time is never an amount** (PLAN.md 17.75). A voice note mentioning "ตอน 16:00 น." was
+proposed as a 16-baht expense — a time is the one number in an ordinary Thai sentence that looks
+most like money. The interpreter prompt now says so, and `validateIntent` rejects the whole intent
+when the amount appears in the source text *only* as the hour of a clock time. A prompt is a
+request; this is money, and the confirm step only protects someone who reads it carefully.
+
+The check is deliberately narrow. A number that also appears outside a time ("ค่ากาแฟ 16 บาท ตอน
+16:00 น.") is a real amount. The dotted form needs a trailing "น." to count as a time at all,
+because "16.00 บาท" is sixteen baht written with a decimal; the colon form needs no marker,
+since nobody writes an amount as "16:00".
+
 Why the bot does not work out for itself which bills are paid: it would have to match amounts
 against `Transactions`, and two bills of the same size in the same category are
 indistinguishable that way. A wrong guess in a money feature is worse than no answer.
@@ -1449,6 +1460,15 @@ by voice without any of them being told about audio.**
   unchanged fails the call outright.
 - **Nothing heard is said plainly**, never guessed at. Acting on words nobody spoke is the worst
   failure available to a bot whose main job is recording money.
+- **Voice replies skip the styling pass** (PLAN.md 17.75). A voice message costs a Gemini call
+  the typed path does not — transcribe, then interpret, then style — and the free tier ran out
+  mid-conversation because of it. An unstyled reply is a cosmetic loss; "ระบบ AI ตอบไม่ได้
+  ชั่วคราว" is the feature not working. Typed replies keep their persona; the saving is scoped to
+  the path that pays for a transcription.
+- **The transcription prompt forbids spacing every word apart.** The first release produced
+  "ไป โหลด เพิ่ม มา ชา หน่อย" — Thai does not space between words, and the spacing is not merely
+  ugly: it is a second reading of the sentence, which whatever parses the transcript next
+  inherits.
 - `toBase64` moved out of the signature helper and is now shared. The obvious
   `String.fromCharCode(...bytes)` works on a 32-byte HMAC and throws on a megabyte of audio, and
   appending a character at a time is slow enough to matter inside a webhook — one implementation
