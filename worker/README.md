@@ -1441,6 +1441,27 @@ one trip folder and offers to remove them (PLAN.md 17.69).
   ids from a stale tab or edited by hand would be a request to trash arbitrary files in the user's
   Drive, and the page would look identical either way.
 
+### Receipt photos (PLAN.md 17.76)
+
+A photo sent **with no trip open** is read as a receipt and proposed as an expense, through the
+same confirm step typed expenses use. Photos already had a home — the trip album — but only
+during a trip; outside one they got "ยังไม่ได้เริ่มทริปอยู่เลย" and were thrown away.
+
+- **The open trip decides.** While one is running every photo belongs to the album, which is what
+  people already rely on and the behaviour worth not breaking.
+- **The whole feature is which number becomes the amount.** A Thai receipt carries a subtotal,
+  VAT, a grand total, cash tendered and change, and four of those five are wrong. Reading
+  "เงินสด 1000" off a 320-baht meal does not look like an error afterwards — it looks like a meal
+  that cost a thousand baht. The prompt names the total and forbids the other four by name.
+- **Only the first image of a batch.** Someone sending five photos at once outside a trip is not
+  filing five expenses, and five confirmations to answer one by one would be worse than none.
+- **Three failures give one answer**: not a receipt, a total that could not be read, and a failed
+  lookup. They mean the same thing to the person holding the phone, and distinguishing them would
+  only invite a retry of a photo that will fail the same way. None of them proposes a number.
+- **An invented category falls back to `other-expense`** rather than failing the read — the
+  amount is the part worth keeping, and a category the model made up would put the row somewhere
+  every reader downstream treats as impossible.
+
 ### Voice messages (PLAN.md 17.74)
 
 Send a voice note instead of typing. The audio is transcribed by Gemini and the transcript is fed

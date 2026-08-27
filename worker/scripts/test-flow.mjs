@@ -234,6 +234,11 @@ const geminiRequests = []; // captures {systemInstruction, question, apiKey} per
 // Must match voice.ts's transcription instruction — identifies a
 // speech-to-text call the same way INTERPRETER_MARKER identifies an
 // interpreter one.
+// Must match receipt.ts's instruction — identifies a receipt-reading call.
+const RECEIPT_MARKER = "ระบบอ่านใบเสร็จภาษาไทย";
+const receiptRequests = []; // captures {systemInstruction, mimeType, hasImage} per receipt call
+let mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+let simulateReceiptFailure = false; // one-shot: fails the next receipt read
 const TRANSCRIBE_MARKER = "ระบบถอดเสียงเป็นข้อความภาษาไทย";
 const transcriptionRequests = []; // captures {mimeType, hasAudio, base64Length} per transcription call
 let mockTranscript = "ค่ากาแฟ 60";
@@ -1094,6 +1099,24 @@ globalThis.fetch = async (url, init = {}) => {
     // not eaten by this earlier, unrelated one. See simulateInterpreterResult's
     // own comment above for why the no-mock-configured default is
     // deliberately non-JSON.
+    // Receipt reading (PLAN.md 17.76) — its own branch for the same reason
+    // the transcription one has its own: it must not consume a
+    // simulateInterpreterResult armed for something else.
+    if (systemInstruction.includes(RECEIPT_MARKER)) {
+      receiptRequests.push({
+        systemInstruction,
+        mimeType: body.contents?.[0]?.parts?.[0]?.inlineData?.mimeType,
+        hasImage: Boolean(body.contents?.[0]?.parts?.[0]?.inlineData?.data),
+      });
+      if (simulateReceiptFailure) {
+        simulateReceiptFailure = false;
+        return new Response("simulated receipt read failure", { status: 500 });
+      }
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(mockReceiptReading) }] }, finishReason: "STOP" }] }),
+        { status: 200 }
+      );
+    }
     // Voice transcription (PLAN.md 17.74) — answered before the interpreter
     // branch below, because a transcription call is its own thing and must
     // not consume a simulateInterpreterResult armed for the *text* the
@@ -2618,6 +2641,122 @@ await handleWebhook(
 );
 check("while a typed reply still is", personaCallsIn(geminiCallsBeforeTyped) >= 1);
 
+// ---- รูปใบเสร็จ → รายจ่าย (PLAN.md 17.76) --------------------------------
+// Photos already had a home — the trip album — but only while a trip is
+// open. Outside one they got "ยังไม่ได้เริ่มทริปอยู่เลย" and were thrown
+// away. The open trip is still what decides: during a trip every photo
+// belongs to the album, which is what people already rely on.
+
+const sendPhoto = async (messageId) => {
+  const rawBody = JSON.stringify({
+    events: [{ type: "message", message: { type: "image", id: messageId }, source: { type: "user", userId: lineUserId }, replyToken: `reply-${messageId}`, timestamp: Date.now() }],
+  });
+  const repliesBefore = replies.length;
+  await handleWebhook(
+    new Request("http://localhost:8787/webhook", {
+      method: "POST",
+      headers: { "x-line-signature": await signLineBody(rawBody, env.LINE_CHANNEL_SECRET) },
+      body: rawBody,
+    }),
+    env
+  );
+  return replies.length > repliesBefore ? replies.at(-1) : "";
+};
+
+// No trip open at this point in the run — the trip tests close theirs.
+await handleTextMessage(env, lineUserId, "ปิดทริป", origin).catch(() => undefined);
+receiptRequests.length = 0;
+mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+const receiptReply = await sendPhoto("receipt-1");
+check(
+  "a photo sent with no trip open is read as a receipt and proposed as an expense",
+  receiptReply.includes("320") && receiptReply.includes("ร้านชาบู") && receiptReply.includes("ยืนยัน")
+);
+// Echoed above the confirmation for the same reason the voice transcript is:
+// the confirm step is the last thing between a misread total and a wrong
+// number in someone's accounts, and it only protects someone who can see
+// what was read.
+check("and what was read is shown before the confirmation", receiptReply.startsWith("🧾"));
+check("the image actually reaches Gemini", receiptRequests.length === 1 && receiptRequests[0].hasImage);
+// The instruction is the whole defence against reading the wrong number off
+// a receipt: a Thai receipt carries a subtotal, VAT, a grand total, cash
+// tendered and change, and four of those five are wrong.
+check(
+  // Asserted on the prohibition itself, not just the word "เงินทอน": two
+  // separate lines mention it, so looking for the word alone passes with
+  // the rule that matters deleted.
+  "the prompt names the total and forbids the four numbers that are not it",
+  receiptRequests[0].systemInstruction.includes("ยอดที่จ่ายจริง") &&
+    receiptRequests[0].systemInstruction.includes("**ห้าม**เอายอดก่อนภาษี") &&
+    receiptRequests[0].systemInstruction.includes("ให้ใช้ยอดรวมเสมอ")
+);
+
+// It goes through the ordinary confirm step, so it saves like any expense.
+const rowsBeforeReceiptSave = sheetRows.length;
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming saves it as a normal expense row",
+  sheetRows.length === rowsBeforeReceiptSave + 1 && Number(sheetRows.at(-1)[3]) === 320 && sheetRows.at(-1)[4] === "food"
+);
+
+// A photo that is not a receipt must not become an expense. Proposing a
+// number nobody wrote, in front of a "ใช่" button, is the failure worth
+// designing against here.
+// A plausible amount alongside isReceipt:false on purpose — a photo of a
+// meal can easily make the model emit a number. With amount 0 here, the
+// amount check would catch it and the isReceipt flag would go untested.
+mockReceiptReading = { isReceipt: false, amount: 250, merchant: "", categoryId: "food" };
+const notReceiptReply = await sendPhoto("receipt-scenery-1");
+check(
+  "a photo that is not a receipt is refused rather than guessed at",
+  notReceiptReply.includes("อ่านใบเสร็จจากรูปนี้ไม่ออก") && !notReceiptReply.includes("ยืนยัน")
+);
+// isReceipt true but no usable total is the same outcome — a receipt whose
+// amount could not be read is not an expense of zero baht.
+mockReceiptReading = { isReceipt: true, amount: 0, merchant: "ร้านหนึ่ง", categoryId: "food" };
+check("a receipt with no readable total is refused too", (await sendPhoto("receipt-nototal-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก"));
+mockReceiptReading = { isReceipt: true, amount: -50, merchant: "ร้านหนึ่ง", categoryId: "food" };
+check("and a negative one", (await sendPhoto("receipt-negative-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก"));
+
+const { categoryLabel } = await import("../src/format.ts");
+
+// An invented category would put the row somewhere every reader downstream
+// treats as impossible — but the amount is the part worth keeping, so it
+// falls back rather than failing the whole read.
+mockReceiptReading = { isReceipt: true, amount: 99, merchant: "ร้านสอง", categoryId: "not-a-real-category" };
+const badCategoryReply = await sendPhoto("receipt-badcat-1");
+check(
+  "an invented category falls back instead of failing the read",
+  badCategoryReply.includes("99") && badCategoryReply.includes(categoryLabel("other-expense"))
+);
+// An income category is just as impossible on a receipt.
+mockReceiptReading = { isReceipt: true, amount: 99, merchant: "ร้านสาม", categoryId: "salary" };
+check(
+  "an income category is not accepted on a receipt either",
+  (await sendPhoto("receipt-income-cat-1")).includes(categoryLabel("other-expense"))
+);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+simulateReceiptFailure = true;
+mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+check(
+  "a failed read says so instead of proposing anything",
+  (await sendPhoto("receipt-fail-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก")
+);
+
+// A trip that is open still wins: that is the behaviour people already rely
+// on, and a photo during a trip belongs to the album.
+await handleTextMessage(env, lineUserId, "เริ่มทริป ทดสอบใบเสร็จ", origin);
+receiptRequests.length = 0;
+const uploadsBeforeTripPhoto = driveUploads.length;
+await sendPhoto("receipt-during-trip-1");
+await drainUploadQueue(env, new Date("2026-03-05T09:30:00.000Z"));
+check(
+  "with a trip open the photo still goes to the album, not to the receipt reader",
+  receiptRequests.length === 0 && driveUploads.length === uploadsBeforeTripPhoto + 1
+);
+await handleTextMessage(env, lineUserId, "ปิดทริป", origin);
+
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
 
@@ -3435,10 +3574,14 @@ check(
   replies.length === repliesBefore + 1 && replies.slice(repliesBefore).every((r) => r.includes("ยังไม่รองรับ"))
 );
 check(
+  // The wording changed with PLAN.md 17.76 — a photo sent with no trip open
+  // is now read as a receipt rather than turned away. What this test is
+  // actually about is unchanged: an expired reply token still reaches the
+  // user by push instead of leaving them with silence.
   "the media batch's expired reply token falls back to a push message instead of staying silent",
   pushes.length === pushesBefore + 1 &&
     pushes[pushesBefore].to === lineUserId &&
-    pushes[pushesBefore].text.includes("ยังไม่ได้เริ่มทริปอยู่เลย")
+    pushes[pushesBefore].text.length > 0
 );
 
 const wrongSignatureRequest = new Request("http://localhost:8787/webhook", {
