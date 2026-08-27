@@ -70,6 +70,7 @@ export type InterpretedIntent =
   | { intent: "contact_lookup"; contactName: string }
   | { intent: "contact_list" }
   | { intent: "air_quality" }
+  | { intent: "trip_list" }
   | { intent: "lottery_result" }
   | { intent: "lottery_check"; lotteryNumber: string }
   | { intent: "find_nearby_places"; placeKeyword: string }
@@ -303,6 +304,8 @@ export function validateIntent(raw: unknown, sourceText = ""): InterpretedIntent
       return { intent: "contact_list" };
     case "air_quality":
       return { intent: "air_quality" };
+    case "trip_list":
+      return { intent: "trip_list" };
     case "lottery_result":
       return { intent: "lottery_result" };
     case "lottery_check": {
@@ -528,6 +531,7 @@ function buildSystemInstruction(today: string, history: ConversationTurn[], sett
     // answered contact_lookup with no name, failed validation, and the
     // message fell through to "I don't understand".
     '{"intent":"contact_list"} — ขอดู**รายชื่อผู้ติดต่อทั้งหมด**ที่มีอีเมล ไม่ได้เจาะจงคนใดคนหนึ่ง (เช่น "ขอรายชื่ออีเมลที่มีหน่อย", "มีอีเมลใครบ้าง", "ผู้ติดต่อทั้งหมด")',
+    '{"intent":"trip_list"} — ขอดู**รายชื่อทริป/อัลบั้มรูปทั้งหมดที่เคยเก็บไว้** (เช่น "มีทริปอะไรบ้าง", "ทริปทั้งหมด", "เคยเก็บอัลบั้มอะไรไว้บ้าง") — คนละอย่างกับ trip_status ที่ถามว่าตอนนี้เปิดทริปอะไรอยู่ และคนละอย่างกับ trip_start ที่ระบุชื่อทริปมาด้วย',
     '{"intent":"lottery_result"} — ขอ**ผลสลากกินแบ่งรัฐบาลงวดล่าสุด** ไม่ได้ให้เลขมาตรวจ (เช่น "ผลหวย", "หวยออกอะไร", "ขอผลสลากหน่อย")',
     // lotteryNumber ต้องเป็นตัวเลขล้วน ห้ามเดาหรือเติมเลขที่ผู้ใช้ไม่ได้พิมพ์
     '{"intent":"lottery_check","lotteryNumber":"735867"} — ให้**เลขมาตรวจ**ว่าถูกรางวัลไหม (เช่น "ตรวจหวย 735867", "เลข 12 ถูกไหม", "ซื้อไว้ 735867 ถูกรางวัลรึเปล่า") — ถ้าเป็นการ**ซื้อ**หวยพร้อมจำนวนเงิน เช่น "ซื้อหวย 200" นั่นคือ {"intent":"transaction"} ไม่ใช่อันนี้',

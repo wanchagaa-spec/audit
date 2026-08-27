@@ -2846,6 +2846,64 @@ await kv.delete("last-broadcast-date");
 await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
 check("and neither does having no budgets set", !pushes.at(-1).text.includes("งบเดือนนี้ที่ต้องระวัง"));
 
+// ---- รายชื่อทริป + เปิดทริปเก่าต่อ (PLAN.md 17.78) ------------------------
+// Reopening an old album already worked: the folder lookup finds the
+// existing one and photos land back in it. Nothing ever said so — the reply
+// read "เริ่มทริป ... แล้ว" whether it had made a new album or reopened an
+// old one, so there was no way to tell your photos were joining the old ones
+// rather than starting a second folder with the same name.
+
+await handleTextMessage(env, lineUserId, "จบทริป", origin).catch(() => undefined);
+const foldersBeforeReopen = driveFolders.length;
+const firstStart = await handleTextMessage(env, lineUserId, "เริ่มทริป เชียงคาน", origin);
+check("starting a genuinely new trip says it is new", firstStart.includes("เริ่มทริป") && !firstStart.includes("ต่อจากเดิม"));
+await handleTextMessage(env, lineUserId, "จบทริป", origin);
+const foldersAfterFirst = driveFolders.length;
+
+const reopened = await handleTextMessage(env, lineUserId, "เริ่มทริป เชียงคาน", origin);
+check(
+  "reopening by the same name says it is continuing, not starting over",
+  reopened.includes("ต่อจากเดิม") && reopened.includes("รวมกับรูปเก่า")
+);
+// The behaviour this message describes has to be true: a second folder with
+// the same name would quietly split one trip's photos across two albums.
+check("and no second album with the same name is created", driveFolders.length === foldersAfterFirst);
+check("the first start did create one", foldersAfterFirst === foldersBeforeReopen + 1);
+
+// The folders in Drive are the list of past trips, but chat is where someone
+// is when they want to reopen one — and reopening depends on remembering the
+// name exactly, since a near-miss silently makes a second album.
+const tripListReply = await handleTextMessage(env, lineUserId, "ทริปทั้งหมด", origin);
+check(
+  "the list names every album that exists",
+  tripListReply.includes("เชียงคาน") && tripListReply.includes("ทริปทั้งหมด")
+);
+check("and marks the one that is open right now", tripListReply.includes("เปิดอยู่ตอนนี้"));
+check("and says how to reopen one", tripListReply.includes("เริ่มทริป"));
+await handleTextMessage(env, lineUserId, "จบทริป", origin);
+const closedListReply = await handleTextMessage(env, lineUserId, "รายชื่อทริป", origin);
+check(
+  "with nothing open, no album is marked as current",
+  closedListReply.includes("เชียงคาน") && !closedListReply.includes("เปิดอยู่ตอนนี้")
+);
+
+// Whole phrases only: "ทริป" sits inside "เริ่มทริป ทะเล" and inside plenty
+// of ordinary sentences about travelling.
+const startNotList = await handleTextMessage(env, lineUserId, "เริ่มทริป น่าน", origin);
+check("a start command is not swallowed by the list matcher", !startNotList.includes("ทริปทั้งหมด"));
+await handleTextMessage(env, lineUserId, "จบทริป", origin);
+
+// The path production actually takes — the interpreter runs first, and a
+// matcher-only feature never gets reached (the lesson of 17.72).
+simulateInterpreterResult = { intent: "trip_list" };
+const aiTripList = await handleTextMessage(env, lineUserId, "เคยเก็บอัลบั้มอะไรไว้บ้าง", origin);
+check("a phrasing the matcher doesn't know still reaches the list, via the interpreter", aiTripList.includes("เชียงคาน"));
+const tripPrompt = geminiRequests.filter((r) => r.systemInstruction.includes(INTERPRETER_MARKER)).at(-1).systemInstruction;
+check(
+  "the interpreter is taught trip_list and told how it differs from trip_status",
+  tripPrompt.includes("trip_list") && tripPrompt.includes("คนละอย่างกับ trip_status")
+);
+
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
 

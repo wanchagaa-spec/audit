@@ -102,7 +102,7 @@ import { getBotSettings } from "./settings.ts";
 import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
 import { answerFlightSearch, answerGroundSearch, answerHotelSearch, matchTravelCommand } from "./travelCommands.ts";
-import { endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
+import { answerTripList, endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
 import { isWebSearchEnabled } from "./webSearch.ts";
 // Safe to import as a runtime value (unlike the reverse direction): every
 // view file imports Env from here as a *type* only, which TypeScript
@@ -560,6 +560,8 @@ async function runInterpretedIntent(
       case "air_quality":
         return await answerAirQuality(env.ACCOUNTS, subjectId);
       // No Google token and no key of any kind (PLAN.md 17.73).
+      case "trip_list":
+        return await withToken((ctx) => answerTripList(ctx));
       case "lottery_result":
         return await answerLotteryResult();
       case "lottery_check":

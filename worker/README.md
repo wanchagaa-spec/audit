@@ -1459,6 +1459,23 @@ one trip folder and offers to remove them (PLAN.md 17.69).
   ids from a stale tab or edited by hand would be a request to trash arbitrary files in the user's
   Drive, and the page would look identical either way.
 
+### Listing and reopening trips (PLAN.md 17.78)
+
+`ทริปทั้งหมด` lists every trip album, marking the one currently open. `เริ่มทริป <ชื่อเดิม>`
+reopens an old one — photos join the existing album rather than starting a second folder with
+the same name.
+
+**Reopening already worked; nothing said so.** `startTrip` has always gone through a
+find-or-create on the folder name, so typing an old name put photos back in the right album. The
+reply read "เริ่มทริป ... แล้ว" either way, so there was no way to tell whether your photos were
+joining the old ones or starting a duplicate. `findOrCreateFolderResult` now reports which
+happened, and the two cases say different things — the difference between starting something and
+continuing it is worth saying out loud.
+
+The list matters for the same reason: reopening depends on remembering the name **exactly**, and
+a near-miss silently creates a second album. The folders have been visible at `/view/trips` since
+16.3, but chat is where someone is when they want to reopen one.
+
 ### Receipt photos (PLAN.md 17.76)
 
 A photo sent **with no trip open** is read as a receipt and proposed as an expense, through the
