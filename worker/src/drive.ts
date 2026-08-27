@@ -33,13 +33,31 @@ async function findFolder(accessToken: string, name: string, parentId: string): 
 }
 
 export async function findOrCreateFolder(accessToken: string, name: string, parentId: string): Promise<string> {
+  return (await findOrCreateFolderResult(accessToken, name, parentId)).id;
+}
+
+/**
+ * Same, but says whether the folder was already there (PLAN.md 17.78).
+ *
+ * Reusing an existing folder is what already made "เริ่มทริป <ชื่อเดิม>"
+ * reopen an old album instead of making a second one with the same name —
+ * correct behaviour that nothing ever told the user about, because the reply
+ * said "เริ่มทริป ... แล้ว" either way. Whether it was found or created is
+ * the difference between starting something and continuing it, and that is
+ * worth saying out loud.
+ */
+export async function findOrCreateFolderResult(
+  accessToken: string,
+  name: string,
+  parentId: string
+): Promise<{ id: string; existed: boolean }> {
   const existing = await findFolder(accessToken, name, parentId);
-  if (existing) return existing;
+  if (existing) return { id: existing, existed: true };
   const created = await driveFetch(accessToken, `/files?fields=id`, {
     method: "POST",
     body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentId] }),
   });
-  return created.id;
+  return { id: created.id, existed: false };
 }
 
 export async function getOrCreateAlbumRoot(accessToken: string): Promise<string> {
