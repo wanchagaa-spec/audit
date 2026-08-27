@@ -127,8 +127,14 @@ export async function readImage(
   if (r.kind === "appointment") {
     const title = typeof r.title === "string" ? r.title.trim() : "";
     const rawDate = typeof r.dateKey === "string" ? r.dateKey : "";
-    const time = typeof r.time === "string" ? r.time : "";
-    if (title === "" || !DATE_KEY_RE.test(rawDate) || !TIME_RE.test(time)) return null;
+    // A time the model could not read — or read badly — is not a reason to
+    // throw the whole card away: the title and date are the hard part, and an
+    // empty time is what the ask-back path in index.ts is looking for. A
+    // wrong time would put someone at a clinic at the wrong hour, so anything
+    // that is not exactly HH:MM becomes "unknown" rather than being trusted.
+    const rawTime = typeof r.time === "string" ? r.time.trim() : "";
+    const time = TIME_RE.test(rawTime) ? rawTime : "";
+    if (title === "" || !DATE_KEY_RE.test(rawDate)) return null;
     const dateKey = normalizeThaiYear(rawDate);
     // Re-checked after the year shift, so a malformed conversion cannot
     // produce a date the calendar layer will not understand.

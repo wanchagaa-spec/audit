@@ -2813,17 +2813,138 @@ check(
   calendarEvents.length === 1 && calendarEvents[0].start.dateTime.startsWith("2026-09-15")
 );
 
-// A card with no time is not an appointment this bot can create — the
-// calendar layer needs both, and inventing a time puts someone at a clinic
-// at the wrong hour.
-mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2026-09-15", time: "" };
-check("a card with no time is refused rather than given one", (await sendPhoto("appt-notime-1")).includes("อ่านรูปนี้ไม่ออก"));
+// A subject or a date the calendar cannot use is still a refusal: those are
+// the parts that cannot be asked for in one short reply.
 mockReceiptReading = { kind: "appointment", title: "", dateKey: "2026-09-15", time: "09:00" };
-check("and one with no subject too", (await sendPhoto("appt-notitle-1")).includes("อ่านรูปนี้ไม่ออก"));
+check("a card with no subject is refused", (await sendPhoto("appt-notitle-1")).includes("อ่านรูปนี้ไม่ออก"));
 mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "15/09/2026", time: "09:00" };
 check("a date in a shape the calendar cannot use is refused", (await sendPhoto("appt-baddate-1")).includes("อ่านรูปนี้ไม่ออก"));
-mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2026-09-15", time: "25:00" };
-check("and an impossible time", (await sendPhoto("appt-badtime-1")).includes("อ่านรูปนี้ไม่ออก"));
+
+// PLAN.md 17.80: a missing time is the one gap worth a question. Everything
+// else on the card was legible, so refusing made someone retype a subject
+// and a date the bot had already read correctly.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2026-09-15", time: "" };
+const noTimeReply = await sendPhoto("appt-notime-1");
+check(
+  "a card with no time is asked about instead of refused",
+  noTimeReply.includes("นัดตรวจ") && noTimeReply.includes("กี่โมง") && !noTimeReply.includes("อ่านรูปนี้ไม่ออก")
+);
+check("and the question repeats the date it did read, so the answer can be checked", noTimeReply.includes("15"));
+const answeredReply = await handleTextMessage(env, lineUserId, "บ่าย 2", origin);
+check(
+  "answering with a Thai spoken time proposes the event at that hour",
+  answeredReply.includes("14:00") && answeredReply.includes("นัดตรวจ") && answeredReply.includes("ยืนยัน")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and confirming creates the event the card plus the answer describe",
+  calendarEvents.length === 1 &&
+    calendarEvents[0].summary.includes("นัดตรวจ") &&
+    calendarEvents[0].start.dateTime.startsWith("2026-09-15T14:00")
+);
+
+// An impossible time is the same situation as no time at all: the one thing
+// not on the table is writing it down.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจฟัน", dateKey: "2026-09-15", time: "25:00" };
+const badTimeReply = await sendPhoto("appt-badtime-1");
+check("an impossible time is asked about rather than trusted", badTimeReply.includes("กี่โมง"));
+check("and a written answer works too", (await handleTextMessage(env, lineUserId, "09:30", origin)).includes("09:30"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// "3 โมง" is nine in the morning under one reckoning and three in the
+// afternoon under another. Guessing would put someone at a clinic six hours
+// off, so an unreadable answer drops the question rather than resolving it.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจตา", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-2");
+const ambiguousReply = await handleTextMessage(env, lineUserId, "3 โมง", origin);
+check("an ambiguous answer does not silently become an appointment", !ambiguousReply.includes("นัดตรวจตา"));
+check("and no event is created from it", calendarEvents.length === 0);
+
+// Someone who answers a question with something else has changed the
+// subject. Holding them to the old question would swallow the next message.
+mockReceiptReading = { kind: "appointment", title: "นัดฉีดยา", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-3");
+const changedSubject = await handleTextMessage(env, lineUserId, "กาแฟ 60", origin);
+check("changing the subject is answered as an ordinary message", changedSubject.includes("60"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+// A time-shaped message *after* the question was dropped is the sharp case:
+// if the pending slot had survived, this is what would have been silently
+// turned into an appointment.
+const afterDrop = await handleTextMessage(env, lineUserId, "บ่าย 2", origin);
+check(
+  "and the dropped question does not catch the message after it either",
+  !afterDrop.includes("นัดฉีดยา") && calendarEvents.length === 0
+);
+// Left as an ordinary money message mid-clarification, so it is put back
+// where it was found rather than leaking into the checks below.
+await handleTextMessage(env, lineUserId, "อาหาร", origin);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// A dropped question must not go on suppressing the AI interpreter either:
+// an open clarification is the one thing that keeps a message off the AI
+// path, so a stale one would quietly downgrade every message after it.
+mockReceiptReading = { kind: "appointment", title: "นัดกายภาพ", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-4");
+simulateInterpreterResult = { intent: "chitchat", reply: "รับทราบค่ะ เดี๋ยวดูให้นะ" };
+check(
+  "the reply that dropped the question still reaches the AI interpreter itself",
+  (await handleTextMessage(env, lineUserId, "เป็นไงบ้าง", origin)).includes("เดี๋ยวดูให้นะ")
+);
+simulateInterpreterResult = null;
+
+// The question has to close when it is *answered*, not only when it is
+// abandoned. Left open, the next time-shaped message books the same
+// appointment a second time.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดเจาะเลือด", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-5");
+await handleTextMessage(env, lineUserId, "08:00", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+const afterAnswer = await handleTextMessage(env, lineUserId, "บ่าย 3", origin);
+check(
+  "an answered question closes, so a later time does not book it twice",
+  calendarEvents.length === 1 && !afterAnswer.includes("นัดเจาะเลือด")
+);
+await handleTextMessage(env, lineUserId, "อาหาร", origin);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// The Thai spoken forms, read directly. Each one carries its own half of the
+// day; the ones that do not are refused rather than guessed (PLAN.md 17.80).
+const { parseThaiTime } = await import("../src/thaiTime.ts");
+check(
+  "spoken Thai times that name their half of the day are read",
+  parseThaiTime("ตี 5") === "05:00" &&
+    parseThaiTime("บ่าย 2") === "14:00" &&
+    parseThaiTime("บ่ายโมง") === "13:00" &&
+    parseThaiTime("1 ทุ่ม") === "19:00" &&
+    parseThaiTime("3 ทุ่ม") === "21:00" &&
+    parseThaiTime("8 โมงเช้า") === "08:00" &&
+    parseThaiTime("เที่ยง") === "12:00" &&
+    parseThaiTime("เที่ยงคืน") === "00:00"
+);
+check(
+  "written times are read in both of the shapes Thai keyboards produce",
+  parseThaiTime("09:30") === "09:30" && parseThaiTime("9.30") === "09:30" && parseThaiTime(" 14:05 ") === "14:05"
+);
+check("ครึ่ง is half past, not a separate number", parseThaiTime("บ่าย 2 ครึ่ง") === "14:30" && parseThaiTime("ตี 5 ครึ่ง") === "05:30");
+check(
+  "an hour outside its own half of the day is refused, not wrapped around",
+  parseThaiTime("บ่าย 9") === null &&
+    parseThaiTime("9 ทุ่ม") === null &&
+    parseThaiTime("ตี 9") === null &&
+    parseThaiTime("13 โมงเช้า") === null
+);
+check(
+  "and anything that would have to be guessed at is refused",
+  parseThaiTime("3 โมง") === null &&
+    parseThaiTime("9") === null &&
+    parseThaiTime("") === null &&
+    parseThaiTime("ไม่รู้") === null &&
+    parseThaiTime("99:99") === null
+);
 
 mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 

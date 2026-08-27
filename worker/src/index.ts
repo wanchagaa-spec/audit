@@ -99,7 +99,7 @@ import {
 } from "./state.ts";
 import { applyPersona } from "./persona.ts";
 import { getBotSettings } from "./settings.ts";
-import { bangkokDateFolderName, bangkokDateKey } from "./thaiDate.ts";
+import { bangkokDateFolderName, bangkokDateKey, formatThaiDateLabel } from "./thaiDate.ts";
 import { matchTransactionCommand, promptTransactionCreate } from "./transactionCommands.ts";
 import { answerFlightSearch, answerGroundSearch, answerHotelSearch, matchTravelCommand } from "./travelCommands.ts";
 import { answerTripList, endTrip, matchTripCommand, promptOrStartTrip, tripStatus } from "./tripCommands.ts";
@@ -118,6 +118,7 @@ import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, m
 import { answerLotteryCheck, answerLotteryResult, matchLotteryCommand } from "./lotteryCommands.ts";
 import { formatBaht } from "./format.ts";
 import { readImage, readLineImage } from "./imageIntent.ts";
+import { parseThaiTime } from "./thaiTime.ts";
 import { transcribeVoiceMessage } from "./voice.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewHelpRequest } from "./viewHelpPage.ts";
@@ -991,6 +992,46 @@ async function dispatchLegacyCommands(
 // else means the user has moved on to something unrelated, so the stale
 // clarification is dropped and the message re-enters the normal pipeline
 // (AI interpreter first, same as any fresh message) instead of trapping it.
+/**
+ * The answer to "what time is the appointment?" (PLAN.md 17.80).
+ *
+ * Returns null when the reply was not a time at all, so the message falls
+ * through and is handled as an ordinary one — the same convention the amount
+ * clarification follows. Someone who answers a question with something else
+ * has changed the subject, and holding them to the old question is worse
+ * than dropping it.
+ *
+ * The pending slot is cleared either way. A question that stays open after
+ * being answered would catch the *next* message too.
+ */
+async function resolveAppointmentTime(
+  env: Env,
+  subjectId: string,
+  link: AccountLink,
+  pending: { title: string; dateKey: string },
+  text: string,
+  origin: string,
+  tokenCache?: TokenCache
+): Promise<string | null> {
+  const time = parseThaiTime(text);
+  if (time === null) {
+    await setPending(env.ACCOUNTS, subjectId, null);
+    return null;
+  }
+  await setPending(env.ACCOUNTS, subjectId, null);
+  return withFreshAccessToken(
+    env,
+    link.refreshToken,
+    (accessToken) =>
+      promptCalendarCreateFromDraft(makeActionCtxFactory(env, subjectId, link, origin)(accessToken), {
+        title: pending.title,
+        dateKey: pending.dateKey,
+        time,
+      }),
+    tokenCache
+  );
+}
+
 async function dropStaleAmountClarification(
   kv: KVNamespace,
   subjectId: string,
@@ -1024,7 +1065,23 @@ export async function handleTextMessage(
     return confirmationReply;
   }
 
-  const pending = await getPending(env.ACCOUNTS, lineUserId);
+  let pending = await getPending(env.ACCOUNTS, lineUserId);
+
+  // Answered here rather than in chatEngine, which is the money engine and
+  // has no business knowing about appointments (PLAN.md 17.80). Checked
+  // before the AI interpreter too: the reply is an answer to a question the
+  // bot just asked, not a fresh instruction to be interpreted.
+  if (pending?.kind === "appointmentTime") {
+    const appointmentReply = await resolveAppointmentTime(env, lineUserId, link, pending, text, origin, tokenCache);
+    if (appointmentReply !== null) {
+      await recordConversationTurn(env, lineUserId, text, appointmentReply);
+      return appointmentReply;
+    }
+    // resolveAppointmentTime dropped the question, so the rest of this
+    // function must not go on treating it as still open.
+    pending = null;
+  }
+
   const effectivePending = await dropStaleAmountClarification(env.ACCOUNTS, lineUserId, pending, text);
 
   // PLAN.md 17.11: every fresh message is interpreted by AI first — full
@@ -1635,6 +1692,18 @@ async function handlePhotoAsReceipt(
     // read, so a photo is a way of *filling in* an existing feature rather
     // than a feature of its own with its own rules.
     if (reading.kind === "appointment") {
+      // Everything but the time was legible, so ask for the one missing
+      // piece instead of throwing the whole card away (PLAN.md 17.80).
+      // Refusing here made someone retype a subject and a date the bot had
+      // already read correctly.
+      if (reading.time === "") {
+        await setPending(env.ACCOUNTS, subjectId, {
+          kind: "appointmentTime",
+          title: reading.title,
+          dateKey: reading.dateKey,
+        });
+        return `📅 อ่านบัตรนัดได้: ${reading.title} วันที่ ${formatThaiDateLabel(reading.dateKey)}\nแต่อ่านเวลานัดไม่ออก นัดกี่โมงคะ? (ตอบเช่น "09:30" หรือ "บ่าย 2")`;
+      }
       const prompt = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
         promptCalendarCreateFromDraft(makeActionCtxFactory(env, subjectId, link, origin)(accessToken), {
           title: reading.title,
