@@ -235,9 +235,9 @@ const geminiRequests = []; // captures {systemInstruction, question, apiKey} per
 // speech-to-text call the same way INTERPRETER_MARKER identifies an
 // interpreter one.
 // Must match receipt.ts's instruction — identifies a receipt-reading call.
-const RECEIPT_MARKER = "ระบบอ่านใบเสร็จภาษาไทย";
+const RECEIPT_MARKER = "ระบบอ่านรูปภาษาไทย";
 const receiptRequests = []; // captures {systemInstruction, mimeType, hasImage} per receipt call
-let mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+let mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 let simulateReceiptFailure = false; // one-shot: fails the next receipt read
 const TRANSCRIBE_MARKER = "ระบบถอดเสียงเป็นข้อความภาษาไทย";
 const transcriptionRequests = []; // captures {mimeType, hasAudio, base64Length} per transcription call
@@ -2666,7 +2666,7 @@ const sendPhoto = async (messageId) => {
 // No trip open at this point in the run — the trip tests close theirs.
 await handleTextMessage(env, lineUserId, "ปิดทริป", origin).catch(() => undefined);
 receiptRequests.length = 0;
-mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 const receiptReply = await sendPhoto("receipt-1");
 check(
   "a photo sent with no trip open is read as a receipt and proposed as an expense",
@@ -2686,7 +2686,7 @@ check(
   // separate lines mention it, so looking for the word alone passes with
   // the rule that matters deleted.
   "the prompt names the total and forbids the four numbers that are not it",
-  receiptRequests[0].systemInstruction.includes("ยอดที่จ่ายจริง") &&
+  receiptRequests[0].systemInstruction.includes("ยอดที่จ่าย/รับจริง") &&
     receiptRequests[0].systemInstruction.includes("**ห้าม**เอายอดก่อนภาษี") &&
     receiptRequests[0].systemInstruction.includes("ให้ใช้ยอดรวมเสมอ")
 );
@@ -2705,32 +2705,32 @@ check(
 // A plausible amount alongside isReceipt:false on purpose — a photo of a
 // meal can easily make the model emit a number. With amount 0 here, the
 // amount check would catch it and the isReceipt flag would go untested.
-mockReceiptReading = { isReceipt: false, amount: 250, merchant: "", categoryId: "food" };
+mockReceiptReading = { kind: "other", amount: 250, merchant: "", categoryId: "food" };
 const notReceiptReply = await sendPhoto("receipt-scenery-1");
 check(
   "a photo that is not a receipt is refused rather than guessed at",
-  notReceiptReply.includes("อ่านใบเสร็จจากรูปนี้ไม่ออก") && !notReceiptReply.includes("ยืนยัน")
+  notReceiptReply.includes("อ่านรูปนี้ไม่ออก") && !notReceiptReply.includes("ยืนยัน")
 );
 // isReceipt true but no usable total is the same outcome — a receipt whose
 // amount could not be read is not an expense of zero baht.
-mockReceiptReading = { isReceipt: true, amount: 0, merchant: "ร้านหนึ่ง", categoryId: "food" };
-check("a receipt with no readable total is refused too", (await sendPhoto("receipt-nototal-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก"));
-mockReceiptReading = { isReceipt: true, amount: -50, merchant: "ร้านหนึ่ง", categoryId: "food" };
-check("and a negative one", (await sendPhoto("receipt-negative-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "expense", amount: 0, merchant: "ร้านหนึ่ง", categoryId: "food" };
+check("a receipt with no readable total is refused too", (await sendPhoto("receipt-nototal-1")).includes("อ่านรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "expense", amount: -50, merchant: "ร้านหนึ่ง", categoryId: "food" };
+check("and a negative one", (await sendPhoto("receipt-negative-1")).includes("อ่านรูปนี้ไม่ออก"));
 
 const { categoryLabel } = await import("../src/format.ts");
 
 // An invented category would put the row somewhere every reader downstream
 // treats as impossible — but the amount is the part worth keeping, so it
 // falls back rather than failing the whole read.
-mockReceiptReading = { isReceipt: true, amount: 99, merchant: "ร้านสอง", categoryId: "not-a-real-category" };
+mockReceiptReading = { kind: "expense", amount: 99, merchant: "ร้านสอง", categoryId: "not-a-real-category" };
 const badCategoryReply = await sendPhoto("receipt-badcat-1");
 check(
   "an invented category falls back instead of failing the read",
   badCategoryReply.includes("99") && badCategoryReply.includes(categoryLabel("other-expense"))
 );
 // An income category is just as impossible on a receipt.
-mockReceiptReading = { isReceipt: true, amount: 99, merchant: "ร้านสาม", categoryId: "salary" };
+mockReceiptReading = { kind: "expense", amount: 99, merchant: "ร้านสาม", categoryId: "salary" };
 check(
   "an income category is not accepted on a receipt either",
   (await sendPhoto("receipt-income-cat-1")).includes(categoryLabel("other-expense"))
@@ -2738,11 +2738,215 @@ check(
 await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
 
 simulateReceiptFailure = true;
-mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 check(
   "a failed read says so instead of proposing anything",
-  (await sendPhoto("receipt-fail-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก")
+  (await sendPhoto("receipt-fail-1")).includes("อ่านรูปนี้ไม่ออก")
 );
+
+// ---- รูปแยกแยะได้มากกว่าใบเสร็จ (PLAN.md 17.79) --------------------------
+// "นี่คือใบเสร็จไหม" became "รูปนี้คืออะไร". One Gemini call either way, but
+// a photo becomes the entrance to several features instead of one.
+
+// A slip showing money *in* used to be proposed as an expense, because the
+// type was hard-coded. Visible in the confirmation rather than silent — but
+// it meant income could not be logged from a photo at all.
+mockReceiptReading = { kind: "income", amount: 25000, merchant: "บริษัท ก", categoryId: "salary" };
+const slipIncomeReply = await sendPhoto("slip-income-1");
+check(
+  "a slip that says money came in is proposed as income, not an expense",
+  slipIncomeReply.includes("25,000") && slipIncomeReply.includes("รายรับ") && !slipIncomeReply.includes("รายจ่าย")
+);
+const rowsBeforeIncome = sheetRows.length;
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and saves as an income row in an income category",
+  sheetRows.length === rowsBeforeIncome + 1 && sheetRows.at(-1)[2] === "income" && sheetRows.at(-1)[4] === "salary"
+);
+// An expense category on an income reading is as impossible as an invented
+// one — the ledger has two sides and a row must land on the right one.
+mockReceiptReading = { kind: "income", amount: 500, merchant: "ใครสักคน", categoryId: "food" };
+const wrongSideReply = await sendPhoto("slip-wrongside-1");
+check(
+  "an expense category on an income reading falls back to an income one",
+  wrongSideReply.includes("รายรับ") && wrongSideReply.includes(categoryLabel("other-income"))
+);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+// A plain transfer slip cannot say whose account is whose, so the prompt
+// settles the ambiguous case rather than leaving the model to guess.
+check(
+  "the prompt tells the model what to do with an ambiguous transfer slip",
+  receiptRequests.at(-1).systemInstruction.includes("ดูไม่ออกว่าเข้าหรือออก ให้ตอบ expense")
+);
+
+// An appointment card fills in the calendar feature rather than becoming a
+// feature of its own — same confirm step as typing the appointment.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "คลินิกทันตกรรม", dateKey: "2026-09-15", time: "09:30" };
+const apptReply = await sendPhoto("appt-1");
+check(
+  "an appointment card is proposed as a calendar event",
+  apptReply.includes("คลินิกทันตกรรม") && apptReply.includes("09:30") && apptReply.includes("ยืนยัน")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and confirming creates the real event",
+  calendarEvents.length === 1 && calendarEvents[0].summary.includes("คลินิกทันตกรรม")
+);
+
+// Thai appointment cards are printed in พ.ศ. far more often than not, and a
+// model told to convert will sometimes not. An event 543 years out is worse
+// than refusing: it is real, on a real calendar, and nobody will see it again.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2569-09-15", time: "13:00" };
+const beReply = await sendPhoto("appt-be-1");
+check(
+  // The confirmation renders dates back into พ.ศ., so a converted 2026 shows
+  // as 2569 and looks identical to the raw input. What an *unconverted* year
+  // produces is 2569 + 543 = 3112, which is the thing to look for.
+  "a Buddhist-era year on the card is converted, not taken literally",
+  beReply.includes("2569") && !beReply.includes("3112")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "so the event lands in the year the card actually meant",
+  calendarEvents.length === 1 && calendarEvents[0].start.dateTime.startsWith("2026-09-15")
+);
+
+// A subject or a date the calendar cannot use is still a refusal: those are
+// the parts that cannot be asked for in one short reply.
+mockReceiptReading = { kind: "appointment", title: "", dateKey: "2026-09-15", time: "09:00" };
+check("a card with no subject is refused", (await sendPhoto("appt-notitle-1")).includes("อ่านรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "15/09/2026", time: "09:00" };
+check("a date in a shape the calendar cannot use is refused", (await sendPhoto("appt-baddate-1")).includes("อ่านรูปนี้ไม่ออก"));
+
+// PLAN.md 17.80: a missing time is the one gap worth a question. Everything
+// else on the card was legible, so refusing made someone retype a subject
+// and a date the bot had already read correctly.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2026-09-15", time: "" };
+const noTimeReply = await sendPhoto("appt-notime-1");
+check(
+  "a card with no time is asked about instead of refused",
+  noTimeReply.includes("นัดตรวจ") && noTimeReply.includes("กี่โมง") && !noTimeReply.includes("อ่านรูปนี้ไม่ออก")
+);
+check("and the question repeats the date it did read, so the answer can be checked", noTimeReply.includes("15"));
+const answeredReply = await handleTextMessage(env, lineUserId, "บ่าย 2", origin);
+check(
+  "answering with a Thai spoken time proposes the event at that hour",
+  answeredReply.includes("14:00") && answeredReply.includes("นัดตรวจ") && answeredReply.includes("ยืนยัน")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and confirming creates the event the card plus the answer describe",
+  calendarEvents.length === 1 &&
+    calendarEvents[0].summary.includes("นัดตรวจ") &&
+    calendarEvents[0].start.dateTime.startsWith("2026-09-15T14:00")
+);
+
+// An impossible time is the same situation as no time at all: the one thing
+// not on the table is writing it down.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจฟัน", dateKey: "2026-09-15", time: "25:00" };
+const badTimeReply = await sendPhoto("appt-badtime-1");
+check("an impossible time is asked about rather than trusted", badTimeReply.includes("กี่โมง"));
+check("and a written answer works too", (await handleTextMessage(env, lineUserId, "09:30", origin)).includes("09:30"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// "3 โมง" is nine in the morning under one reckoning and three in the
+// afternoon under another. Guessing would put someone at a clinic six hours
+// off, so an unreadable answer drops the question rather than resolving it.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจตา", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-2");
+const ambiguousReply = await handleTextMessage(env, lineUserId, "3 โมง", origin);
+check("an ambiguous answer does not silently become an appointment", !ambiguousReply.includes("นัดตรวจตา"));
+check("and no event is created from it", calendarEvents.length === 0);
+
+// Someone who answers a question with something else has changed the
+// subject. Holding them to the old question would swallow the next message.
+mockReceiptReading = { kind: "appointment", title: "นัดฉีดยา", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-3");
+const changedSubject = await handleTextMessage(env, lineUserId, "กาแฟ 60", origin);
+check("changing the subject is answered as an ordinary message", changedSubject.includes("60"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+// A time-shaped message *after* the question was dropped is the sharp case:
+// if the pending slot had survived, this is what would have been silently
+// turned into an appointment.
+const afterDrop = await handleTextMessage(env, lineUserId, "บ่าย 2", origin);
+check(
+  "and the dropped question does not catch the message after it either",
+  !afterDrop.includes("นัดฉีดยา") && calendarEvents.length === 0
+);
+// Left as an ordinary money message mid-clarification, so it is put back
+// where it was found rather than leaking into the checks below.
+await handleTextMessage(env, lineUserId, "อาหาร", origin);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// A dropped question must not go on suppressing the AI interpreter either:
+// an open clarification is the one thing that keeps a message off the AI
+// path, so a stale one would quietly downgrade every message after it.
+mockReceiptReading = { kind: "appointment", title: "นัดกายภาพ", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-4");
+simulateInterpreterResult = { intent: "chitchat", reply: "รับทราบค่ะ เดี๋ยวดูให้นะ" };
+check(
+  "the reply that dropped the question still reaches the AI interpreter itself",
+  (await handleTextMessage(env, lineUserId, "เป็นไงบ้าง", origin)).includes("เดี๋ยวดูให้นะ")
+);
+simulateInterpreterResult = null;
+
+// The question has to close when it is *answered*, not only when it is
+// abandoned. Left open, the next time-shaped message books the same
+// appointment a second time.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดเจาะเลือด", dateKey: "2026-09-15", time: "" };
+await sendPhoto("appt-notime-5");
+await handleTextMessage(env, lineUserId, "08:00", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+const afterAnswer = await handleTextMessage(env, lineUserId, "บ่าย 3", origin);
+check(
+  "an answered question closes, so a later time does not book it twice",
+  calendarEvents.length === 1 && !afterAnswer.includes("นัดเจาะเลือด")
+);
+await handleTextMessage(env, lineUserId, "อาหาร", origin);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// The Thai spoken forms, read directly. Each one carries its own half of the
+// day; the ones that do not are refused rather than guessed (PLAN.md 17.80).
+const { parseThaiTime } = await import("../src/thaiTime.ts");
+check(
+  "spoken Thai times that name their half of the day are read",
+  parseThaiTime("ตี 5") === "05:00" &&
+    parseThaiTime("บ่าย 2") === "14:00" &&
+    parseThaiTime("บ่ายโมง") === "13:00" &&
+    parseThaiTime("1 ทุ่ม") === "19:00" &&
+    parseThaiTime("3 ทุ่ม") === "21:00" &&
+    parseThaiTime("8 โมงเช้า") === "08:00" &&
+    parseThaiTime("เที่ยง") === "12:00" &&
+    parseThaiTime("เที่ยงคืน") === "00:00"
+);
+check(
+  "written times are read in both of the shapes Thai keyboards produce",
+  parseThaiTime("09:30") === "09:30" && parseThaiTime("9.30") === "09:30" && parseThaiTime(" 14:05 ") === "14:05"
+);
+check("ครึ่ง is half past, not a separate number", parseThaiTime("บ่าย 2 ครึ่ง") === "14:30" && parseThaiTime("ตี 5 ครึ่ง") === "05:30");
+check(
+  "an hour outside its own half of the day is refused, not wrapped around",
+  parseThaiTime("บ่าย 9") === null &&
+    parseThaiTime("9 ทุ่ม") === null &&
+    parseThaiTime("ตี 9") === null &&
+    parseThaiTime("13 โมงเช้า") === null
+);
+check(
+  "and anything that would have to be guessed at is refused",
+  parseThaiTime("3 โมง") === null &&
+    parseThaiTime("9") === null &&
+    parseThaiTime("") === null &&
+    parseThaiTime("ไม่รู้") === null &&
+    parseThaiTime("99:99") === null
+);
+
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 
 // A trip that is open still wins: that is the behaviour people already rely
 // on, and a photo during a trip belongs to the album.

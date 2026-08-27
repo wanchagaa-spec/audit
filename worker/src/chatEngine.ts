@@ -10,7 +10,13 @@ import { detectType, extractAmount, matchCategory, parseMessage } from "./parser
 
 export type PendingClarification =
   | { kind: "amount"; type: EntryType; categoryId?: string; note: string }
-  | { kind: "category"; amount: number; type: EntryType; note: string };
+  | { kind: "category"; amount: number; type: EntryType; note: string }
+  // Not money, and deliberately never reaches handleUserMessage below —
+  // index.ts answers it before this engine is consulted (PLAN.md 17.80). It
+  // lives in this union only because the two share one KV slot: a user can
+  // have one unanswered question at a time, whatever it was about, and two
+  // slots would mean two questions racing for the same reply.
+  | { kind: "appointmentTime"; title: string; dateKey: string };
 
 export interface TransactionDraft {
   amount: number;
@@ -108,6 +114,14 @@ export function handleUserMessage(
   categories: Category[]
 ): ChatEngineResult {
   if (!pending) {
+    return handleFreshMessage(text, categories);
+  }
+
+  // See PendingClarification: index.ts resolves this one before calling here.
+  // Reaching it anyway means the pending slot outlived its handler, and the
+  // safe reading of the message is "a brand new one" rather than an answer
+  // to a question nothing here remembers asking.
+  if (pending.kind === "appointmentTime") {
     return handleFreshMessage(text, categories);
   }
 
