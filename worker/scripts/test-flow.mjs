@@ -2757,6 +2757,95 @@ check(
 );
 await handleTextMessage(env, lineUserId, "ปิดทริป", origin);
 
+// ---- เตือนงบก่อนเกิน (PLAN.md 17.77) -------------------------------------
+// 17.44 already reported where each expense left you, but the sentence read
+// the same at 10% spent as at 99%: "เหลือ 500 บาท" is a fact, not a warning,
+// and the only thing that ever raised its voice was going over — by which
+// point the budget has already failed at the one job it has.
+
+const { budgetLevel } = await import("../src/budgetCommands.ts");
+
+// The threshold has to fire while there is still something to do about it
+// and still be rare enough to be read.
+check(
+  "a budget is only called nearly spent from 80% onwards",
+  budgetLevel(0, 5000) === "ok" &&
+    budgetLevel(3999, 5000) === "ok" &&
+    budgetLevel(4000, 5000) === "nearly" &&
+    budgetLevel(5000, 5000) === "nearly" &&
+    budgetLevel(5001, 5000) === "over"
+);
+// A zero limit would divide to Infinity and report every category as nearly
+// spent forever.
+check("a limit of zero is over, not nearly", budgetLevel(0, 0) === "over" && budgetLevel(10, 0) === "over");
+
+// Spending into the last fifth now says so, where before it read exactly
+// like spending the first fifth.
+budgetRows.length = 0;
+sheetRows.length = 0;
+budgetRows.push([crypto.randomUUID(), "food", bangkokMonthKey(), "1000"]);
+const budgetToday = bangkokDateKey();
+sheetRows.push(["b-warn-1", budgetToday, "expense", 750, "food", "ข้าว", "ข้าว 750", "unknown", "", `${budgetToday}T01:00:00.000Z`]);
+await handleTextMessage(env, lineUserId, "ค่าขนม 100", origin);
+const nearlyReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "crossing into the last fifth of a budget warns instead of just reporting",
+  nearlyReply.includes("ใกล้หมด") && nearlyReply.includes("⚠️")
+);
+// And well inside the budget still reads as a plain statement — a warning
+// on every save is one nobody reads by the save that matters.
+budgetRows.length = 0;
+sheetRows.length = 0;
+budgetRows.push([crypto.randomUUID(), "food", bangkokMonthKey(), "5000"]);
+await handleTextMessage(env, lineUserId, "ค่าขนม 100", origin);
+const comfortableReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "a budget with plenty left is still reported without a warning",
+  comfortableReply.includes("เหลือ") && !comfortableReply.includes("ใกล้หมด") && !comfortableReply.includes("⚠️")
+);
+// Going over keeps saying so, and says by how much — that is a different
+// sentence from "nearly", and the one that was already right.
+budgetRows.length = 0;
+sheetRows.length = 0;
+budgetRows.push([crypto.randomUUID(), "food", bangkokMonthKey(), "100"]);
+await handleTextMessage(env, lineUserId, "ค่าขนม 150", origin);
+const overReply = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check("going over still says by how much", overReply.includes("เกินแล้ว") && overReply.includes("50"));
+
+// The per-save line only speaks when you happen to log something in that
+// category. This is the half that reaches you on a morning you have not
+// bought anything yet.
+budgetRows.length = 0;
+sheetRows.length = 0;
+budgetRows.push([crypto.randomUUID(), "food", bangkokMonthKey(), "1000"]);
+budgetRows.push([crypto.randomUUID(), "transport", bangkokMonthKey(), "2000"]);
+sheetRows.push(["b-brief-1", budgetToday, "expense", 900, "food", "ข้าว", "ข้าว 900", "unknown", "", `${budgetToday}T01:00:00.000Z`]);
+sheetRows.push(["b-brief-2", budgetToday, "expense", 100, "transport", "รถ", "รถ 100", "unknown", "", `${budgetToday}T02:00:00.000Z`]);
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const budgetBriefing = pushes.at(-1).text;
+check(
+  "the briefing names a budget that is nearly spent",
+  budgetBriefing.includes("งบเดือนนี้ที่ต้องระวัง") && budgetBriefing.includes(categoryLabel("food"))
+);
+check(
+  "and leaves out the one with plenty left",
+  !budgetBriefing.includes(categoryLabel("transport"))
+);
+
+// A section that appears every morning is one people stop reading by the
+// morning it matters.
+budgetRows.length = 0;
+sheetRows.length = 0;
+budgetRows.push([crypto.randomUUID(), "food", bangkokMonthKey(), "5000"]);
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check("a comfortable budget adds nothing to the briefing at all", !pushes.at(-1).text.includes("งบเดือนนี้ที่ต้องระวัง"));
+budgetRows.length = 0;
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+check("and neither does having no budgets set", !pushes.at(-1).text.includes("งบเดือนนี้ที่ต้องระวัง"));
+
 calendarEvents.length = 0; // clean up — the Calendar test section below assumes it starts empty
 diaryRows.length = 0; // clean up — the Diary test section below assumes it starts empty
 
