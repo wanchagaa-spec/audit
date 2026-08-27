@@ -1476,7 +1476,7 @@ The list matters for the same reason: reopening depends on remembering the name 
 a near-miss silently creates a second album. The folders have been visible at `/view/trips` since
 16.3, but chat is where someone is when they want to reopen one.
 
-### Receipt photos (PLAN.md 17.76)
+### Photos that are not trip photos (PLAN.md 17.76, extended in 17.79)
 
 A photo sent **with no trip open** is read as a receipt and proposed as an expense, through the
 same confirm step typed expenses use. Photos already had a home — the trip album — but only
@@ -1493,9 +1493,25 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
 - **Three failures give one answer**: not a receipt, a total that could not be read, and a failed
   lookup. They mean the same thing to the person holding the phone, and distinguishing them would
   only invite a retry of a photo that will fail the same way. None of them proposes a number.
-- **An invented category falls back to `other-expense`** rather than failing the read — the
-  amount is the part worth keeping, and a category the model made up would put the row somewhere
-  every reader downstream treats as impossible.
+- **An invented category falls back** rather than failing the read — the amount is the part worth
+  keeping, and a category the model made up would put the row somewhere every reader downstream
+  treats as impossible. A real category from the *other* side of the ledger is rejected the same
+  way: an income reading filed under "food" is as impossible as an invented one.
+
+**The question is "what is this photo?", not "is this a receipt?"** (PLAN.md 17.79). It costs the
+same one Gemini call and turns a photo from the entrance to one feature into the entrance to
+several. Every branch ends in the ordinary confirm step for whatever it read, so a photo *fills
+in* an existing feature rather than being a feature of its own with its own rules.
+
+- **A slip showing money in becomes income.** The type used to be hard-coded to expense — visible
+  in the confirmation rather than silent, but it meant income could not be logged from a photo at
+  all. A plain transfer slip cannot say whose account is whose, so the prompt settles the
+  ambiguous case explicitly: default to expense, which is what people photograph most.
+- **An appointment card becomes a calendar event.** Thai cards are printed in พ.ศ. far more often
+  than not and a model told to convert will sometimes not, so the year is normalised in code as
+  well: an event 543 years out is worse than refusing, because it is real, on a real calendar,
+  and nobody will see it again. A card with no time is refused rather than given one — inventing
+  a time puts someone at a clinic at the wrong hour.
 
 ### Voice messages (PLAN.md 17.74)
 

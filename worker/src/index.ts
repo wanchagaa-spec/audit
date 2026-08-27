@@ -117,7 +117,7 @@ import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, matchViewLinkCommand } from "./viewCommands.ts";
 import { answerLotteryCheck, answerLotteryResult, matchLotteryCommand } from "./lotteryCommands.ts";
 import { formatBaht } from "./format.ts";
-import { readLineImage, readReceipt } from "./receipt.ts";
+import { readImage, readLineImage } from "./imageIntent.ts";
 import { transcribeVoiceMessage } from "./voice.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
 import { handleViewHelpRequest } from "./viewHelpPage.ts";
@@ -1587,7 +1587,7 @@ async function resolveMediaBatchContext(
       // turned away (PLAN.md 17.76). The open trip is what decides: while
       // one is running every photo belongs to the album, which is the
       // behaviour people already rely on and the one worth not breaking.
-      await replyOrPush(events[0], await handlePhotoAsReceipt(env, events), env).catch(() => undefined);
+      await replyOrPush(events[0], await handlePhotoAsReceipt(env, events, link, origin), env).catch(() => undefined);
     }
     return null;
   }
@@ -1607,16 +1607,18 @@ async function resolveMediaBatchContext(
  * between a misread total and a wrong number in someone's accounts, and it
  * only protects someone who can see what was read.
  */
-/** Said for a photo that is not a receipt, one whose total could not be
- * read, and a failed lookup alike. All three mean the same thing to the
- * person holding the phone, and distinguishing them would only invite them
- * to retry a photo that will fail the same way. */
-const NOT_A_RECEIPT_MESSAGE =
-  'อ่านใบเสร็จจากรูปนี้ไม่ออกนะ ถ้าจะจดรายจ่ายลองพิมพ์มาก็ได้ เช่น "ค่ากาแฟ 60" หรือถ้าจะเก็บรูปเข้าอัลบั้ม พิมพ์ "เริ่มทริป <ชื่อ>" ก่อน';
+/** Said for a photo the reader could not place, one whose numbers or dates
+ * could not be read, and a failed lookup alike. They mean the same thing to
+ * the person holding the phone, and distinguishing them would only invite a
+ * retry of a photo that will fail the same way. */
+const UNREADABLE_PHOTO_MESSAGE =
+  'อ่านรูปนี้ไม่ออกนะ ส่งใบเสร็จ สลิปโอนเงิน หรือบัตรนัดมาได้ · ถ้าจะจดเองก็พิมพ์ได้ เช่น "ค่ากาแฟ 60" · ถ้าจะเก็บรูปเข้าอัลบั้ม พิมพ์ "เริ่มทริป <ชื่อ>" ก่อน';
 
 async function handlePhotoAsReceipt(
   env: Env,
-  events: Array<LineImageMessageEvent | LineVideoMessageEvent>
+  events: Array<LineImageMessageEvent | LineVideoMessageEvent>,
+  link: AccountLink,
+  origin: string
 ): Promise<string> {
   const subjectId = subjectIdForSource(events[0].source);
   const firstImage = events.find(isImageMessageEvent);
@@ -1625,23 +1627,40 @@ async function handlePhotoAsReceipt(
   }
   try {
     const media = await readLineImage(firstImage.message.id, env.LINE_CHANNEL_ACCESS_TOKEN);
-    if (!media) return NOT_A_RECEIPT_MESSAGE;
-    const reading = await readReceipt(media, env.GEMINI_API_KEY, env.ACCOUNTS);
-    if (!reading) return NOT_A_RECEIPT_MESSAGE;
+    if (!media) return UNREADABLE_PHOTO_MESSAGE;
+    const reading = await readImage(media, env.GEMINI_API_KEY, env.ACCOUNTS);
+    if (!reading) return UNREADABLE_PHOTO_MESSAGE;
 
-    const note = reading.merchant || "ใบเสร็จ";
+    // Every branch below ends in the ordinary confirm step for whatever it
+    // read, so a photo is a way of *filling in* an existing feature rather
+    // than a feature of its own with its own rules.
+    if (reading.kind === "appointment") {
+      const prompt = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
+        promptCalendarCreateFromDraft(makeActionCtxFactory(env, subjectId, link, origin)(accessToken), {
+          title: reading.title,
+          dateKey: reading.dateKey,
+          time: reading.time,
+        })
+      );
+      return `📅 อ่านบัตรนัดได้: ${reading.title}\n\n${prompt}`;
+    }
+
+    const isIncome = reading.kind === "income";
+    const note = reading.merchant || (isIncome ? "เงินเข้า" : "ใบเสร็จ");
     const prompt = await promptTransactionCreate(
       { kv: env.ACCOUNTS, lineUserId: subjectId },
-      [{ amount: reading.amount, type: "expense", categoryId: reading.categoryId, note }],
-      `(ใบเสร็จ) ${note} ${reading.amount}`,
+      [{ amount: reading.amount, type: isIncome ? "income" : "expense", categoryId: reading.categoryId, note }],
+      `(รูป) ${note} ${reading.amount}`,
       // Personal mode only — handlePhotoAsReceipt is reached behind an
       // `!isGroup` guard, so there is no group member to resolve.
       { addedBy: subjectId, addedByName: "LINE" }
     );
-    return `🧾 อ่านใบเสร็จได้ ${formatBaht(reading.amount)} บาท${reading.merchant ? ` จาก ${reading.merchant}` : ""}\n\n${prompt}`;
+    const label = isIncome ? "💰 อ่านสลิปเงินเข้าได้" : "🧾 อ่านใบเสร็จได้";
+    const from = reading.merchant ? ` จาก ${reading.merchant}` : "";
+    return `${label} ${formatBaht(reading.amount)} บาท${from}\n\n${prompt}`;
   } catch (err) {
     console.error("handlePhotoAsReceipt failed", err);
-    return NOT_A_RECEIPT_MESSAGE;
+    return UNREADABLE_PHOTO_MESSAGE;
   }
 }
 

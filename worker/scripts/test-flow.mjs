@@ -235,9 +235,9 @@ const geminiRequests = []; // captures {systemInstruction, question, apiKey} per
 // speech-to-text call the same way INTERPRETER_MARKER identifies an
 // interpreter one.
 // Must match receipt.ts's instruction — identifies a receipt-reading call.
-const RECEIPT_MARKER = "ระบบอ่านใบเสร็จภาษาไทย";
+const RECEIPT_MARKER = "ระบบอ่านรูปภาษาไทย";
 const receiptRequests = []; // captures {systemInstruction, mimeType, hasImage} per receipt call
-let mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+let mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 let simulateReceiptFailure = false; // one-shot: fails the next receipt read
 const TRANSCRIBE_MARKER = "ระบบถอดเสียงเป็นข้อความภาษาไทย";
 const transcriptionRequests = []; // captures {mimeType, hasAudio, base64Length} per transcription call
@@ -2666,7 +2666,7 @@ const sendPhoto = async (messageId) => {
 // No trip open at this point in the run — the trip tests close theirs.
 await handleTextMessage(env, lineUserId, "ปิดทริป", origin).catch(() => undefined);
 receiptRequests.length = 0;
-mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 const receiptReply = await sendPhoto("receipt-1");
 check(
   "a photo sent with no trip open is read as a receipt and proposed as an expense",
@@ -2686,7 +2686,7 @@ check(
   // separate lines mention it, so looking for the word alone passes with
   // the rule that matters deleted.
   "the prompt names the total and forbids the four numbers that are not it",
-  receiptRequests[0].systemInstruction.includes("ยอดที่จ่ายจริง") &&
+  receiptRequests[0].systemInstruction.includes("ยอดที่จ่าย/รับจริง") &&
     receiptRequests[0].systemInstruction.includes("**ห้าม**เอายอดก่อนภาษี") &&
     receiptRequests[0].systemInstruction.includes("ให้ใช้ยอดรวมเสมอ")
 );
@@ -2705,32 +2705,32 @@ check(
 // A plausible amount alongside isReceipt:false on purpose — a photo of a
 // meal can easily make the model emit a number. With amount 0 here, the
 // amount check would catch it and the isReceipt flag would go untested.
-mockReceiptReading = { isReceipt: false, amount: 250, merchant: "", categoryId: "food" };
+mockReceiptReading = { kind: "other", amount: 250, merchant: "", categoryId: "food" };
 const notReceiptReply = await sendPhoto("receipt-scenery-1");
 check(
   "a photo that is not a receipt is refused rather than guessed at",
-  notReceiptReply.includes("อ่านใบเสร็จจากรูปนี้ไม่ออก") && !notReceiptReply.includes("ยืนยัน")
+  notReceiptReply.includes("อ่านรูปนี้ไม่ออก") && !notReceiptReply.includes("ยืนยัน")
 );
 // isReceipt true but no usable total is the same outcome — a receipt whose
 // amount could not be read is not an expense of zero baht.
-mockReceiptReading = { isReceipt: true, amount: 0, merchant: "ร้านหนึ่ง", categoryId: "food" };
-check("a receipt with no readable total is refused too", (await sendPhoto("receipt-nototal-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก"));
-mockReceiptReading = { isReceipt: true, amount: -50, merchant: "ร้านหนึ่ง", categoryId: "food" };
-check("and a negative one", (await sendPhoto("receipt-negative-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "expense", amount: 0, merchant: "ร้านหนึ่ง", categoryId: "food" };
+check("a receipt with no readable total is refused too", (await sendPhoto("receipt-nototal-1")).includes("อ่านรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "expense", amount: -50, merchant: "ร้านหนึ่ง", categoryId: "food" };
+check("and a negative one", (await sendPhoto("receipt-negative-1")).includes("อ่านรูปนี้ไม่ออก"));
 
 const { categoryLabel } = await import("../src/format.ts");
 
 // An invented category would put the row somewhere every reader downstream
 // treats as impossible — but the amount is the part worth keeping, so it
 // falls back rather than failing the whole read.
-mockReceiptReading = { isReceipt: true, amount: 99, merchant: "ร้านสอง", categoryId: "not-a-real-category" };
+mockReceiptReading = { kind: "expense", amount: 99, merchant: "ร้านสอง", categoryId: "not-a-real-category" };
 const badCategoryReply = await sendPhoto("receipt-badcat-1");
 check(
   "an invented category falls back instead of failing the read",
   badCategoryReply.includes("99") && badCategoryReply.includes(categoryLabel("other-expense"))
 );
 // An income category is just as impossible on a receipt.
-mockReceiptReading = { isReceipt: true, amount: 99, merchant: "ร้านสาม", categoryId: "salary" };
+mockReceiptReading = { kind: "expense", amount: 99, merchant: "ร้านสาม", categoryId: "salary" };
 check(
   "an income category is not accepted on a receipt either",
   (await sendPhoto("receipt-income-cat-1")).includes(categoryLabel("other-expense"))
@@ -2738,11 +2738,94 @@ check(
 await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
 
 simulateReceiptFailure = true;
-mockReceiptReading = { isReceipt: true, amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 check(
   "a failed read says so instead of proposing anything",
-  (await sendPhoto("receipt-fail-1")).includes("อ่านใบเสร็จจากรูปนี้ไม่ออก")
+  (await sendPhoto("receipt-fail-1")).includes("อ่านรูปนี้ไม่ออก")
 );
+
+// ---- รูปแยกแยะได้มากกว่าใบเสร็จ (PLAN.md 17.79) --------------------------
+// "นี่คือใบเสร็จไหม" became "รูปนี้คืออะไร". One Gemini call either way, but
+// a photo becomes the entrance to several features instead of one.
+
+// A slip showing money *in* used to be proposed as an expense, because the
+// type was hard-coded. Visible in the confirmation rather than silent — but
+// it meant income could not be logged from a photo at all.
+mockReceiptReading = { kind: "income", amount: 25000, merchant: "บริษัท ก", categoryId: "salary" };
+const slipIncomeReply = await sendPhoto("slip-income-1");
+check(
+  "a slip that says money came in is proposed as income, not an expense",
+  slipIncomeReply.includes("25,000") && slipIncomeReply.includes("รายรับ") && !slipIncomeReply.includes("รายจ่าย")
+);
+const rowsBeforeIncome = sheetRows.length;
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and saves as an income row in an income category",
+  sheetRows.length === rowsBeforeIncome + 1 && sheetRows.at(-1)[2] === "income" && sheetRows.at(-1)[4] === "salary"
+);
+// An expense category on an income reading is as impossible as an invented
+// one — the ledger has two sides and a row must land on the right one.
+mockReceiptReading = { kind: "income", amount: 500, merchant: "ใครสักคน", categoryId: "food" };
+const wrongSideReply = await sendPhoto("slip-wrongside-1");
+check(
+  "an expense category on an income reading falls back to an income one",
+  wrongSideReply.includes("รายรับ") && wrongSideReply.includes(categoryLabel("other-income"))
+);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+// A plain transfer slip cannot say whose account is whose, so the prompt
+// settles the ambiguous case rather than leaving the model to guess.
+check(
+  "the prompt tells the model what to do with an ambiguous transfer slip",
+  receiptRequests.at(-1).systemInstruction.includes("ดูไม่ออกว่าเข้าหรือออก ให้ตอบ expense")
+);
+
+// An appointment card fills in the calendar feature rather than becoming a
+// feature of its own — same confirm step as typing the appointment.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "คลินิกทันตกรรม", dateKey: "2026-09-15", time: "09:30" };
+const apptReply = await sendPhoto("appt-1");
+check(
+  "an appointment card is proposed as a calendar event",
+  apptReply.includes("คลินิกทันตกรรม") && apptReply.includes("09:30") && apptReply.includes("ยืนยัน")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "and confirming creates the real event",
+  calendarEvents.length === 1 && calendarEvents[0].summary.includes("คลินิกทันตกรรม")
+);
+
+// Thai appointment cards are printed in พ.ศ. far more often than not, and a
+// model told to convert will sometimes not. An event 543 years out is worse
+// than refusing: it is real, on a real calendar, and nobody will see it again.
+calendarEvents.length = 0;
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2569-09-15", time: "13:00" };
+const beReply = await sendPhoto("appt-be-1");
+check(
+  // The confirmation renders dates back into พ.ศ., so a converted 2026 shows
+  // as 2569 and looks identical to the raw input. What an *unconverted* year
+  // produces is 2569 + 543 = 3112, which is the thing to look for.
+  "a Buddhist-era year on the card is converted, not taken literally",
+  beReply.includes("2569") && !beReply.includes("3112")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "so the event lands in the year the card actually meant",
+  calendarEvents.length === 1 && calendarEvents[0].start.dateTime.startsWith("2026-09-15")
+);
+
+// A card with no time is not an appointment this bot can create — the
+// calendar layer needs both, and inventing a time puts someone at a clinic
+// at the wrong hour.
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2026-09-15", time: "" };
+check("a card with no time is refused rather than given one", (await sendPhoto("appt-notime-1")).includes("อ่านรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "appointment", title: "", dateKey: "2026-09-15", time: "09:00" };
+check("and one with no subject too", (await sendPhoto("appt-notitle-1")).includes("อ่านรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "15/09/2026", time: "09:00" };
+check("a date in a shape the calendar cannot use is refused", (await sendPhoto("appt-baddate-1")).includes("อ่านรูปนี้ไม่ออก"));
+mockReceiptReading = { kind: "appointment", title: "นัดตรวจ", dateKey: "2026-09-15", time: "25:00" };
+check("and an impossible time", (await sendPhoto("appt-badtime-1")).includes("อ่านรูปนี้ไม่ออก"));
+
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 
 // A trip that is open still wins: that is the behaviour people already rely
 // on, and a photo during a trip belongs to the album.
