@@ -1531,6 +1531,12 @@ table is writing a guessed time onto a real calendar.
 - **Answered before the AI interpreter, and outside `chatEngine`.** The reply is an answer to a
   question the bot just asked, not a fresh instruction to be interpreted; and `chatEngine` is the
   money engine, which has no business knowing about appointments.
+- **The prompt has to ask for the gap, not hide it.** The read instruction told the model to
+  answer `other` when a card had no time — correct while a missing time was a refusal, and it
+  would have kept the ask-back path from ever firing in production once it wasn't. The tests
+  missed it because the mock feeds readings straight in, skipping the prompt entirely. The prompt
+  is now asserted directly, the same way the ambiguous-slip rule is: **when behaviour depends on
+  the prompt, the prompt is what the test has to look at.**
 
 ### Voice messages (PLAN.md 17.74)
 
