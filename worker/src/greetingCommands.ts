@@ -13,8 +13,10 @@ import { pushToLine } from "./line.ts";
 import { buildGoldBtcLines, fetchMarketSnapshot } from "./marketData.ts";
 import { fetchNewsSummary } from "./news.ts";
 import { applyPersona } from "./persona.ts";
+import { budgetLevel } from "./budgetCommands.ts";
+import { categoryLabel, formatBaht } from "./format.ts";
 import { buildRecurringStatus, recurringDueLines } from "./recurring.ts";
-import { readAllDiaryEntries, readRecurringWithPaid, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
+import { readAllDiaryEntries, readMonthTransactionsAndBudgets, readRecurringWithPaid, readShiftGrid, SHIFT_TYPES } from "./sheets.ts";
 import { listStuckUploads, type StuckUploads } from "./uploadQueue.ts";
 import { getBotSettings, wantsMorningBriefing } from "./settings.ts";
 import { fetchAirQuality, formatAirQualityLine } from "./airQuality.ts";
@@ -305,6 +307,58 @@ function buildStuckUploadsLine(stuck: StuckUploads | undefined, now: Date): stri
   return `⚠️ มีรูป/คลิป ${stuck.count} ไฟล์ค้างอยู่ในคิวอัปโหลด${since} ปกติควรขึ้น Drive ภายในไม่กี่นาที — บอทจะพยายามอัปต่อให้เอง ถ้าพรุ่งนี้ยังเห็นข้อความนี้อยู่แปลว่ามีอะไรผิดปกติจริง`;
 }
 
+/**
+ * Budgets that are nearly or already spent, for the 7:00 briefing
+ * (PLAN.md 17.77).
+ *
+ * The per-save warning only speaks when you happen to log something in that
+ * category. Spend the month's food budget across a fortnight of small
+ * entries and the last one tells you — which is late, and only because you
+ * logged it. This is the half that reaches you on a morning you have not
+ * bought anything yet, while there is still a month left to change.
+ *
+ * Says nothing at all when every budget is comfortable, the same discipline
+ * as the stuck-uploads line: a section that appears every morning is one
+ * people stop reading by the morning it matters.
+ */
+async function buildBudgetWarningLine(
+  accessToken: string,
+  spreadsheetId: string,
+  kv: KVNamespace,
+  today: string
+): Promise<string> {
+  try {
+    const month = today.slice(0, 7);
+    const { transactions, budgets } = await readMonthTransactionsAndBudgets(accessToken, spreadsheetId, kv, month);
+    const thisMonth = budgets.filter((b) => b.month === month);
+    if (thisMonth.length === 0) return "";
+
+    const spentByCategory = new Map<string, number>();
+    for (const row of transactions) {
+      if (row.type !== "expense" || !row.date?.startsWith(month)) continue;
+      spentByCategory.set(row.categoryId, (spentByCategory.get(row.categoryId) ?? 0) + row.amount);
+    }
+
+    const lines: string[] = [];
+    for (const budget of thisMonth) {
+      const spent = spentByCategory.get(budget.categoryId) ?? 0;
+      const level = budgetLevel(spent, budget.limitAmount);
+      if (level === "ok") continue;
+      const remaining = budget.limitAmount - spent;
+      lines.push(
+        remaining < 0
+          ? `• ${categoryLabel(budget.categoryId)} เกินแล้ว ${formatBaht(-remaining)} บาท`
+          : `• ${categoryLabel(budget.categoryId)} เหลือ ${formatBaht(remaining)} บาท จาก ${formatBaht(budget.limitAmount)}`
+      );
+    }
+    if (lines.length === 0) return "";
+    return [`💸 งบเดือนนี้ที่ต้องระวัง:`, ...lines].join("\n");
+  } catch (err) {
+    console.error("buildBudgetWarningLine failed", err);
+    return "";
+  }
+}
+
 /** Due and overdue bills for the 7:00 briefing (PLAN.md 17.61). Best-effort
  * like every other line here: a failure omits this one line rather than
  * costing the user their whole briefing. */
@@ -427,7 +481,7 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
             clientId: env.GOOGLE_CLIENT_ID,
             clientSecret: env.GOOGLE_CLIENT_SECRET,
           });
-          const [calendarLine, shiftLine, billsLine, diaryLine] = await Promise.all([
+          const [calendarLine, shiftLine, billsLine, budgetLine, diaryLine] = await Promise.all([
             buildTodayCalendarLine(accessToken, today),
             buildTodayShiftLine(accessToken, link.spreadsheetId, kv, today),
             // Costs one more Sheets read per person per day, and no extra
@@ -435,11 +489,14 @@ export async function broadcastMorningBriefings(env: Env, kv: KVNamespace, now: 
             // is the whole reason a bill reminder is affordable here and was
             // not affordable as its own notification (PLAN.md 17.59).
             buildDueBillsLine(accessToken, link.spreadsheetId, kv, today),
+            // One more Sheets read a day, and still no extra push — the same
+            // trade that made the bill reminder affordable (PLAN.md 17.61).
+            buildBudgetWarningLine(accessToken, link.spreadsheetId, kv, today),
             buildYesterdayDiaryLine(env, accessToken, link.spreadsheetId, kv, yesterday),
           ]);
           // Bills before the diary reflection: it is the only line here that
           // asks the reader to go and do something today.
-          for (const line of [calendarLine, shiftLine, billsLine, diaryLine]) if (line) extras.push(line);
+          for (const line of [calendarLine, shiftLine, billsLine, budgetLine, diaryLine]) if (line) extras.push(line);
         } catch (err) {
           console.error("broadcastMorningBriefings: refreshing access token failed, sending base briefing only", lineUserId, err);
         }

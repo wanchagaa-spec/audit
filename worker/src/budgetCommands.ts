@@ -134,6 +134,32 @@ export async function applyBudgetDelete(
 // exchange for one round trip instead of two for books that do. Since the
 // whole thing overlaps the save either way, one request is the right trade.
 
+/**
+ * How close a budget is to being spent (PLAN.md 17.77).
+ *
+ * 17.44 made every expense in a budgeted category report where it left you,
+ * but the sentence read the same at 10% spent as at 99%: "เหลือ 500 บาท" is
+ * a fact, not a warning, and the only thing that ever raised its voice was
+ * going over — by which point the budget has already failed at the one job
+ * it has.
+ *
+ * 80% because a warning has to arrive while there is still something to do
+ * about it and while it is still rare enough to be read. Lower and it fires
+ * in the first half of most months; higher and there is not enough left to
+ * change anything.
+ */
+const NEARLY_SPENT_RATIO = 0.8;
+
+export type BudgetLevel = "ok" | "nearly" | "over";
+
+export function budgetLevel(spent: number, limitAmount: number): BudgetLevel {
+  if (spent > limitAmount) return "over";
+  // Guards a limit of zero, which would otherwise divide to Infinity and
+  // report every category as nearly spent forever.
+  if (limitAmount <= 0) return "over";
+  return spent / limitAmount >= NEARLY_SPENT_RATIO ? "nearly" : "ok";
+}
+
 /** A row applyTransactionCreate is in the middle of writing. */
 export interface SavedExpense {
   id: string;
@@ -176,10 +202,15 @@ export async function buildBudgetStatusLines(ctx: ActionCtx, justSaved: SavedExp
   return budgets.map((budget) => {
     const spent = spentByCategory.get(budget.categoryId) ?? 0;
     const remaining = budget.limitAmount - spent;
-    if (remaining < 0) {
-      return `⚠️ งบ ${categoryLabel(budget.categoryId)} เกินแล้ว ${formatBaht(-remaining)} บาท (ใช้ไป ${formatBaht(spent)} จากงบ ${formatBaht(budget.limitAmount)})`;
+    const usage = `(ใช้ไป ${formatBaht(spent)} จากงบ ${formatBaht(budget.limitAmount)})`;
+    const level = budgetLevel(spent, budget.limitAmount);
+    if (level === "over" && remaining < 0) {
+      return `⚠️ งบ ${categoryLabel(budget.categoryId)} เกินแล้ว ${formatBaht(-remaining)} บาท ${usage}`;
     }
-    return `งบ ${categoryLabel(budget.categoryId)} เหลือ ${formatBaht(remaining)} บาท (ใช้ไป ${formatBaht(spent)} จากงบ ${formatBaht(budget.limitAmount)})`;
+    if (level === "nearly" || level === "over") {
+      return `⚠️ งบ ${categoryLabel(budget.categoryId)} ใกล้หมดแล้ว เหลือ ${formatBaht(remaining)} บาท ${usage}`;
+    }
+    return `งบ ${categoryLabel(budget.categoryId)} เหลือ ${formatBaht(remaining)} บาท ${usage}`;
   });
 }
 

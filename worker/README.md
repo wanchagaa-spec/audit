@@ -886,6 +886,15 @@ briefing is already being pushed to everyone opted in, so a due-bill line costs 
 all, only one more Sheets read per person per day. That is why this became worth doing later and
 was not worth doing then.
 
+**A budget warns from 80%, not after it is blown** (PLAN.md 17.77). 17.44 made every expense in a
+budgeted category report where it left you, but the sentence read the same at 10% spent as at
+99%: "เหลือ 500 บาท" is a fact, not a warning, and the only thing that ever raised its voice was
+going over — by which point the budget has already failed at the one job it has. 80% is the
+threshold because a warning has to arrive while there is still something to do about it and still
+be rare enough to be read; lower fires in the first half of most months, higher leaves nothing to
+change. `budgetLevel` is shared by the per-save line and the briefing so the two cannot disagree
+about what "nearly spent" means.
+
 Two states are raised, both actionable: due today, and past due and still unpaid. A bill with no
 due date is never raised — "sometime this month" is a real answer and there is no honest morning
 to raise it on; guessing one turns a daily message into noise. An overdue bill is repeated every
@@ -908,6 +917,15 @@ since nobody writes an amount as "16:00".
 Why the bot does not work out for itself which bills are paid: it would have to match amounts
 against `Transactions`, and two bills of the same size in the same category are
 indistinguishable that way. A wrong guess in a money feature is worse than no answer.
+
+**Budgets that are nearly spent are named in the briefing** (PLAN.md 17.77). The per-save line
+only speaks when you happen to log something in that category — spend a food budget across a
+fortnight of small entries and the last one tells you, which is late and only because you logged
+it. This is the half that reaches you on a morning you have not bought anything yet, while there
+is still a month left to change. It costs one more Sheets read a day and no extra push, the same
+trade that made the bill reminder affordable. Every budget comfortable means no section at all: a
+part of the message that appears every morning is one people stop reading by the morning it
+matters.
 
 **The briefing also reports on the bot itself** (PLAN.md 17.70): if photos are still sitting in
 the upload queue, it says so. This exists because of how the KV quota failure was found — the
@@ -1440,6 +1458,27 @@ one trip folder and offers to remove them (PLAN.md 17.69).
 - **The POST re-runs the scan instead of trusting file ids posted back.** A form is not a promise:
   ids from a stale tab or edited by hand would be a request to trash arbitrary files in the user's
   Drive, and the page would look identical either way.
+
+### Receipt photos (PLAN.md 17.76)
+
+A photo sent **with no trip open** is read as a receipt and proposed as an expense, through the
+same confirm step typed expenses use. Photos already had a home — the trip album — but only
+during a trip; outside one they got "ยังไม่ได้เริ่มทริปอยู่เลย" and were thrown away.
+
+- **The open trip decides.** While one is running every photo belongs to the album, which is what
+  people already rely on and the behaviour worth not breaking.
+- **The whole feature is which number becomes the amount.** A Thai receipt carries a subtotal,
+  VAT, a grand total, cash tendered and change, and four of those five are wrong. Reading
+  "เงินสด 1000" off a 320-baht meal does not look like an error afterwards — it looks like a meal
+  that cost a thousand baht. The prompt names the total and forbids the other four by name.
+- **Only the first image of a batch.** Someone sending five photos at once outside a trip is not
+  filing five expenses, and five confirmations to answer one by one would be worse than none.
+- **Three failures give one answer**: not a receipt, a total that could not be read, and a failed
+  lookup. They mean the same thing to the person holding the phone, and distinguishing them would
+  only invite a retry of a photo that will fail the same way. None of them proposes a number.
+- **An invented category falls back to `other-expense`** rather than failing the read — the
+  amount is the part worth keeping, and a category the model made up would put the row somewhere
+  every reader downstream treats as impossible.
 
 ### Voice messages (PLAN.md 17.74)
 
