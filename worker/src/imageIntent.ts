@@ -48,7 +48,13 @@ const READ_INSTRUCTION = [
   "สำหรับ appointment:",
   "title คือเรื่องที่นัด เช่น ชื่อคลินิก/แผนก/หมอ",
   "**dateKey ต้องเป็น ค.ศ. เสมอ** ถ้าบนบัตรเป็น พ.ศ. (เช่น 2569) ให้ลบ 543 ก่อน (2569 → 2026)",
-  "time เป็น 24 ชั่วโมง เช่น 09:30 ถ้าบัตรไม่ได้ระบุเวลา ให้ตอบ kind = other",
+  // Left over from 17.79, when a card with no time really was refused. 17.80
+  // asks for the time instead, so telling the model to answer "other" here
+  // would keep that path from ever being reached in production — the exact
+  // case the feature exists for.
+  "time เป็น 24 ชั่วโมง เช่น 09:30 **ถ้าอ่านเวลาไม่ออกหรือบัตรไม่ระบุเวลา ให้ใส่สตริงว่าง**",
+  "อ่านเวลาไม่ออกไม่ใช่เหตุผลให้ตอบ other ถ้ามีเรื่องนัดกับวันที่ก็ยังเป็น appointment",
+  "**ห้ามเดาเวลา**เด็ดขาด ถ้าไม่แน่ใจให้ใส่สตริงว่าง",
 ].join("\n");
 
 export interface MoneyReading {

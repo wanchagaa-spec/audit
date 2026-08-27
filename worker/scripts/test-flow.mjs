@@ -2778,6 +2778,17 @@ check(
   "the prompt tells the model what to do with an ambiguous transfer slip",
   receiptRequests.at(-1).systemInstruction.includes("ดูไม่ออกว่าเข้าหรือออก ให้ตอบ expense")
 );
+// The mock feeds readings straight in, so nothing else in this file exercises
+// the prompt. 17.80's ask-back path is only reachable if the prompt actually
+// asks for an empty time — the rule it replaced said to answer "other", which
+// would have kept the whole feature from ever firing in production.
+const readPrompt = receiptRequests.at(-1).systemInstruction;
+check(
+  "the prompt asks for an empty time rather than a guess, so the ask-back path is reachable",
+  readPrompt.includes("อ่านเวลาไม่ออกหรือบัตรไม่ระบุเวลา ให้ใส่สตริงว่าง") &&
+    readPrompt.includes("ห้ามเดาเวลา") &&
+    !readPrompt.includes("ถ้าบัตรไม่ได้ระบุเวลา ให้ตอบ kind = other")
+);
 
 // An appointment card fills in the calendar feature rather than becoming a
 // feature of its own — same confirm step as typing the appointment.
