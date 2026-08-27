@@ -113,6 +113,13 @@ export async function listCalendarEvents(
     singleEvents: "true",
     orderBy: "startTime",
     maxResults: "50",
+    // Without this Google answers in whatever zone each event carries, and
+    // fromApiEvent's dateKey is a plain string slice of that. It did not
+    // matter while every caller asked for a single day and treated the whole
+    // answer as that day; it does now that the morning briefing splits a
+    // two-day window into today and tomorrow (PLAN.md 17.81), where an event
+    // returned in another zone lands under the wrong heading.
+    timeZone: TIMEZONE,
   });
   const data = await calendarFetch(accessToken, `/calendars/primary/events?${q}`);
   return ((data.items ?? []) as any[]).map(fromApiEvent);

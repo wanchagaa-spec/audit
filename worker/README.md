@@ -927,6 +927,19 @@ trade that made the bill reminder affordable. Every budget comfortable means no 
 part of the message that appears every morning is one people stop reading by the morning it
 matters.
 
+**Tomorrow's appointments ride in the same Calendar call** (PLAN.md 17.81). Today alone gave an
+08:00 appointment an hour's notice — too late to swap a shift, refill a prescription, or find the
+card. Tomorrow is the same request with the window one day wider, inside a message that was going
+out anyway: the trade that made the bill and budget lines affordable.
+
+- **The tomorrow block is omitted when it is empty.** "พรุ่งนี้ไม่มีนัด" every single morning is a
+  line people stop reading, and it takes today's line down with it.
+- **`listCalendarEvents` now pins `timeZone`.** Google answers in whatever zone each event
+  carries, and `fromApiEvent` reads the date straight off that string. Harmless while every caller
+  asked for one day and treated the whole answer as that day; once the briefing splits a two-day
+  window, a 02:00 appointment stored as 19:00Z files itself under "today" a full day early. The
+  test mock models Google's behaviour here, so removing the pin fails a test rather than nothing.
+
 **The briefing also reports on the bot itself** (PLAN.md 17.70): if photos are still sitting in
 the upload queue, it says so. This exists because of how the KV quota failure was found — the
 queue stopped draining every night between roughly 23:40 and 07:00 for an unknown number of days
@@ -1497,6 +1510,21 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
   keeping, and a category the model made up would put the row somewhere every reader downstream
   treats as impossible. A real category from the *other* side of the ledger is rejected the same
   way: an income reading filed under "food" is as impossible as an invented one.
+
+**Every photo in a batch is read, not just the first** (PLAN.md 17.81). Sending five receipts at
+once used to log one and drop four in silence. The rule that caused it was justified by "five
+confirmations answered one by one", which this codebase never required — `promptTransactionCreate`
+has confirmed an array of drafts in one message since the text path needed it, so five receipts
+are one question and one "ใช่".
+
+- **Capped at five, and the rest are named.** Each photo is its own Gemini call. Photos past the
+  cap, and photos that could not be read, are counted in the reply — the difference between a
+  limit and a bug is whether it says so.
+- **Money wins a mixed batch.** There is one pending slot, and an appointment card is the side
+  that can be re-sent one at a time; a batch of receipts cannot.
+- **A single photo is still echoed as what it is** — "🧾 อ่านใบเสร็จได้ 320 บาท จาก ร้านชาบู",
+  not "อ่านได้ 1 รูป". The echo exists so the total can be checked against the shop it came from
+  before it is agreed to; a count passes for it and loses it.
 
 **The question is "what is this photo?", not "is this a receipt?"** (PLAN.md 17.79). It costs the
 same one Gemini call and turns a photo from the entrance to one feature into the entrance to
