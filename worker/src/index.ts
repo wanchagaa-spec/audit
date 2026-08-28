@@ -118,6 +118,7 @@ import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, m
 import { answerLotteryCheck, answerLotteryResult, matchLotteryCommand } from "./lotteryCommands.ts";
 import { formatBaht } from "./format.ts";
 import { readImage, readLineImage, type AppointmentReading, type MoneyReading } from "./imageIntent.ts";
+import { quickRepliesFor } from "./quickReplies.ts";
 import { parseThaiTime } from "./thaiTime.ts";
 import { transcribeVoiceMessage } from "./voice.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
@@ -1527,15 +1528,26 @@ async function replyOrPush(
   // cosmetic loss; "ระบบ AI ตอบไม่ได้ชั่วคราว" is the feature not working.
   options: { skipPersona?: boolean } = {}
 ): Promise<void> {
-  const settings = await getBotSettings(env.ACCOUNTS, subjectIdForSource(event.source));
+  const subjectId = subjectIdForSource(event.source);
+  const settings = await getBotSettings(env.ACCOUNTS, subjectId);
+  // Read *after* the handler has run, so this is the question the bot is
+  // asking now rather than the one it was asked (PLAN.md 17.82). Two KV
+  // reads per outbound message: reads are the plentiful side of the free
+  // plan's quota (100k/day against 1k writes), and this path adds none of
+  // the scarce kind.
+  const [confirmation, clarification] = await Promise.all([
+    getPendingConfirmation(env.ACCOUNTS, subjectId),
+    getPending(env.ACCOUNTS, subjectId),
+  ]);
+  const quickReply = quickRepliesFor(confirmation, clarification);
   const styledText = options.skipPersona
     ? text
     : await applyPersona(text, env.GEMINI_API_KEY, settings, env.ACCOUNTS);
   try {
-    await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
+    await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN, quickReply);
   } catch (err) {
     console.error("line reply failed, falling back to push", err);
-    await pushToLine(pushTargetId(event.source), styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
+    await pushToLine(pushTargetId(event.source), styledText, env.LINE_CHANNEL_ACCESS_TOKEN, quickReply);
   }
 }
 

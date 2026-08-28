@@ -1,3 +1,5 @@
+import { clampItems, type QuickReplyItem } from "./quickReplies.ts";
+
 // A message from a 1:1 chat always has a userId; a message from a group
 // chat (PLAN.md 17 — group mode) carries the groupId instead, plus the
 // sender's userId when LINE includes it (it's omitted for senders on old
@@ -266,7 +268,8 @@ export async function fetchLineMediaContent(
 export async function replyToLine(
   replyToken: string,
   text: string,
-  channelAccessToken: string
+  channelAccessToken: string,
+  quickReply?: QuickReplyItem[]
 ): Promise<void> {
   const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
@@ -276,7 +279,7 @@ export async function replyToLine(
     },
     body: JSON.stringify({
       replyToken,
-      messages: [{ type: "text", text: text.slice(0, 5000) }],
+      messages: [textMessage(text, quickReply)],
     }),
   });
   if (!res.ok) {
@@ -284,12 +287,39 @@ export async function replyToLine(
   }
 }
 
+/**
+ * One LINE text message, with the quick-reply buttons attached when there are
+ * any (PLAN.md 17.82).
+ *
+ * An empty `items` array is not valid in LINE's schema — it rejects the whole
+ * message rather than rendering no buttons — so the key is left off entirely
+ * unless there is something to put in it.
+ */
+function textMessage(text: string, quickReply?: QuickReplyItem[]) {
+  const base = { type: "text" as const, text: text.slice(0, 5000) };
+  if (!quickReply || quickReply.length === 0) return base;
+  return {
+    ...base,
+    quickReply: {
+      items: clampItems(quickReply).map((item) => ({
+        type: "action" as const,
+        action: { type: "message" as const, label: item.label, text: item.text },
+      })),
+    },
+  };
+}
+
 /** Push messages target an id directly (a userId, or a groupId for group
  * mode) instead of a one-time replyToken, so — unlike replyToLine — they
  * can't fail from a token that's expired or already been used. Used as a
  * fallback when a reply attempt fails, so slow processing (e.g. a big
  * trip-photo batch) never results in total silence. */
-export async function pushToLine(to: string, text: string, channelAccessToken: string): Promise<void> {
+export async function pushToLine(
+  to: string,
+  text: string,
+  channelAccessToken: string,
+  quickReply?: QuickReplyItem[]
+): Promise<void> {
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
@@ -298,7 +328,7 @@ export async function pushToLine(to: string, text: string, channelAccessToken: s
     },
     body: JSON.stringify({
       to,
-      messages: [{ type: "text", text: text.slice(0, 5000) }],
+      messages: [textMessage(text, quickReply)],
     }),
   });
   if (!res.ok) {

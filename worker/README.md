@@ -1526,6 +1526,27 @@ are one question and one "ใช่".
   not "อ่านได้ 1 รูป". The echo exists so the total can be checked against the shop it came from
   before it is agreed to; a count passes for it and loses it.
 
+### Quick-reply buttons (PLAN.md 17.82)
+
+Confirmations and the category question come with buttons above the keyboard, so logging an
+expense is one message instead of two. `chatEngine` had promised these since it was written —
+"เลือกจากปุ่มด้านล่าง" — while nothing in the codebase ever sent a `quickReply` to LINE.
+
+- **The buttons come from the pending state, never from the reply text.** Matching on the outgoing
+  prose would couple them to wording `applyPersona` is allowed to rewrite; this codebase has paid
+  for that coupling twice already. `quickRepliesFor` reads the confirmation and clarification the
+  handler just wrote, in `replyOrPush` — the one place every reply passes through. Two KV reads per
+  message, and no writes: reads are the plentiful side of the free plan's quota.
+- **A button sends its `text`, not its `label`.** "✅ ใช่" is what the eye reads; "ใช่" is what the
+  confirmation matcher gets.
+- **Amount and appointment-time questions get no buttons.** Both want a number only the sender
+  knows, and a row of guesses invites a wrong tap on the one thing this bot makes people confirm
+  precisely because getting it wrong is expensive.
+- **LINE's limits are enforced, not trusted**: 13 items, 20-character labels, and no empty `items`
+  array — each of those makes LINE reject the whole message rather than degrade, which would turn
+  a cosmetic feature into silence. "📈 ดอกเบี้ย/เงินปันผล" is 21 characters, so the truncation runs
+  against a real category rather than a hypothetical one.
+
 **The question is "what is this photo?", not "is this a receipt?"** (PLAN.md 17.79). It costs the
 same one Gemini call and turns a photo from the entrance to one feature into the entrance to
 several. Every branch ends in the ordinary confirm step for whatever it read, so a photo *fills

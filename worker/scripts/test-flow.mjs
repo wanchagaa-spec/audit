@@ -119,6 +119,8 @@ let simulateTrashFailureOnce = false; // makes the next trashFile call fail, to 
 let simulateDriveDedupLookupFailure = false; // makes the next findUploadedMessageIds lookup fail, to prove the drain still uploads rather than stalling
 let simulateFolderNameFetchFailure = false; // makes the next Drive folder-name (fields=name) lookup fail, to exercise the not-found-vs-transient-failure distinction
 
+/** quickReply payload of each reply, index-aligned with `replies`. */
+const replyQuickReplies = [];
 const calendarEvents = []; // simulates Google Calendar: {id, summary, start:{dateTime}, end:{dateTime}}
 /** The same instant, written with a +07:00 offset — what Google returns when
  * the caller asks for timeZone=Asia/Bangkok. */
@@ -553,6 +555,10 @@ globalThis.fetch = async (url, init = {}) => {
       return new Response(JSON.stringify({ message: "Invalid reply token" }), { status: 400 });
     }
     replies.push(body.messages[0].text);
+    // The buttons LINE renders above the keyboard (PLAN.md 17.82). Kept in a
+    // parallel array so every assertion written against `replies` as plain
+    // strings — nearly a thousand of them — keeps working unchanged.
+    replyQuickReplies.push(body.messages[0].quickReply ?? null);
     return new Response("{}", { status: 200 });
   }
   if (u.includes("api.line.me/v2/bot/message/push")) {
@@ -4248,6 +4254,110 @@ check(
     !replies.at(-1).startsWith("[persona]") &&
     replies.at(-1) === directPersonaReply
 );
+
+// ---- Quick replies (PLAN.md 17.82) --------------------------------------
+//
+// chatEngine has said "เลือกจากปุ่มด้านล่าง" since it was written, and
+// nothing ever rendered a button. These check the buttons are real, and that
+// they follow the pending state rather than the wording of the reply.
+
+const sendWebhookText = async (text, replyToken) => {
+  const body = JSON.stringify({ events: [personalTextEvent(text, replyToken)] });
+  await handleWebhook(
+    new Request("http://localhost:8787/webhook", {
+      method: "POST",
+      headers: { "x-line-signature": await signLineBody(body, env.LINE_CHANNEL_SECRET) },
+      body,
+    }),
+    env
+  );
+  return { text: replies.at(-1), quickReply: replyQuickReplies.at(-1) };
+};
+const buttonTexts = (quickReply) => (quickReply?.items ?? []).map((i) => i.action.text);
+const buttonLabels = (quickReply) => (quickReply?.items ?? []).map((i) => i.action.label);
+
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin).catch(() => undefined);
+const confirmTurn = await sendWebhookText("ค่ากาแฟ 60", "reply-qr-1");
+check(
+  "a confirmation offers ใช่ and ยกเลิก as buttons instead of only asking for typing",
+  buttonTexts(confirmTurn.quickReply).join(",") === "ใช่,ยกเลิก"
+);
+check("with readable labels on them", buttonLabels(confirmTurn.quickReply).every((l) => l.length > 0 && l.length <= 20));
+
+// Pressing a button sends its text, so the button has to send exactly what
+// the confirmation matcher accepts — a label with an emoji on it would not.
+const rowsBeforeButton = sheetRows.length;
+await sendWebhookText("ใช่", "reply-qr-2");
+check("pressing it saves, because the button sends what the matcher accepts", sheetRows.length === rowsBeforeButton + 1);
+// Put the ledger back: a later test compares a month summary against one
+// captured before this point, and an extra 60 baht would fail it for a
+// reason that has nothing to do with what it is testing.
+sheetRows.length = rowsBeforeButton;
+
+// The promise that started all this. An amount with no category asks which
+// one, and now the buttons it points at exist.
+const categoryTurn = await sendWebhookText("100", "reply-qr-3");
+check("the category question really does come with buttons now", (categoryTurn.quickReply?.items ?? []).length > 0);
+check(
+  "one per expense category, sending the name the category matcher reads",
+  buttonTexts(categoryTurn.quickReply).includes("อาหาร/เครื่องดื่ม") &&
+    !buttonTexts(categoryTurn.quickReply).includes("เงินเดือน")
+);
+check(
+  "and every label fits inside LINE's 20-character limit",
+  buttonLabels(categoryTurn.quickReply).every((l) => l.length <= 20)
+);
+const afterCategory = await sendWebhookText("อาหาร/เครื่องดื่ม", "reply-qr-4");
+check(
+  "picking a category moves on to the confirmation, buttons and all",
+  afterCategory.text.includes("100") && buttonTexts(afterCategory.quickReply).join(",") === "ใช่,ยกเลิก"
+);
+await sendWebhookText("ยกเลิก", "reply-qr-5");
+
+// The side of the ledger, and LINE's own limits, checked against the builder
+// directly — reaching an income clarification through the chat flow depends
+// on how the interpreter classifies one particular sentence, which is not
+// what these two are about.
+const { quickRepliesFor } = await import("../src/quickReplies.ts");
+const incomeButtons = quickRepliesFor(null, { kind: "category", amount: 500, type: "income", note: "" });
+check(
+  "an income clarification offers income categories, not expense ones",
+  incomeButtons.map((b) => b.text).includes("เงินเดือน") &&
+    !incomeButtons.map((b) => b.text).includes("อาหาร/เครื่องดื่ม")
+);
+// "📈 ดอกเบี้ย/เงินปันผล" is 21 characters — one over LINE's limit, which
+// rejects the whole message rather than shortening the label itself. A real
+// category, not a hypothetical one.
+check(
+  "labels past LINE's 20-character limit are cut rather than sent",
+  incomeButtons.every((b) => b.label.length <= 20) &&
+    incomeButtons.some((b) => b.text === "ดอกเบี้ย/เงินปันผล" && b.label.length === 20)
+);
+check(
+  "an amount clarification offers nothing — a row of guessed numbers invites a wrong tap",
+  quickRepliesFor(null, { kind: "amount", type: "expense", note: "" }) === undefined
+);
+// Eleven expense categories leaves room today, so the cap is enforced where
+// it can be checked: a 14th item makes LINE reject the whole message, which
+// would turn a cosmetic feature into silence the day someone adds categories.
+const { clampItems } = await import("../src/quickReplies.ts");
+const overflowing = Array.from({ length: 20 }, (_, i) => ({ label: `ปุ่ม ${i}`, text: `${i}` }));
+check(
+  "no more than 13 buttons are ever sent, however many are offered",
+  clampItems(overflowing).length === 13 && clampItems(overflowing)[0].text === "0"
+);
+
+// LINE rejects a quickReply carrying an empty items array, so the key has to
+// be left off entirely rather than sent empty. Checked at the boundary that
+// builds the payload, since nothing upstream can produce an empty list.
+const { replyToLine } = await import("../src/line.ts");
+await replyToLine("reply-qr-empty", "ทดสอบ", env.LINE_CHANNEL_ACCESS_TOKEN, []);
+check("an empty button list is left off the message, not sent as empty", replyQuickReplies.at(-1) === null);
+
+// Nothing pending means no buttons at all. LINE rejects a quickReply with an
+// empty items array, so the key has to be absent rather than empty.
+const plainTurn = await sendWebhookText("สรุปเดือนนี้", "reply-qr-7");
+check("an answer that asks nothing carries no buttons at all", plainTurn.quickReply === null);
 
 // Regression test for a real bug found in review: applyPersona used to
 // trust the styled output unconditionally — if Gemini dropped or reworded

@@ -35,7 +35,6 @@ export interface ChatEngineResult {
   transactionDrafts?: TransactionDraft[];
   botMessage: string;
   pending: PendingClarification | null;
-  quickReplyCategories?: Category[];
   /** The message wasn't money and wasn't anything else this engine handles
    * (PLAN.md 17.55/17.56). A flag rather than a string comparison against
    * botMessage, so index.ts can offer it to the AI as a last resort without
@@ -94,17 +93,16 @@ function askAmount(type: EntryType, categoryId: string | undefined, note: string
   };
 }
 
-function askCategory(
-  amount: number,
-  type: EntryType,
-  note: string,
-  categories: Category[]
-): ChatEngineResult {
-  const options = categories.filter((c) => c.type === type);
+// The buttons this message promises are built by quickReplies.ts from the
+// pending clarification it sets, not handed over from here (PLAN.md 17.82).
+// This function used to return the category list in a `quickReplyCategories`
+// field that nothing read — the promise of buttons outlived the code that
+// was going to render them by a long way, so there is deliberately only one
+// place that decides what the buttons are now.
+function askCategory(amount: number, type: EntryType, note: string): ChatEngineResult {
   return {
     botMessage: "จัดเป็นหมวดไหนดี เลือกจากปุ่มด้านล่าง หรือพิมพ์ชื่อหมวดก็ได้",
     pending: { kind: "category", amount, type, note },
-    quickReplyCategories: options,
   };
 }
 
@@ -136,7 +134,7 @@ export function handleUserMessage(
       const type = detectType(combinedNote);
       const category = matchCategory(combinedNote, categories, type);
       if (!category) {
-        return askCategory(amount, type, pending.note, categories);
+        return askCategory(amount, type, pending.note);
       }
       return okResult({ amount, type, categoryId: category.id, note: pending.note }, categories);
     }
@@ -284,5 +282,5 @@ function handleFreshMessage(text: string, categories: Category[]): ChatEngineRes
   if (result.status === "need_amount") {
     return askAmount(result.type, result.categoryId, result.note);
   }
-  return askCategory(result.amount, result.type, result.note, categories);
+  return askCategory(result.amount, result.type, result.note);
 }
