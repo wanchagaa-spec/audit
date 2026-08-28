@@ -1511,6 +1511,24 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
   treats as impossible. A real category from the *other* side of the ledger is rejected the same
   way: an income reading filed under "food" is as impossible as an invented one.
 
+**A new proposal joins the pending one instead of evicting it** (PLAN.md 17.83). There is one
+confirmation slot per person, and `setPendingConfirmation` overwrote it blindly — so two slips sent
+seconds apart produced two confirmations, and "ใช่" saved only the second. 17.81's batching cannot
+reach this: LINE splits a multi-image send across separate webhook deliveries whenever it likes,
+and each delivery is its own batch with its own proposal.
+
+- **An unanswered proposal is still an open question** — the slot lives ten minutes and nobody said
+  no to it — so another money proposal is appended and the reply lists every row "ใช่" will save,
+  in the order they were sent.
+- **Only the same person's.** Attribution is stored once for the whole pending set, so folding in
+  another group member's proposal would file their spending under the first person's name.
+- **Anything it cannot absorb is named, not dropped silently.** A typed message already ends a
+  pending confirmation on its way through `resolvePendingConfirmation`; a photo does not go through
+  that path at all, which is where the silence was.
+- **Not race-free, and not pretended otherwise.** KV has no compare-and-swap, and the read-modify-
+  write window here is seconds wide because a photo waits on Gemini first. What is guaranteed is
+  that the latest message tells the truth about what "ใช่" will save.
+
 **Every photo in a batch is read, not just the first** (PLAN.md 17.81). Sending five receipts at
 once used to log one and drop four in silence. The rule that caused it was justified by "five
 confirmations answered one by one", which this codebase never required — `promptTransactionCreate`

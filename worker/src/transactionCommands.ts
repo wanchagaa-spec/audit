@@ -10,7 +10,13 @@ import type { TransactionDraft } from "./chatEngine.ts";
 import { buildBudgetStatusLines } from "./budgetCommands.ts";
 import { categoryLabel, formatBaht } from "./commands.ts";
 import { appendTransaction, deleteMostRecentTransaction, readAllTransactions } from "./sheets.ts";
-import { setPendingConfirmation, type ActionCtx, type TransactionAttribution } from "./state.ts";
+import {
+  getPendingConfirmation,
+  setPendingConfirmation,
+  type ActionCtx,
+  type PendingConfirmation,
+  type TransactionAttribution,
+} from "./state.ts";
 import { bangkokDateKey } from "./thaiDate.ts";
 
 type Handler = (ctx: ActionCtx) => Promise<string>;
@@ -57,20 +63,76 @@ export async function applyTransactionDeleteLast(ctx: ActionCtx): Promise<string
 // from index.ts's handleTextMessage/handleGroupTextMessage right where
 // chatEngine.ts hands back a ready-to-save draft, instead of appending it
 // straight to the sheet the way it used to.
+/**
+ * What the bot is about to drop, when the new question cannot absorb it
+ * (PLAN.md 17.83).
+ *
+ * There is one confirmation slot per person, so asking something new always
+ * ends whatever was still open. That was silent, which is how two receipts
+ * sent seconds apart turned into one saved row and no explanation.
+ */
+function droppedNotice(existing: PendingConfirmation): string {
+  return existing.kind === "transactionCreate"
+    ? `(ยกเลิกคำถามก่อนหน้า ${existing.drafts.length} รายการนะ)`
+    : "(ยกเลิกคำถามก่อนหน้านะ)";
+}
+
 export async function promptTransactionCreate(
   ctx: { kv: KVNamespace; lineUserId: string },
   drafts: TransactionDraft[],
   rawText: string,
   attribution: TransactionAttribution
 ): Promise<string> {
-  await setPendingConfirmation(ctx.kv, ctx.lineUserId, { kind: "transactionCreate", drafts, rawText, attribution });
-  if (drafts.length === 1) {
-    const d = drafts[0];
+  // Two photos sent together do not always arrive together: LINE splits a
+  // multi-image send across separate webhook deliveries whenever it feels
+  // like it, and each delivery is its own batch with its own proposal. With
+  // one confirmation slot per person, the second proposal used to overwrite
+  // the first and "ใช่" saved only the newer one — the older receipt
+  // vanished with nothing said (PLAN.md 17.83). Reported from real use: two
+  // slips, two confirmations, one saved row.
+  //
+  // An unanswered proposal is still an open question — the slot lives ten
+  // minutes and nobody said no to it — so a new one of the same kind joins
+  // it rather than evicting it, and the reply lists every row "ใช่" will
+  // now save.
+  const existing = await getPendingConfirmation(ctx.kv, ctx.lineUserId);
+  // Only merged when it is the same person's. Attribution is stored once for
+  // the whole pending set (group mode records who logged each row), so
+  // folding another member's proposal in would file their spending under the
+  // first person's name.
+  const mergeable =
+    existing?.kind === "transactionCreate" && existing.attribution.addedBy === attribution.addedBy
+      ? existing
+      : null;
+  const allDrafts = mergeable ? [...mergeable.drafts, ...drafts] : drafts;
+  const allRawText = mergeable ? `${mergeable.rawText} + ${rawText}` : rawText;
+  const dropped = existing && !mergeable ? droppedNotice(existing) : "";
+
+  await setPendingConfirmation(ctx.kv, ctx.lineUserId, {
+    kind: "transactionCreate",
+    drafts: allDrafts,
+    rawText: allRawText,
+    attribution,
+  });
+  if (allDrafts.length === 1) {
+    const d = allDrafts[0];
     const verb = d.type === "income" ? "รายรับ" : "รายจ่าย";
     const noteSuffix = d.note ? ` ("${d.note}")` : "";
-    return `จะบันทึก${verb} ${formatBaht(d.amount)} บาท หมวด ${categoryLabel(d.categoryId)}${noteSuffix} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`;
+    return [
+      `จะบันทึก${verb} ${formatBaht(d.amount)} บาท หมวด ${categoryLabel(d.categoryId)}${noteSuffix} ใช่ไหม? (พิมพ์ "ใช่" เพื่อยืนยัน)`,
+      dropped,
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
   }
-  return [`จะบันทึก ${drafts.length} รายการนี้ ใช่ไหม?`, ...drafts.map(formatDraftLine), '(พิมพ์ "ใช่" เพื่อยืนยัน)'].join("\n");
+  return [
+    `จะบันทึก ${allDrafts.length} รายการนี้ ใช่ไหม?`,
+    ...allDrafts.map(formatDraftLine),
+    '(พิมพ์ "ใช่" เพื่อยืนยัน)',
+    dropped,
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
 }
 
 export async function applyTransactionCreate(

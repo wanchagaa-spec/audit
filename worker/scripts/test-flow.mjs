@@ -3206,6 +3206,112 @@ sheetRows.length = 0;
 
 mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 
+// PLAN.md 17.83, from real use: two slips sent seconds apart came back as
+// two separate confirmations, and "ใช่" saved only the second one. LINE
+// splits a multi-image send across separate webhook deliveries whenever it
+// likes, and each delivery is its own batch — so 17.81's batching never saw
+// them together, and the second proposal evicted the first from the single
+// confirmation slot.
+sheetRows.length = 0;
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin).catch(() => undefined);
+receiptReadingById.clear();
+receiptReadingById.set("split-a", { kind: "expense", amount: 125, merchant: "นาย สมคิด", categoryId: "other-expense" });
+receiptReadingById.set("split-b", { kind: "expense", amount: 279, merchant: "ออร์ก้า ชาบู", categoryId: "food" });
+await sendPhotos(["split-a"]);
+const secondOfSplit = await sendPhotos(["split-b"]);
+check(
+  "a second proposal joins the first instead of evicting it",
+  secondOfSplit.includes("125") && secondOfSplit.includes("279") && secondOfSplit.includes("2 รายการ")
+);
+// Checked on the list itself, not the whole reply: the line above it echoes
+// the photo just read (279), which is a different thing from the running
+// total of what "ใช่" will save.
+const splitList = secondOfSplit.slice(secondOfSplit.indexOf("จะบันทึก 2 รายการ"));
+check(
+  "listed in the order they were sent, so the list reads against the photos taken",
+  splitList.indexOf("125") < splitList.indexOf("279")
+);
+check("and merging cancels nothing, so it does not claim to", !secondOfSplit.includes("ยกเลิกคำถามก่อนหน้า"));
+const rowsBeforeSplit = sheetRows.length;
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "so one ใช่ saves both receipts, not just the newer one",
+  sheetRows.length === rowsBeforeSplit + 2 &&
+    sheetRows.some((r) => Number(r[3]) === 125) &&
+    sheetRows.some((r) => Number(r[3]) === 279)
+);
+
+// Three arriving one at a time is the same situation, and the running list
+// is what makes it checkable before agreeing to it.
+receiptReadingById.clear();
+receiptReadingById.set("split-c", { kind: "expense", amount: 40, merchant: "ร้านหนึ่ง", categoryId: "food" });
+await sendPhotos(["split-c"]);
+await sendPhotos(["split-c"]);
+const thirdOfSplit = await sendPhotos(["split-c"]);
+check("every proposal so far is listed, so nothing is agreed to unseen", thirdOfSplit.includes("3 รายการ"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+sheetRows.length = 0;
+receiptReadingById.clear();
+
+// Group mode files each row under whoever logged it, and attribution is
+// stored once for the whole pending set — so another member's proposal is
+// replaced rather than folded in, or their spending lands under the first
+// person's name. Called directly: reaching two different senders through the
+// webhook is a lot of scaffolding for one rule.
+const { promptTransactionCreate } = await import("../src/transactionCommands.ts");
+const sharedCtx = { kv: env.ACCOUNTS, lineUserId: "Ugroupmergetest" };
+await promptTransactionCreate(
+  sharedCtx,
+  [{ amount: 11, type: "expense", categoryId: "food", note: "ของเอ" }],
+  "ของเอ 11",
+  { addedBy: "Umember-a", addedByName: "เอ" }
+);
+const sameMember = await promptTransactionCreate(
+  sharedCtx,
+  [{ amount: 22, type: "expense", categoryId: "food", note: "ของเอ อีก" }],
+  "ของเอ อีก 22",
+  { addedBy: "Umember-a", addedByName: "เอ" }
+);
+check("the same member's second entry joins the first", sameMember.includes("2 รายการ"));
+const otherMember = await promptTransactionCreate(
+  sharedCtx,
+  [{ amount: 33, type: "expense", categoryId: "food", note: "ของบี" }],
+  "ของบี 33",
+  { addedBy: "Umember-b", addedByName: "บี" }
+);
+check(
+  "another member's entry replaces rather than being filed under the first person",
+  otherMember.includes("33") && !otherMember.includes("11") && otherMember.includes("ยกเลิกคำถามก่อนหน้า 2 รายการ")
+);
+await env.ACCOUNTS.delete("confirm:Ugroupmergetest");
+
+// Cancelling really does clear it — the merge must not resurrect a set the
+// person already said no to.
+mockReceiptReading = { kind: "expense", amount: 55, merchant: "ร้านสอง", categoryId: "food" };
+const afterCancel = await sendPhoto("after-cancel-1");
+check("a cancelled set is not merged back in", !afterCancel.includes("2 รายการ") && afterCancel.includes("55"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// A typed message already ends whatever was pending on its way past
+// resolvePendingConfirmation, so the silent case is a *photo* landing on an
+// open question of another kind: nothing about a photo goes through that
+// path, and the receipt proposal simply took the slot.
+mockReceiptReading = { kind: "expense", amount: 70, merchant: "ร้านสาม", categoryId: "food" };
+const calendarPrompt = await handleTextMessage(env, lineUserId, "นัดหมอ 20/9/2026 09:00", origin);
+check("(setup) a calendar confirmation is waiting", calendarPrompt.includes("ใช่ไหม"));
+const photoOverCalendar = await sendPhoto("mixed-pending-1");
+check(
+  "a photo landing on another open question says what it ended",
+  photoOverCalendar.includes("70") && photoOverCalendar.includes("ยกเลิกคำถามก่อนหน้า")
+);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+check(
+  "and the calendar event it replaced was never created",
+  !calendarEvents.some((e) => e.summary?.includes("หมอ"))
+);
+sheetRows.length = 0;
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+
 // A trip that is open still wins: that is the behaviour people already rely
 // on, and a photo during a trip belongs to the album.
 await handleTextMessage(env, lineUserId, "เริ่มทริป ทดสอบใบเสร็จ", origin);
