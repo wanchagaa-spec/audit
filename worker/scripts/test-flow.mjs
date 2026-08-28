@@ -119,7 +119,15 @@ let simulateTrashFailureOnce = false; // makes the next trashFile call fail, to 
 let simulateDriveDedupLookupFailure = false; // makes the next findUploadedMessageIds lookup fail, to prove the drain still uploads rather than stalling
 let simulateFolderNameFetchFailure = false; // makes the next Drive folder-name (fields=name) lookup fail, to exercise the not-found-vs-transient-failure distinction
 
+/** quickReply payload of each reply, index-aligned with `replies`. */
+const replyQuickReplies = [];
 const calendarEvents = []; // simulates Google Calendar: {id, summary, start:{dateTime}, end:{dateTime}}
+/** The same instant, written with a +07:00 offset — what Google returns when
+ * the caller asks for timeZone=Asia/Bangkok. */
+function toBangkokOffsetString(dateTime) {
+  const shifted = new Date(new Date(dateTime).getTime() + 7 * 60 * 60 * 1000);
+  return `${shifted.toISOString().slice(0, 19)}+07:00`;
+}
 let calendarIdSeq = 0;
 let simulateInsufficientCalendarScope = false;
 let simulateCalendarApiDisabled = false;
@@ -238,6 +246,9 @@ const geminiRequests = []; // captures {systemInstruction, question, apiKey} per
 const RECEIPT_MARKER = "ระบบอ่านรูปภาษาไทย";
 const receiptRequests = []; // captures {systemInstruction, mimeType, hasImage} per receipt call
 let mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+/** messageId -> reading, for tests that send several photos at once and need
+ * each one read differently. A value of null makes that photo unreadable. */
+const receiptReadingById = new Map();
 let simulateReceiptFailure = false; // one-shot: fails the next receipt read
 const TRANSCRIBE_MARKER = "ระบบถอดเสียงเป็นข้อความภาษาไทย";
 const transcriptionRequests = []; // captures {mimeType, hasAudio, base64Length} per transcription call
@@ -544,6 +555,10 @@ globalThis.fetch = async (url, init = {}) => {
       return new Response(JSON.stringify({ message: "Invalid reply token" }), { status: 400 });
     }
     replies.push(body.messages[0].text);
+    // The buttons LINE renders above the keyboard (PLAN.md 17.82). Kept in a
+    // parallel array so every assertion written against `replies` as plain
+    // strings — nearly a thousand of them — keeps working unchanged.
+    replyQuickReplies.push(body.messages[0].quickReply ?? null);
     return new Response("{}", { status: 200 });
   }
   if (u.includes("api.line.me/v2/bot/message/push")) {
@@ -586,11 +601,20 @@ globalThis.fetch = async (url, init = {}) => {
     // "huge-" is past voice.ts's MAX_AUDIO_BYTES, so it must be refused
     // before the base64 and the upload rather than after.
     const isHuge = u.includes("huge-");
+    // A batch of photos is read with one Gemini call each (PLAN.md 17.81),
+    // and the only thing those calls carry is the image itself — so a test
+    // that wants a *different* reading per photo has to put the messageId
+    // inside the bytes. Only ids registered in receiptReadingById do this,
+    // so every existing test keeps the four-byte payload it was written
+    // against.
+    const messageId = u.slice("https://api-data.line.me/v2/bot/message/".length, -"/content".length);
     const payload = isHuge
       ? new Uint8Array(9 * 1024 * 1024).fill(7)
       : isBig
         ? new Uint8Array(2 * 1024 * 1024).fill(7)
-        : new Uint8Array([1, 2, 3, 4]);
+        : receiptReadingById.has(messageId)
+          ? new TextEncoder().encode(messageId)
+          : new Uint8Array([1, 2, 3, 4]);
     const contentType = isAudio ? "audio/x-m4a" : isVideo ? "video/mp4" : "image/jpeg";
     return new Response(payload.buffer, {
       status: 200,
@@ -783,6 +807,17 @@ globalThis.fetch = async (url, init = {}) => {
           return t >= timeMin && t < timeMax;
         });
         if (keyword) items = items.filter((e) => e.summary.includes(keyword));
+        // Google answers in whatever zone each event carries unless the
+        // caller pins one — and calendar.ts reads the date straight off that
+        // string. Modelled here so a caller that forgets to pin the zone
+        // fails in tests the way it would in Bangkok at 01:00 (PLAN.md 17.81).
+        const wantZone = parsed.searchParams.get("timeZone");
+        if (wantZone === "Asia/Bangkok") {
+          items = items.map((e) => ({
+            ...e,
+            start: { dateTime: toBangkokOffsetString(e.start.dateTime) },
+          }));
+        }
         return new Response(JSON.stringify({ items }), { status: 200 });
       }
       if (init.method === "POST") {
@@ -1112,8 +1147,23 @@ globalThis.fetch = async (url, init = {}) => {
         simulateReceiptFailure = false;
         return new Response("simulated receipt read failure", { status: 500 });
       }
+      // Which photo this call is for, when the test registered one (see the
+      // LINE content mock). Falls back to the single shared reading, which
+      // is what every test written before batches uses.
+      const sentBytes = body.contents?.[0]?.parts?.[0]?.inlineData?.data ?? "";
+      const sentId = (() => {
+        try {
+          return atob(sentBytes);
+        } catch {
+          return "";
+        }
+      })();
+      // has(), not ?? — a registered value of null *is* the instruction
+      // (make this photo unreadable), and ?? would read it as "not set".
+      const reading = receiptReadingById.has(sentId) ? receiptReadingById.get(sentId) : mockReceiptReading;
+      if (reading === null) return new Response("simulated unreadable photo", { status: 500 });
       return new Response(
-        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(mockReceiptReading) }] }, finishReason: "STOP" }] }),
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(reading) }] }, finishReason: "STOP" }] }),
         { status: 200 }
       );
     }
@@ -2065,6 +2115,83 @@ check(
   !pushes.at(-1).text.includes("ค้างอยู่ในคิวอัปโหลด")
 );
 
+// PLAN.md 17.81: today alone gave an 08:00 appointment an hour's notice.
+// Tomorrow rides along in the same Calendar call, inside a message that was
+// going out anyway.
+const briefToday = bangkokDateKey(bangkok0700TodayUtc);
+const briefTomorrow = addDaysToDateKey(briefToday, 1);
+calendarEvents.length = 0;
+calendarEvents.push({
+  id: "brief-today-1",
+  summary: "ประชุมเช้า",
+  start: { dateTime: `${briefToday}T09:00:00+07:00` },
+  end: { dateTime: `${briefToday}T10:00:00+07:00` },
+});
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const todayOnlyBrief = pushes.at(-1).text;
+check("the briefing still lists today's appointments", todayOnlyBrief.includes("ประชุมเช้า"));
+check(
+  "and says nothing about tomorrow when tomorrow is empty",
+  !todayOnlyBrief.includes("พรุ่งนี้")
+);
+
+calendarEvents.push({
+  id: "brief-tomorrow-1",
+  summary: "นัดหมอฟัน",
+  start: { dateTime: `${briefTomorrow}T08:00:00+07:00` },
+  end: { dateTime: `${briefTomorrow}T09:00:00+07:00` },
+});
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const twoDayBrief = pushes.at(-1).text;
+check("tomorrow's appointment is in the briefing a day ahead", twoDayBrief.includes("นัดหมอฟัน"));
+check(
+  "under its own heading, not mixed into today's list",
+  twoDayBrief.indexOf("ประชุมเช้า") < twoDayBrief.indexOf("พรุ่งนี้") &&
+    twoDayBrief.indexOf("พรุ่งนี้") < twoDayBrief.indexOf("นัดหมอฟัน")
+);
+
+// An empty today with a full tomorrow is the case a naive "no events at all"
+// check gets wrong: it would drop the one line worth reading.
+calendarEvents.length = 0;
+calendarEvents.push({
+  id: "brief-tomorrow-only",
+  summary: "นัดตัดไหม",
+  start: { dateTime: `${briefTomorrow}T14:00:00+07:00` },
+  end: { dateTime: `${briefTomorrow}T15:00:00+07:00` },
+});
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const tomorrowOnlyBrief = pushes.at(-1).text;
+check(
+  "a free today with a booked tomorrow still says both",
+  tomorrowOnlyBrief.includes("วันนี้ไม่มีนัด") && tomorrowOnlyBrief.includes("นัดตัดไหม")
+);
+
+// An early-morning appointment stored in UTC is the case the timeZone pin
+// exists for: 19:00Z today is 02:00 tomorrow in Bangkok, so reading the date
+// off an unpinned response files it under "วันนี้" — a whole day early.
+calendarEvents.length = 0;
+calendarEvents.push({
+  id: "brief-utc-1",
+  summary: "นัดเจาะเลือดเช้ามืด",
+  start: { dateTime: `${briefToday}T19:00:00.000Z` },
+  end: { dateTime: `${briefToday}T20:00:00.000Z` },
+});
+await kv.delete("last-broadcast-date");
+await broadcastMorningBriefings(env, env.ACCOUNTS, bangkok0700TodayUtc);
+const utcBrief = pushes.at(-1).text;
+check(
+  "an event stored in UTC is filed by its Bangkok date, not its UTC one",
+  utcBrief.includes("วันนี้ไม่มีนัด") &&
+    utcBrief.indexOf("พรุ่งนี้") < utcBrief.indexOf("นัดเจาะเลือดเช้ามืด")
+);
+
+// The two-day window must not leak into the single-day answers — "นัดวันนี้"
+// asks its own question and has to keep giving today's answer only.
+calendarEvents.length = 0;
+
 // ---- PM2.5 (PLAN.md 17.71) ---------------------------------------------
 // Open-Meteo's air-quality endpoint: the same provider as the weather above,
 // and like it, no API key, no account, no quota. That is the whole reason it
@@ -2663,6 +2790,28 @@ const sendPhoto = async (messageId) => {
   return replies.length > repliesBefore ? replies.at(-1) : "";
 };
 
+const sendPhotos = async (messageIds) => {
+  const rawBody = JSON.stringify({
+    events: messageIds.map((id) => ({
+      type: "message",
+      message: { type: "image", id },
+      source: { type: "user", userId: lineUserId },
+      replyToken: `reply-${id}`,
+      timestamp: Date.now(),
+    })),
+  });
+  const repliesBefore = replies.length;
+  await handleWebhook(
+    new Request("http://localhost:8787/webhook", {
+      method: "POST",
+      headers: { "x-line-signature": await signLineBody(rawBody, env.LINE_CHANNEL_SECRET) },
+      body: rawBody,
+    }),
+    env
+  );
+  return replies.length > repliesBefore ? replies.at(-1) : "";
+};
+
 // No trip open at this point in the run — the trip tests close theirs.
 await handleTextMessage(env, lineUserId, "ปิดทริป", origin).catch(() => undefined);
 receiptRequests.length = 0;
@@ -2677,6 +2826,13 @@ check(
 // number in someone's accounts, and it only protects someone who can see
 // what was read.
 check("and what was read is shown before the confirmation", receiptReply.startsWith("🧾"));
+// A count ("อ่านได้ 1 รูป") would satisfy the line above while losing the
+// thing the echo is for: seeing the total the model actually read, next to
+// the shop it read it from, before agreeing to it (PLAN.md 17.76).
+check(
+  "a single receipt is echoed as what it is, not counted",
+  receiptReply.startsWith("🧾 อ่านใบเสร็จได้ 320 บาท จาก ร้านชาบู")
+);
 check("the image actually reaches Gemini", receiptRequests.length === 1 && receiptRequests[0].hasImage);
 // The instruction is the whole defence against reading the wrong number off
 // a receipt: a Thai receipt carries a subtotal, VAT, a grand total, cash
@@ -2956,6 +3112,97 @@ check(
     parseThaiTime("ไม่รู้") === null &&
     parseThaiTime("99:99") === null
 );
+
+mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
+
+// PLAN.md 17.81: every photo in the batch is read, not just the first. The
+// first-only rule was justified by "five confirmations answered one by one",
+// which promptTransactionCreate never required — it has confirmed an array
+// of drafts in one message since the text path needed it.
+const registerReadings = (entries) => {
+  receiptReadingById.clear();
+  for (const [id, reading] of entries) receiptReadingById.set(id, reading);
+};
+
+sheetRows.length = 0;
+registerReadings([
+  ["multi-a", { kind: "expense", amount: 120, merchant: "ร้านกาแฟ", categoryId: "food" }],
+  ["multi-b", { kind: "expense", amount: 250, merchant: "ร้านยา", categoryId: "health" }],
+  ["multi-c", { kind: "income", amount: 500, merchant: "โอนคืน", categoryId: "other-income" }],
+]);
+const multiReply = await sendPhotos(["multi-a", "multi-b", "multi-c"]);
+check(
+  "three receipts sent at once are all read, not just the first",
+  multiReply.includes("120") && multiReply.includes("250") && multiReply.includes("500")
+);
+check("and are proposed as one confirmation, not three", multiReply.includes("3 รายการ"));
+const rowsBeforeMulti = sheetRows.length;
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming once saves every one of them, on the right side of the ledger",
+  sheetRows.length === rowsBeforeMulti + 3 &&
+    sheetRows.filter((r) => r[2] === "income").length === 1 &&
+    sheetRows.filter((r) => r[2] === "expense").length === 2
+);
+
+// A photo that read as nothing used to disappear without a word — the whole
+// complaint. Whatever else happened has to be said out loud.
+registerReadings([
+  ["mix-a", { kind: "expense", amount: 80, merchant: "ร้านน้ำ", categoryId: "food" }],
+  ["mix-b", null],
+  ["mix-c", { kind: "other", amount: 0, merchant: "", categoryId: "food" }],
+]);
+const mixReply = await sendPhotos(["mix-a", "mix-b", "mix-c"]);
+check("the receipts that did read are still proposed", mixReply.includes("80"));
+check("and the two that did not are counted rather than dropped", mixReply.includes("อ่านไม่ออก 2 รูป"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// One pending slot means a mixed batch has to pick a side. Money wins,
+// because a card can be re-sent on its own and a receipt batch cannot.
+calendarEvents.length = 0;
+registerReadings([
+  ["both-a", { kind: "expense", amount: 90, merchant: "ร้านข้าว", categoryId: "food" }],
+  ["both-b", { kind: "appointment", title: "นัดหมอฟัน", dateKey: "2026-09-15", time: "10:00" }],
+]);
+const bothReply = await sendPhotos(["both-a", "both-b"]);
+check("a mixed batch confirms the money", bothReply.includes("90") && bothReply.includes("ยืนยัน"));
+check("and says the appointment card is still waiting", bothReply.includes("บัตรนัด 1 ใบ"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// Cards on their own: the first goes through the normal calendar confirm,
+// and the rest are named instead of silently ignored.
+registerReadings([
+  ["appt-x", { kind: "appointment", title: "นัดตรวจเลือด", dateKey: "2026-09-15", time: "08:00" }],
+  ["appt-y", { kind: "appointment", title: "นัดกายภาพ", dateKey: "2026-09-16", time: "09:00" }],
+]);
+const apptBatch = await sendPhotos(["appt-x", "appt-y"]);
+check("a batch of cards proposes the first", apptBatch.includes("นัดตรวจเลือด") && apptBatch.includes("ยืนยัน"));
+check("and says how many are left", apptBatch.includes("อีก 1 ใบ"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// Each photo is a Gemini call, so the batch is capped — and the ones past
+// the cap are named, which is the difference between a limit and a bug.
+registerReadings(
+  ["cap-1", "cap-2", "cap-3", "cap-4", "cap-5", "cap-6", "cap-7"].map((id) => [
+    id,
+    { kind: "expense", amount: 10, merchant: "ร้าน", categoryId: "food" },
+  ])
+);
+const capReply = await sendPhotos(["cap-1", "cap-2", "cap-3", "cap-4", "cap-5", "cap-6", "cap-7"]);
+check("a batch past the cap reads five of them", capReply.includes("5 รายการ"));
+check("and says the other two were not read", capReply.includes("อีก 2 รูปยังไม่ได้อ่าน"));
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+
+// Nothing readable at all still gives the one message that tells someone
+// what to do next, not a count of failures.
+registerReadings([["none-a", null], ["none-b", null]]);
+const noneReply = await sendPhotos(["none-a", "none-b"]);
+check(
+  "a batch where nothing could be read says so the way a single photo does",
+  noneReply.includes("อ่านรูปนี้ไม่ออก")
+);
+receiptReadingById.clear();
+sheetRows.length = 0;
 
 mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 
@@ -4007,6 +4254,110 @@ check(
     !replies.at(-1).startsWith("[persona]") &&
     replies.at(-1) === directPersonaReply
 );
+
+// ---- Quick replies (PLAN.md 17.82) --------------------------------------
+//
+// chatEngine has said "เลือกจากปุ่มด้านล่าง" since it was written, and
+// nothing ever rendered a button. These check the buttons are real, and that
+// they follow the pending state rather than the wording of the reply.
+
+const sendWebhookText = async (text, replyToken) => {
+  const body = JSON.stringify({ events: [personalTextEvent(text, replyToken)] });
+  await handleWebhook(
+    new Request("http://localhost:8787/webhook", {
+      method: "POST",
+      headers: { "x-line-signature": await signLineBody(body, env.LINE_CHANNEL_SECRET) },
+      body,
+    }),
+    env
+  );
+  return { text: replies.at(-1), quickReply: replyQuickReplies.at(-1) };
+};
+const buttonTexts = (quickReply) => (quickReply?.items ?? []).map((i) => i.action.text);
+const buttonLabels = (quickReply) => (quickReply?.items ?? []).map((i) => i.action.label);
+
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin).catch(() => undefined);
+const confirmTurn = await sendWebhookText("ค่ากาแฟ 60", "reply-qr-1");
+check(
+  "a confirmation offers ใช่ and ยกเลิก as buttons instead of only asking for typing",
+  buttonTexts(confirmTurn.quickReply).join(",") === "ใช่,ยกเลิก"
+);
+check("with readable labels on them", buttonLabels(confirmTurn.quickReply).every((l) => l.length > 0 && l.length <= 20));
+
+// Pressing a button sends its text, so the button has to send exactly what
+// the confirmation matcher accepts — a label with an emoji on it would not.
+const rowsBeforeButton = sheetRows.length;
+await sendWebhookText("ใช่", "reply-qr-2");
+check("pressing it saves, because the button sends what the matcher accepts", sheetRows.length === rowsBeforeButton + 1);
+// Put the ledger back: a later test compares a month summary against one
+// captured before this point, and an extra 60 baht would fail it for a
+// reason that has nothing to do with what it is testing.
+sheetRows.length = rowsBeforeButton;
+
+// The promise that started all this. An amount with no category asks which
+// one, and now the buttons it points at exist.
+const categoryTurn = await sendWebhookText("100", "reply-qr-3");
+check("the category question really does come with buttons now", (categoryTurn.quickReply?.items ?? []).length > 0);
+check(
+  "one per expense category, sending the name the category matcher reads",
+  buttonTexts(categoryTurn.quickReply).includes("อาหาร/เครื่องดื่ม") &&
+    !buttonTexts(categoryTurn.quickReply).includes("เงินเดือน")
+);
+check(
+  "and every label fits inside LINE's 20-character limit",
+  buttonLabels(categoryTurn.quickReply).every((l) => l.length <= 20)
+);
+const afterCategory = await sendWebhookText("อาหาร/เครื่องดื่ม", "reply-qr-4");
+check(
+  "picking a category moves on to the confirmation, buttons and all",
+  afterCategory.text.includes("100") && buttonTexts(afterCategory.quickReply).join(",") === "ใช่,ยกเลิก"
+);
+await sendWebhookText("ยกเลิก", "reply-qr-5");
+
+// The side of the ledger, and LINE's own limits, checked against the builder
+// directly — reaching an income clarification through the chat flow depends
+// on how the interpreter classifies one particular sentence, which is not
+// what these two are about.
+const { quickRepliesFor } = await import("../src/quickReplies.ts");
+const incomeButtons = quickRepliesFor(null, { kind: "category", amount: 500, type: "income", note: "" });
+check(
+  "an income clarification offers income categories, not expense ones",
+  incomeButtons.map((b) => b.text).includes("เงินเดือน") &&
+    !incomeButtons.map((b) => b.text).includes("อาหาร/เครื่องดื่ม")
+);
+// "📈 ดอกเบี้ย/เงินปันผล" is 21 characters — one over LINE's limit, which
+// rejects the whole message rather than shortening the label itself. A real
+// category, not a hypothetical one.
+check(
+  "labels past LINE's 20-character limit are cut rather than sent",
+  incomeButtons.every((b) => b.label.length <= 20) &&
+    incomeButtons.some((b) => b.text === "ดอกเบี้ย/เงินปันผล" && b.label.length === 20)
+);
+check(
+  "an amount clarification offers nothing — a row of guessed numbers invites a wrong tap",
+  quickRepliesFor(null, { kind: "amount", type: "expense", note: "" }) === undefined
+);
+// Eleven expense categories leaves room today, so the cap is enforced where
+// it can be checked: a 14th item makes LINE reject the whole message, which
+// would turn a cosmetic feature into silence the day someone adds categories.
+const { clampItems } = await import("../src/quickReplies.ts");
+const overflowing = Array.from({ length: 20 }, (_, i) => ({ label: `ปุ่ม ${i}`, text: `${i}` }));
+check(
+  "no more than 13 buttons are ever sent, however many are offered",
+  clampItems(overflowing).length === 13 && clampItems(overflowing)[0].text === "0"
+);
+
+// LINE rejects a quickReply carrying an empty items array, so the key has to
+// be left off entirely rather than sent empty. Checked at the boundary that
+// builds the payload, since nothing upstream can produce an empty list.
+const { replyToLine } = await import("../src/line.ts");
+await replyToLine("reply-qr-empty", "ทดสอบ", env.LINE_CHANNEL_ACCESS_TOKEN, []);
+check("an empty button list is left off the message, not sent as empty", replyQuickReplies.at(-1) === null);
+
+// Nothing pending means no buttons at all. LINE rejects a quickReply with an
+// empty items array, so the key has to be absent rather than empty.
+const plainTurn = await sendWebhookText("สรุปเดือนนี้", "reply-qr-7");
+check("an answer that asks nothing carries no buttons at all", plainTurn.quickReply === null);
 
 // Regression test for a real bug found in review: applyPersona used to
 // trust the styled output unconditionally — if Gemini dropped or reworded

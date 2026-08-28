@@ -117,7 +117,8 @@ import { handleViewCalendarRequest } from "./viewCalendarPage.ts";
 import { buildSettingsLinkReply, buildViewLinkReply, matchSettingsLinkCommand, matchViewLinkCommand } from "./viewCommands.ts";
 import { answerLotteryCheck, answerLotteryResult, matchLotteryCommand } from "./lotteryCommands.ts";
 import { formatBaht } from "./format.ts";
-import { readImage, readLineImage } from "./imageIntent.ts";
+import { readImage, readLineImage, type AppointmentReading, type MoneyReading } from "./imageIntent.ts";
+import { quickRepliesFor } from "./quickReplies.ts";
 import { parseThaiTime } from "./thaiTime.ts";
 import { transcribeVoiceMessage } from "./voice.ts";
 import { handleViewDiaryRequest } from "./viewDiaryPage.ts";
@@ -1527,15 +1528,26 @@ async function replyOrPush(
   // cosmetic loss; "ระบบ AI ตอบไม่ได้ชั่วคราว" is the feature not working.
   options: { skipPersona?: boolean } = {}
 ): Promise<void> {
-  const settings = await getBotSettings(env.ACCOUNTS, subjectIdForSource(event.source));
+  const subjectId = subjectIdForSource(event.source);
+  const settings = await getBotSettings(env.ACCOUNTS, subjectId);
+  // Read *after* the handler has run, so this is the question the bot is
+  // asking now rather than the one it was asked (PLAN.md 17.82). Two KV
+  // reads per outbound message: reads are the plentiful side of the free
+  // plan's quota (100k/day against 1k writes), and this path adds none of
+  // the scarce kind.
+  const [confirmation, clarification] = await Promise.all([
+    getPendingConfirmation(env.ACCOUNTS, subjectId),
+    getPending(env.ACCOUNTS, subjectId),
+  ]);
+  const quickReply = quickRepliesFor(confirmation, clarification);
   const styledText = options.skipPersona
     ? text
     : await applyPersona(text, env.GEMINI_API_KEY, settings, env.ACCOUNTS);
   try {
-    await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
+    await replyToLine(event.replyToken, styledText, env.LINE_CHANNEL_ACCESS_TOKEN, quickReply);
   } catch (err) {
     console.error("line reply failed, falling back to push", err);
-    await pushToLine(pushTargetId(event.source), styledText, env.LINE_CHANNEL_ACCESS_TOKEN);
+    await pushToLine(pushTargetId(event.source), styledText, env.LINE_CHANNEL_ACCESS_TOKEN, quickReply);
   }
 }
 
@@ -1652,12 +1664,15 @@ async function resolveMediaBatchContext(
 }
 
 /**
- * A photo sent with no trip open, read as a receipt (PLAN.md 17.76).
+ * Photos sent with no trip open, read as receipts (PLAN.md 17.76, 17.81).
  *
- * Only ever the first image of a batch. Someone sending five photos at once
- * outside a trip is not filing five expenses — and proposing five
- * confirmations they have to answer one by one would be worse than
- * proposing none.
+ * Every image in the batch is read, not just the first. The first-only rule
+ * this replaced was justified by "proposing five confirmations they have to
+ * answer one by one would be worse than proposing none" — which was never
+ * true of this codebase: promptTransactionCreate has taken an *array* of
+ * drafts and confirmed them in one message since the text path needed it.
+ * The machinery was there; this layer just wasn't reaching it, and four of
+ * five receipts vanished with nothing said about them.
  *
  * The reading is echoed back above the confirmation, for the same reason the
  * voice transcript is (PLAN.md 17.74): the confirm step is the last thing
@@ -1668,6 +1683,11 @@ async function resolveMediaBatchContext(
  * could not be read, and a failed lookup alike. They mean the same thing to
  * the person holding the phone, and distinguishing them would only invite a
  * retry of a photo that will fail the same way. */
+/** Each photo is its own Gemini call, so a batch is a bill as well as a wait.
+ * Five is more receipts than one shopping trip produces, and the ones past it
+ * are named in the reply rather than dropped. */
+const MAX_RECEIPTS_PER_BATCH = 5;
+
 const UNREADABLE_PHOTO_MESSAGE =
   'อ่านรูปนี้ไม่ออกนะ ส่งใบเสร็จ สลิปโอนเงิน หรือบัตรนัดมาได้ · ถ้าจะจดเองก็พิมพ์ได้ เช่น "ค่ากาแฟ 60" · ถ้าจะเก็บรูปเข้าอัลบั้ม พิมพ์ "เริ่มทริป <ชื่อ>" ก่อน';
 
@@ -1678,20 +1698,76 @@ async function handlePhotoAsReceipt(
   origin: string
 ): Promise<string> {
   const subjectId = subjectIdForSource(events[0].source);
-  const firstImage = events.find(isImageMessageEvent);
-  if (!firstImage) {
+  const images = events.filter(isImageMessageEvent);
+  if (images.length === 0) {
     return 'ยังไม่ได้เริ่มทริปอยู่เลย พิมพ์ "เริ่มทริป <ชื่อ>" ก่อนนะ แล้วค่อยส่งคลิปตามมาได้เลย';
   }
+  const batch = images.slice(0, MAX_RECEIPTS_PER_BATCH);
+  const overflow = images.length - batch.length;
   try {
-    const media = await readLineImage(firstImage.message.id, env.LINE_CHANNEL_ACCESS_TOKEN);
-    if (!media) return UNREADABLE_PHOTO_MESSAGE;
-    const reading = await readImage(media, env.GEMINI_API_KEY, env.ACCOUNTS);
-    if (!reading) return UNREADABLE_PHOTO_MESSAGE;
+    // One Gemini call per photo, run together rather than one after another:
+    // five sequential reads is most of a minute of staring at a phone.
+    const readings = await Promise.all(
+      batch.map(async (image) => {
+        try {
+          const media = await readLineImage(image.message.id, env.LINE_CHANNEL_ACCESS_TOKEN);
+          if (!media) return null;
+          return await readImage(media, env.GEMINI_API_KEY, env.ACCOUNTS);
+        } catch (err) {
+          // One unreadable photo must not take down the others it was sent
+          // with — the same allSettled reasoning gmail.ts's listRecentEmails
+          // uses for a message that vanishes mid-read.
+          console.error("handlePhotoAsReceipt: reading one photo failed, skipping it", err);
+          return null;
+        }
+      })
+    );
+    const money = readings.filter((r): r is MoneyReading => r?.kind === "expense" || r?.kind === "income");
+    const appointments = readings.filter((r): r is AppointmentReading => r?.kind === "appointment");
+    const unreadable = readings.filter((r) => r === null).length;
+
+    // Said whatever else happened. Photos that quietly did nothing were the
+    // whole complaint: four of five receipts used to disappear in silence.
+    const leftovers: string[] = [];
+    if (overflow > 0) leftovers.push(`อีก ${overflow} รูปยังไม่ได้อ่าน ส่งตามมาอีกรอบได้`);
+    if (unreadable > 0) leftovers.push(`อ่านไม่ออก ${unreadable} รูป`);
+    const withLeftovers = (body: string, extra: string[] = []) =>
+      [body, ...extra, ...leftovers].filter((s) => s !== "").join("\n");
 
     // Every branch below ends in the ordinary confirm step for whatever it
     // read, so a photo is a way of *filling in* an existing feature rather
     // than a feature of its own with its own rules.
-    if (reading.kind === "appointment") {
+    if (money.length > 0) {
+      // Money wins a mixed batch: there is one pending slot, and the
+      // appointment path is the one that can be redone a card at a time.
+      const apptNote =
+        appointments.length > 0 ? [`📅 มีบัตรนัด ${appointments.length} ใบด้วย ส่งมาทีละใบนะ`] : [];
+      const drafts = money.map((r) => ({
+        amount: r.amount,
+        type: r.kind,
+        categoryId: r.categoryId,
+        note: r.merchant || (r.kind === "income" ? "เงินเข้า" : "ใบเสร็จ"),
+      }));
+      const prompt = await promptTransactionCreate(
+        { kv: env.ACCOUNTS, lineUserId: subjectId },
+        drafts,
+        `(รูป) ${drafts.map((d) => `${d.note} ${d.amount}`).join(", ")}`,
+        // Personal mode only — handlePhotoAsReceipt is reached behind an
+        // `!isGroup` guard, so there is no group member to resolve.
+        { addedBy: subjectId, addedByName: "LINE" }
+      );
+      // promptTransactionCreate already lists every draft when there is more
+      // than one, so echoing the reading above it would only say it twice.
+      if (drafts.length > 1) return withLeftovers(`🧾 อ่านได้ ${drafts.length} รูป\n\n${prompt}`, apptNote);
+      const only = money[0];
+      const label = only.kind === "income" ? "💰 อ่านสลิปเงินเข้าได้" : "🧾 อ่านใบเสร็จได้";
+      const from = only.merchant ? ` จาก ${only.merchant}` : "";
+      return withLeftovers(`${label} ${formatBaht(only.amount)} บาท${from}\n\n${prompt}`, apptNote);
+    }
+
+    if (appointments.length > 0) {
+      const reading = appointments[0];
+      const rest = appointments.length > 1 ? [`📅 อีก ${appointments.length - 1} ใบส่งตามมาทีละใบนะ`] : [];
       // Everything but the time was legible, so ask for the one missing
       // piece instead of throwing the whole card away (PLAN.md 17.80).
       // Refusing here made someone retype a subject and a date the bot had
@@ -1702,7 +1778,10 @@ async function handlePhotoAsReceipt(
           title: reading.title,
           dateKey: reading.dateKey,
         });
-        return `📅 อ่านบัตรนัดได้: ${reading.title} วันที่ ${formatThaiDateLabel(reading.dateKey)}\nแต่อ่านเวลานัดไม่ออก นัดกี่โมงคะ? (ตอบเช่น "09:30" หรือ "บ่าย 2")`;
+        return withLeftovers(
+          `📅 อ่านบัตรนัดได้: ${reading.title} วันที่ ${formatThaiDateLabel(reading.dateKey)}\nแต่อ่านเวลานัดไม่ออก นัดกี่โมงคะ? (ตอบเช่น "09:30" หรือ "บ่าย 2")`,
+          rest
+        );
       }
       const prompt = await withFreshAccessToken(env, link.refreshToken, (accessToken) =>
         promptCalendarCreateFromDraft(makeActionCtxFactory(env, subjectId, link, origin)(accessToken), {
@@ -1711,22 +1790,10 @@ async function handlePhotoAsReceipt(
           time: reading.time,
         })
       );
-      return `📅 อ่านบัตรนัดได้: ${reading.title}\n\n${prompt}`;
+      return withLeftovers(`📅 อ่านบัตรนัดได้: ${reading.title}\n\n${prompt}`, rest);
     }
 
-    const isIncome = reading.kind === "income";
-    const note = reading.merchant || (isIncome ? "เงินเข้า" : "ใบเสร็จ");
-    const prompt = await promptTransactionCreate(
-      { kv: env.ACCOUNTS, lineUserId: subjectId },
-      [{ amount: reading.amount, type: isIncome ? "income" : "expense", categoryId: reading.categoryId, note }],
-      `(รูป) ${note} ${reading.amount}`,
-      // Personal mode only — handlePhotoAsReceipt is reached behind an
-      // `!isGroup` guard, so there is no group member to resolve.
-      { addedBy: subjectId, addedByName: "LINE" }
-    );
-    const label = isIncome ? "💰 อ่านสลิปเงินเข้าได้" : "🧾 อ่านใบเสร็จได้";
-    const from = reading.merchant ? ` จาก ${reading.merchant}` : "";
-    return `${label} ${formatBaht(reading.amount)} บาท${from}\n\n${prompt}`;
+    return UNREADABLE_PHOTO_MESSAGE;
   } catch (err) {
     console.error("handlePhotoAsReceipt failed", err);
     return UNREADABLE_PHOTO_MESSAGE;

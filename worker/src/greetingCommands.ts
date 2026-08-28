@@ -248,16 +248,43 @@ const ACCOUNT_LINK_PREFIX = "link:";
 // that one line, exactly like weather/news above, never blocking the rest
 // of the broadcast for that user.
 
+/**
+ * Today's appointments, and tomorrow's when there are any (PLAN.md 17.81).
+ *
+ * Today alone gave an 08:00 appointment an hour's notice — too late to move
+ * a shift, refill a prescription or find the card. Tomorrow costs nothing
+ * extra: it is the same single Calendar call with the window one day wider,
+ * inside a message that was going out regardless, the same trade that made
+ * the bill and budget lines affordable (PLAN.md 17.59, 17.61).
+ *
+ * The tomorrow block is omitted entirely when it is empty. "พรุ่งนี้ไม่มีนัด"
+ * every single morning is a line people stop reading, which costs the
+ * today block its readership too.
+ */
 async function buildTodayCalendarLine(accessToken: string, today: string): Promise<string> {
+  const tomorrow = addDaysToDateKey(today, 1);
   try {
     const events = await listCalendarEvents(
       accessToken,
       bangkokStartOfDayIso(today),
-      bangkokStartOfDayIso(addDaysToDateKey(today, 1))
+      bangkokStartOfDayIso(addDaysToDateKey(today, 2))
     );
-    if (events.length === 0) return "📅 วันนี้ไม่มีนัดเลยนะ";
-    const lines = events.map((e) => `${e.time || "-"} ${e.title}`);
-    return ["📅 นัดวันนี้:", ...lines].join("\n");
+    // listCalendarEvents spans two days now, so each event has to be placed
+    // rather than assumed to be today's — the bug this split exists to avoid
+    // is tomorrow's dentist appearing under "นัดวันนี้".
+    const todayEvents = events.filter((e) => e.dateKey === today);
+    const tomorrowEvents = events.filter((e) => e.dateKey === tomorrow);
+    const format = (e: { time: string; title: string }) => `${e.time || "-"} ${e.title}`;
+    const blocks: string[] = [];
+    blocks.push(
+      todayEvents.length === 0
+        ? "📅 วันนี้ไม่มีนัดเลยนะ"
+        : ["📅 นัดวันนี้:", ...todayEvents.map(format)].join("\n")
+    );
+    if (tomorrowEvents.length > 0) {
+      blocks.push(["🔜 พรุ่งนี้:", ...tomorrowEvents.map(format)].join("\n"));
+    }
+    return blocks.join("\n");
   } catch (err) {
     console.error("buildTodayCalendarLine failed", err);
     return "";
