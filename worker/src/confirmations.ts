@@ -90,6 +90,22 @@ export async function resolveConfirmation(
   pending: PendingConfirmation
 ): Promise<string | null> {
   if (!isAffirmative(text)) {
+    // A money draft is *not* dropped here (PLAN.md 17.84). Two expenses
+    // typed one after the other used to lose the first one silently: the
+    // second message is not an answer, so this cleared the draft before
+    // promptTransactionCreate could merge it (17.83), and "ใช่" saved only
+    // the newer one. The same loss the two-slips report was about, reached
+    // by typing — and by voice, which arrives here as text.
+    //
+    // Left in place instead, so the money path downstream can absorb it.
+    // Whoever asked for it is responsible for clearing it if the message
+    // turns out to be about something else — see finalizeDeferredDraft in
+    // index.ts, which is what stops a forgotten draft from being confirmed
+    // by a later stray "ใช่".
+    //
+    // An explicit "ยกเลิก" is still a real answer and still clears: the
+    // person said no.
+    if (pending.kind === "transactionCreate" && !isExplicitCancel(text)) return null;
     await setPendingConfirmation(ctx.kv, ctx.lineUserId, null);
     return null;
   }

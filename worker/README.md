@@ -1511,6 +1511,20 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
   treats as impossible. A real category from the *other* side of the ledger is rejected the same
   way: an income reading filed under "food" is as impossible as an invented one.
 
+**A money draft outlives a message that was not an answer** (PLAN.md 17.84). The same loss as
+17.83, reached by typing instead of by photo: a second expense is not an answer to "ใช่ไหม?", so
+the draft was cleared before 17.83's merge could see it, and "ใช่" saved only the newer one. Voice
+notes are affected too — they arrive as text.
+
+- **Only money drafts are carried, and only until the end of that message.** Everything else is
+  still cleared on a non-answer, which is what stops an appointment nobody remembers proposing from
+  being created by a stray "ใช่" three messages later. `finalizeDeferredDraft` wraps both text
+  handlers and ends the draft, saying how many rows it dropped, if nothing absorbed it.
+- **"ยกเลิก" still clears immediately** — that is a real answer, not a change of subject.
+- **Whether anything absorbed it is a JSON comparison** against what was left in the slot: a merge
+  lengthens the drafts and a replacement changes the kind, so byte-identical means untouched. No
+  extra persisted field, and no second copy of the rule to drift.
+
 **A new proposal joins the pending one instead of evicting it** (PLAN.md 17.83). There is one
 confirmation slot per person, and `setPendingConfirmation` overwrote it blindly — so two slips sent
 seconds apart produced two confirmations, and "ใช่" saved only the second. 17.81's batching cannot

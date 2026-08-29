@@ -3312,6 +3312,68 @@ check(
 sheetRows.length = 0;
 mockReceiptReading = { kind: "expense", amount: 320, merchant: "ร้านชาบู", categoryId: "food" };
 
+// PLAN.md 17.84: the same loss as the two-slips report, reached by typing.
+// A second expense is not an answer to "ใช่ไหม?", so confirmations.ts used
+// to clear the first draft before 17.83's merge could see it.
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin).catch(() => undefined);
+sheetRows.length = 0;
+await handleTextMessage(env, lineUserId, "ค่ากาแฟ 60", origin);
+const typedSecond = await handleTextMessage(env, lineUserId, "ค่าข้าว 120", origin);
+check(
+  "a second expense typed before confirming joins the first instead of replacing it",
+  typedSecond.includes("60") && typedSecond.includes("120") && typedSecond.includes("2 รายการ")
+);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "so one ใช่ saves both, the way it already does for two photos",
+  sheetRows.length === 2 && sheetRows.some((r) => Number(r[3]) === 60) && sheetRows.some((r) => Number(r[3]) === 120)
+);
+sheetRows.length = 0;
+
+// The rule that kept the old behaviour honest still has to hold: a draft
+// nobody answered must not survive to be confirmed by a stray "ใช่" three
+// messages later.
+await handleTextMessage(env, lineUserId, "ค่าน้ำ 20", origin);
+const unrelated = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+check("an unrelated message ends the draft and says it did", unrelated.includes("ยกเลิกคำถามก่อนหน้า 1 รายการ"));
+const strayYes = await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "so a later ใช่ has nothing left to confirm",
+  sheetRows.length === 0 && !strayYes.includes("บันทึกรายจ่าย 20")
+);
+
+// "ยกเลิก" is a real answer, not a change of subject — it must still clear
+// immediately rather than being carried forward into the next expense.
+await handleTextMessage(env, lineUserId, "ค่าไฟ 900", origin);
+const explicitCancelReply = await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+check("cancelling says so plainly", explicitCancelReply.includes("ยกเลิกแล้ว"));
+// "ยกเลิก" answers the question, so there is nothing left over to report —
+// carrying it forward and then cleaning it up would tack a second, confusing
+// "(ยกเลิกคำถามก่อนหน้า …)" onto a reply that already said exactly that.
+check("and says it once, not twice", !explicitCancelReply.includes("คำถามก่อนหน้า"));
+const afterExplicitCancel = await handleTextMessage(env, lineUserId, "ค่าขนม 25", origin);
+check(
+  "and a cancelled draft is not merged into the next one",
+  afterExplicitCancel.includes("25") && !afterExplicitCancel.includes("900")
+);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+sheetRows.length = 0;
+
+// Only money drafts are carried. Everything else must still be dropped by
+// the message that failed to answer it — this is the danger the original
+// clear-on-any-non-answer rule existed for, and it has to survive: an
+// appointment nobody remembers proposing must not be created by a stray
+// "ใช่" three messages later.
+calendarEvents.length = 0;
+const apptPrompt = await handleTextMessage(env, lineUserId, "นัดหมอฟัน 22/9/2026 10:00", origin);
+check("(setup) an appointment is waiting to be confirmed", apptPrompt.includes("ใช่ไหม"));
+await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "a forgotten appointment is not created by a later stray ใช่",
+  !calendarEvents.some((e) => e.summary?.includes("หมอฟัน"))
+);
+
 // A trip that is open still wins: that is the behaviour people already rely
 // on, and a photo during a trip belongs to the album.
 await handleTextMessage(env, lineUserId, "เริ่มทริป ทดสอบใบเสร็จ", origin);
@@ -4324,6 +4386,11 @@ function personalTextEvent(text, replyToken = "reply-persona-1") {
   };
 }
 
+// These three compare replies byte-for-byte, so they need a clean slate: a
+// money draft left open by an earlier test now adds a
+// "(ยกเลิกคำถามก่อนหน้า …)" line to the first unrelated answer (PLAN.md
+// 17.84), which is correct behaviour and would break the comparison.
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin).catch(() => undefined);
 const directPersonaReply = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
 check(
   "a direct handleTextMessage call is never persona-styled — stays exact deterministic text",
@@ -7059,6 +7126,21 @@ check(
   "the logged row is attributed to the actual sender, not a generic group label",
   loggedGroupRow[7] === groupSenderA && loggedGroupRow[8] === "สมชาย"
 );
+
+// Group mode goes through its own handler, so it needs its own cleanup or a
+// forgotten draft lives there forever (PLAN.md 17.84).
+const groupRowsBeforeCarry = sheetRows.length;
+await handleGroupTextMessage(env, groupId, groupSenderA, "ค่ากาแฟ 30", origin);
+const groupSecondEntry = await handleGroupTextMessage(env, groupId, groupSenderA, "ค่าข้าว 45", origin);
+check(
+  "a second expense from the same member joins the first in group mode too",
+  groupSecondEntry.includes("30") && groupSecondEntry.includes("45")
+);
+const groupUnrelated = await handleGroupTextMessage(env, groupId, groupSenderA, "สรุปเดือนนี้", origin);
+check("and an unrelated message ends it, in group mode as well", groupUnrelated.includes("ยกเลิกคำถามก่อนหน้า"));
+await handleGroupTextMessage(env, groupId, groupSenderA, "ใช่", origin);
+check("so nothing is saved by the ใช่ that follows", sheetRows.length === groupRowsBeforeCarry);
+await handleGroupTextMessage(env, groupId, groupSenderA, "ยกเลิก", origin).catch(() => undefined);
 
 // 4. A pending clarification is shared by the whole group — sender A asks
 // the question, sender B (a different person) answers it, and it still
