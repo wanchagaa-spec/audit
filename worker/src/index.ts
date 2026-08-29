@@ -92,9 +92,11 @@ import {
   getPendingConfirmation,
   setAccountLink,
   setPending,
+  setPendingConfirmation,
   type AccountLink,
   type ActionCtx,
   type ActiveTrip,
+  type PendingConfirmation,
   type TransactionAttribution,
 } from "./state.ts";
 import { applyPersona } from "./persona.ts";
@@ -445,12 +447,22 @@ async function resolvePendingConfirmation(
   link: AccountLink,
   text: string,
   origin: string,
-  tokenCache: TokenCache | undefined
+  tokenCache: TokenCache | undefined,
+  // Filled in with a money draft that was left in place rather than cleared,
+  // so the caller can clear it if nothing downstream absorbed it.
+  deferred?: { pending: PendingConfirmation | null }
 ): Promise<string | null> {
   const actionCtx = makeActionCtxFactory(env, subjectId, link, origin);
   try {
     const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, subjectId);
     if (!pendingConfirmation) return null;
+    // Recorded before resolveConfirmation runs, because that is where the
+    // decision to keep a money draft alive is made (PLAN.md 17.84). The
+    // caller has to finish the job: this draft is now outliving the message
+    // that failed to answer it. Which kinds are actually kept is
+    // finalizeDeferredDraft's call alone — a second copy of that rule here
+    // would be one that could drift out of step with it.
+    if (deferred) deferred.pending = pendingConfirmation;
     const reply = await withFreshAccessToken(
       env,
       link.refreshToken,
@@ -1044,12 +1056,53 @@ async function dropStaleAmountClarification(
   return null;
 }
 
+/**
+ * Clears a money draft that survived a message which turned out not to be
+ * about money (PLAN.md 17.84).
+ *
+ * confirmations.ts stops clearing a `transactionCreate` draft when the reply
+ * is not an answer, so that another expense in the next message can be
+ * merged into it instead of replacing it. Everything else still has to end
+ * it — otherwise "จะบันทึก 60 บาท ใช่ไหม?", three unrelated messages, and a
+ * stray "ใช่" would save a draft nobody remembers proposing.
+ *
+ * Whether anything absorbed it is decided by comparing the slot with what
+ * was left there. A merge appends drafts and a replacement changes the kind,
+ * so byte-identical means untouched — no extra field to persist, and no way
+ * for the two to disagree.
+ */
+async function finalizeDeferredDraft(
+  kv: KVNamespace,
+  subjectId: string,
+  deferred: PendingConfirmation | null,
+  reply: string
+): Promise<string> {
+  if (deferred?.kind !== "transactionCreate") return reply;
+  const still = await getPendingConfirmation(kv, subjectId);
+  if (!still || JSON.stringify(still) !== JSON.stringify(deferred)) return reply;
+  await setPendingConfirmation(kv, subjectId, null);
+  return `${reply}\n(ยกเลิกคำถามก่อนหน้า ${deferred.drafts.length} รายการนะ)`;
+}
+
 export async function handleTextMessage(
   env: Env,
   lineUserId: string,
   text: string,
   origin: string,
   tokenCache?: TokenCache
+): Promise<string> {
+  const deferred: { pending: PendingConfirmation | null } = { pending: null };
+  const reply = await handleTextMessageInner(env, lineUserId, text, origin, tokenCache, deferred);
+  return finalizeDeferredDraft(env.ACCOUNTS, lineUserId, deferred.pending, reply);
+}
+
+async function handleTextMessageInner(
+  env: Env,
+  lineUserId: string,
+  text: string,
+  origin: string,
+  tokenCache: TokenCache | undefined,
+  deferred: { pending: PendingConfirmation | null }
 ): Promise<string> {
   const link = await getAccountLink(env.ACCOUNTS, lineUserId);
   if (!link) return buildUnlinkedPrompt(env, lineUserId, origin);
@@ -1060,7 +1113,7 @@ export async function handleTextMessage(
   // where it introduces itself by name.
   const settings = await getBotSettings(env.ACCOUNTS, lineUserId);
 
-  const confirmationReply = await resolvePendingConfirmation(env, lineUserId, link, text, origin, tokenCache);
+  const confirmationReply = await resolvePendingConfirmation(env, lineUserId, link, text, origin, tokenCache, deferred);
   if (confirmationReply !== null) {
     await recordConversationTurn(env, lineUserId, text, confirmationReply);
     return confirmationReply;
@@ -1224,6 +1277,20 @@ export async function handleGroupTextMessage(
   origin: string,
   tokenCache?: TokenCache
 ): Promise<string> {
+  const deferred: { pending: PendingConfirmation | null } = { pending: null };
+  const reply = await handleGroupTextMessageInner(env, groupId, senderUserId, text, origin, tokenCache, deferred);
+  return finalizeDeferredDraft(env.ACCOUNTS, groupSubjectId(groupId), deferred.pending, reply);
+}
+
+async function handleGroupTextMessageInner(
+  env: Env,
+  groupId: string,
+  senderUserId: string | undefined,
+  text: string,
+  origin: string,
+  tokenCache: TokenCache | undefined,
+  deferred: { pending: PendingConfirmation | null }
+): Promise<string> {
   const subjectId = groupSubjectId(groupId);
   const link = await getAccountLink(env.ACCOUNTS, subjectId);
   if (!link) return buildGroupUnlinkedPrompt(env, groupId, origin);
@@ -1231,7 +1298,7 @@ export async function handleGroupTextMessage(
   // The group's shared settings — see the personal-mode call above.
   const settings = await getBotSettings(env.ACCOUNTS, subjectId);
 
-  const confirmationReply = await resolvePendingConfirmation(env, subjectId, link, text, origin, tokenCache);
+  const confirmationReply = await resolvePendingConfirmation(env, subjectId, link, text, origin, tokenCache, deferred);
   if (confirmationReply !== null) {
     await recordConversationTurn(env, subjectId, text, confirmationReply);
     return confirmationReply;
