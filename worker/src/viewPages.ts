@@ -301,13 +301,13 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
           return renderMonth("หมวดไม่ตรงกับประเภทรายการ ยังไม่ได้บันทึกนะ");
         }
 
-        const updated = await updateTransaction(session.accessToken, session.spreadsheetId, id, {
-          date,
-          type,
-          amount,
-          categoryId,
-          note,
-        });
+        const updated = await updateTransaction(
+          session.accessToken,
+          session.spreadsheetId,
+          id,
+          { date, type, amount, categoryId, note },
+          env.ACCOUNTS
+        );
         if (!updated) return renderMonth("ไม่พบรายการนี้แล้ว อาจถูกลบไปก่อนหน้านี้ เลยไม่ได้บันทึก");
         // Changing the date can move a row out of the month being viewed, and
         // it then disappears from this list. Saying where it went beats a

@@ -290,6 +290,14 @@ async function handleTripDuplicates(
 
 const PHOTO_PATH_PREFIX = "/view/photo/";
 
+/** Only the types this page actually shows. Deliberately a prefix check on
+ * two families rather than a list of subtypes: a new camera format should
+ * display, and nothing outside these two should ever be rendered inline. */
+function isRenderableMedia(contentType: string): boolean {
+  const base = contentType.split(";")[0].trim().toLowerCase();
+  return base.startsWith("image/") || base.startsWith("video/");
+}
+
 export async function handleViewPhotoRequest(request: Request, env: Env): Promise<Response> {
   const session = await resolveViewSession(request, env);
   if (session instanceof Response) return session;
@@ -304,7 +312,15 @@ export async function handleViewPhotoRequest(request: Request, env: Env): Promis
     return new Response(file.body, {
       status: 200,
       headers: {
-        "content-type": file.contentType,
+        // Served from the app's own origin, so what this says the bytes are
+        // decides what the browser will run (PLAN.md 17.85). The content type
+        // is Drive's, which is ultimately whatever ended up in the folder —
+        // and the folder is one the person can also write to directly in
+        // Drive. Anything that is not an image or a video is served as a
+        // download rather than rendered, and nosniff stops the browser
+        // second-guessing that.
+        "content-type": isRenderableMedia(file.contentType) ? file.contentType : "application/octet-stream",
+        "x-content-type-options": "nosniff",
         // fileId never changes once uploaded, so caching aggressively is
         // safe — this only helps the same browser/session, not other
         // viewers ("private": not a shared cache like a CDN).

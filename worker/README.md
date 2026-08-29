@@ -1511,6 +1511,26 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
   treats as impossible. A real category from the *other* side of the ledger is rejected the same
   way: an income reading filed under "food" is as impossible as an invented one.
 
+**Editing a transaction's date forgets the remembered month-start rows** (PLAN.md 17.85). The
+`tx-month-start` hint promises that every row of a month sits at or below the row it names. Moving
+an older row's date into the current month leaves it physically *above* that line, where the window
+never looks — and the boundary check cannot see it either, since that reads only the single row
+directly above the window. The row then disappears from the month summary and from the budget
+totals, silently. Every hint for the book is dropped on a date change; working out exactly which
+months an edit can invalidate is the reasoning that got this wrong to begin with. An edit that
+leaves the date alone keeps the hint, so correcting a typo'd amount stays one windowed read.
+
+**Model-supplied URLs are checked for scheme, not just escaped** (PLAN.md 17.85). Gemini's
+grounding sources were rendered straight into an `href`. Escaping stops the attribute being broken
+out of and says nothing about `javascript:`, which is a script the reader runs by tapping it, on a
+page holding a live view token. Non-http(s) sources are shown as plain text instead — still
+evidence of what the answer drew on, just not tappable.
+
+**The photo proxy decides what it is serving** (PLAN.md 17.85). `/view/photo/` passed Drive's
+content type through, on the app's own origin; the trip folder is one its owner can also write to
+directly in Drive. Anything that is not `image/*` or `video/*` is now handed over as
+`application/octet-stream` with `nosniff`.
+
 **A money draft outlives a message that was not an answer** (PLAN.md 17.84). The same loss as
 17.83, reached by typing instead of by photo: a second expense is not an answer to "ใช่ไหม?", so
 the draft was cleared before 17.83's merge could see it, and "ใช่" saved only the newer one. Voice
