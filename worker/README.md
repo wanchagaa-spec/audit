@@ -1511,6 +1511,20 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
   treats as impossible. A real category from the *other* side of the ledger is rejected the same
   way: an income reading filed under "food" is as impossible as an invented one.
 
+**The accounts page reads as days, and still summarises as a month** (PLAN.md 17.86). The list was
+one long undated run of rows that repeated the date on every line and never said what a day came
+to. Rows are now grouped under a heading per day, newest first, each heading carrying that day's
+own totals — the number someone scrolling a day's rows is adding up anyway. The month cards above
+(income/expense/balance and top categories) are untouched.
+
+- **The per-row date column is gone**, since the heading says it once. That column was spending
+  width a phone does not have on repeating one thing twenty times.
+- **The date input stays**, moved in beside the note on the row being edited. Moving an entry to
+  another day is a real correction — a receipt logged the next morning — and the point of an
+  editable row is that every field it shows can be wrong.
+- **Days are sorted by their own date, not by sheet order.** Editing a row's date moves it between
+  days without moving it in the sheet; that is the same mismatch 17.85 was about.
+
 **Editing a transaction's date forgets the remembered month-start rows** (PLAN.md 17.85). The
 `tx-month-start` hint promises that every row of a month sits at or below the row it names. Moving
 an older row's date into the current month leaves it physically *above* that line, where the window

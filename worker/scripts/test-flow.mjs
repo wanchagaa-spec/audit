@@ -10045,6 +10045,57 @@ check(
   !listPage.includes('name="amount"') && !listPage.includes('name="op" value="update"')
 );
 
+// PLAN.md 17.86: the month reads as days. Asked for directly — the flat list
+// repeated the date on every row and never said what a given day came to.
+sheetRows.push(
+  ["tx-yesterday-1", addDaysToDateKey(editToday, -1), "expense", 210, "food", "ข้าวเย็น", "ข้าวเย็น 210", "unknown", "", `${addDaysToDateKey(editToday, -1)}T12:00:00.000Z`],
+  ["tx-yesterday-2", addDaysToDateKey(editToday, -1), "income", 1000, "other-income", "ได้คืน", "ได้คืน 1000", "unknown", "", `${addDaysToDateKey(editToday, -1)}T13:00:00.000Z`]
+);
+const dayGroupedPage = await (await worker.fetch(new Request(accountsUrl), env, new FakeExecutionContext())).text();
+// Read from the headings alone. Today's date also appears in the page
+// subtitle ("ข้อมูลล่าสุด ณ …") and a +1,000 income row prints its own signed
+// amount, so a whole-page search would pass on text that has nothing to do
+// with day grouping — which is exactly what it did on the first attempt.
+const dayHeadings = [...dayGroupedPage.matchAll(/<div class="day-heading">([\s\S]*?)<\/div>/g)].map((m) => m[1]);
+check(
+  "the month's rows are grouped under a heading per day",
+  dayHeadings.length === 2 &&
+    dayHeadings[0].includes(formatThaiDateLabel(editToday)) &&
+    dayHeadings[1].includes(formatThaiDateLabel(addDaysToDateKey(editToday, -1)))
+);
+check(
+  "newest day first, however the rows happen to sit in the sheet",
+  dayHeadings[0].includes(formatThaiDateLabel(editToday))
+);
+// The number someone scrolling a day's rows is adding up in their head.
+check(
+  "each day carries its own totals, both sides of the ledger",
+  dayHeadings[0].includes("-730") &&
+    !dayHeadings[0].includes("+") &&
+    dayHeadings[1].includes("-210") &&
+    dayHeadings[1].includes("+1,000")
+);
+// The month summary above is unchanged — that was the explicit ask.
+check(
+  "and the month totals above are still the month's, not a day's",
+  dayGroupedPage.includes(">940<") || dayGroupedPage.includes("940")
+);
+// The date is said once per day now, not once per row.
+check(
+  "the per-row date column is gone, since the heading says it",
+  (dayGroupedPage.match(new RegExp(`<td>${editToday}</td>`, "g")) ?? []).length === 0
+);
+// Editing still has to be able to move a row to another day — the date
+// input moved in with the note rather than disappearing with the column.
+const dayEditPage = await (await worker.fetch(
+  new Request(`${accountsUrl}&edit=tx-typo`), env, new FakeExecutionContext()
+)).text();
+check(
+  "a row opened for editing can still be moved to another date",
+  dayEditPage.includes('type="date" name="date"') && dayEditPage.includes(`value="${editToday}"`)
+);
+sheetRows.length = 3;
+
 const editingPage = await (await worker.fetch(
   new Request(`${accountsUrl}&edit=tx-typo`), env, new FakeExecutionContext()
 )).text();
