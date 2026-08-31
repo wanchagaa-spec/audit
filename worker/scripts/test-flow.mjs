@@ -7617,6 +7617,90 @@ check(
   replies.length === repliesBeforeStillUnmentioned
 );
 
+// PLAN.md 17.87: the substring search has no word boundary to anchor on —
+// Thai does not write spaces between words — so a one- or two-character bot
+// name sits inside a large share of ordinary sentences. Naming the bot "ก"
+// had it answer nearly every message in the group, a Gemini call each, with
+// nothing to say why.
+const groupSubject = `group:${groupId}`;
+const savedGroupSettings = env.ACCOUNTS.store.get(`settings:${groupSubject}`);
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "ก", botCharacter: "สั้นมาก" }));
+const shortNameBody = JSON.stringify({ events: [groupTextEvent({ text: "พรุ่งนี้ไปกินข้าวกันไหม", replyToken: "reply-group-shortname" })] });
+const repliesBeforeShortName = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(shortNameBody, env.LINE_CHANNEL_SECRET) },
+    body: shortNameBody,
+  }),
+  env
+);
+check(
+  "a one-character bot name does not turn every group message into an address",
+  replies.length === repliesBeforeShortName
+);
+// Two characters is the case that actually bites in Thai: "ไป" is inside a
+// great many ordinary sentences, this one included.
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "ไป", botCharacter: "สั้น" }));
+const twoCharBody = JSON.stringify({ events: [groupTextEvent({ text: "พรุ่งนี้ไปกินข้าวกันไหม", replyToken: "reply-group-twochar" })] });
+const repliesBeforeTwoChar = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(twoCharBody, env.LINE_CHANNEL_SECRET) },
+    body: twoCharBody,
+  }),
+  env
+);
+check(
+  "a two-character name is not an address either",
+  replies.length === repliesBeforeTwoChar
+);
+// Three is where real Thai nicknames start, and it still has to work.
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "จูน", botCharacter: "สั้น" }));
+const threeCharBody = JSON.stringify({ events: [groupTextEvent({ text: "จูน สรุปเดือนนี้", replyToken: "reply-group-threechar" })] });
+const repliesBeforeThreeChar = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(threeCharBody, env.LINE_CHANNEL_SECRET) },
+    body: threeCharBody,
+  }),
+  env
+);
+check(
+  "a three-character nickname still addresses the bot",
+  replies.length === repliesBeforeThreeChar + 1 && replies.at(-1).includes("รายรับ")
+);
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "ก", botCharacter: "สั้นมาก" }));
+
+// Nothing is taken away: a real @mention still reaches the bot under any
+// name at all. Only the guess is declined.
+const shortNameMentionBody = JSON.stringify({
+  events: [
+    groupTextEvent({
+      text: "@ก สรุปเดือนนี้",
+      mention: { mentionees: [{ index: 0, length: 2, type: "user", isSelf: true }] },
+      replyToken: "reply-group-shortname-mention",
+    }),
+  ],
+});
+const repliesBeforeShortMention = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(shortNameMentionBody, env.LINE_CHANNEL_SECRET) },
+    body: shortNameMentionBody,
+  }),
+  env
+);
+check(
+  "but an @mention still addresses a short-named bot",
+  replies.length === repliesBeforeShortMention + 1 && replies.at(-1).includes("รายรับ")
+);
+if (savedGroupSettings === undefined) await env.ACCOUNTS.delete(`settings:${groupSubject}`);
+else await env.ACCOUNTS.put(`settings:${groupSubject}`, savedGroupSettings);
+
 // 9. The push fallback (used when the reply token has expired) targets the
 // group itself, not any individual member — pushTargetId's whole reason
 // to exist.
@@ -8465,6 +8549,39 @@ check(
 const wipedHtml = await (await postSettings({ action: "confirm-wipe", code: wipeCode })).text();
 check("the right code clears every transaction row", sheetRows.length === 0 && wipedHtml.includes("ล้างรายรับ-รายจ่ายทั้งหมดแล้ว"));
 check("and burns the code so it can't be replayed", (await kv.get(`wipe-code:${lineUserId}`)) === null);
+
+// PLAN.md 17.87: the page promises "รหัสใช้ได้ 15 นาที". Every wrong guess
+// rewrites the record, and KV cannot carry the original expiry across a
+// write — so the deadline lives in the value. Without it, four wrong
+// guesses bought an extra hour on a code that deletes a year of accounts.
+sheetRows.push(["tx-wipe-ttl", bangkokDateKey(), "expense", 30, "food", "ข้าว", "ข้าว 30", "unknown", "", `${bangkokDateKey()}T01:00:00.000Z`]);
+await postSettings({ action: "request-wipe" });
+const ttlChallengeRaw = JSON.parse(await kv.get(`wipe-code:${lineUserId}`));
+check("(setup) the issued code records when it was issued", typeof ttlChallengeRaw.issuedAtMs === "number");
+await kv.put(
+  `wipe-code:${lineUserId}`,
+  JSON.stringify({ ...ttlChallengeRaw, issuedAtMs: Date.now() - 16 * 60 * 1000 })
+);
+const expiredHtml = await (await postSettings({ action: "confirm-wipe", code: ttlChallengeRaw.code })).text();
+check(
+  "a code older than its window is refused even with the right digits, and deletes nothing",
+  expiredHtml.includes("รหัสหมดอายุแล้ว") && sheetRows.length === 1
+);
+// A code emailed just before this shipped has no issue time in it. Treated
+// as live rather than expired: KV's own TTL still bounds it, and refusing it
+// would mean someone mid-flow gets told their fresh code is invalid.
+sheetRows.push(["tx-wipe-legacy", bangkokDateKey(), "expense", 40, "food", "ข้าว", "ข้าว 40", "unknown", "", `${bangkokDateKey()}T01:00:00.000Z`]);
+await kv.put(
+  `wipe-code:${lineUserId}`,
+  JSON.stringify({ code: ttlChallengeRaw.code, email: ttlChallengeRaw.email, attempts: 0 })
+);
+const legacyHtml = await (await postSettings({ action: "confirm-wipe", code: ttlChallengeRaw.code })).text();
+check(
+  "a challenge written before the deadline existed still works",
+  legacyHtml.includes("ล้างรายรับ-รายจ่ายทั้งหมดแล้ว") && sheetRows.length === 0
+);
+sheetRows.length = 0;
+await kv.delete(`wipe-code:${lineUserId}`);
 check(
   "the remembered month-start rows go with it, so nothing points into an emptied sheet",
   (await kv.list({ prefix: "tx-month-start:fake-sheet-id:" })).keys.length === 0

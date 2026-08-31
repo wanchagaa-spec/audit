@@ -1511,6 +1511,22 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
   treats as impossible. A real category from the *other* side of the ledger is rejected the same
   way: an income reading filed under "food" is as impossible as an invented one.
 
+**A bot name shorter than three characters is not used as a group address** (PLAN.md 17.87). With
+no formal @mention, group mode looks for the bot's name as a plain substring — Thai writes no
+spaces between words, so there is no boundary to anchor on. A one- or two-character name sits
+inside a large share of ordinary sentences, and naming the bot "ก" had it answer nearly every
+message in the group, a Gemini call each, with nothing to explain why. The upper bound on the name
+was already considered; this direction was not, and it is the one that misbehaves. Short names are
+not refused — a real @mention still reaches the bot under any name at all. Only the guess is
+declined.
+
+**The data-wipe code expires when it said it would** (PLAN.md 17.87). The settings page promises
+"รหัสใช้ได้ 15 นาที", but every wrong guess rewrote the KV record with a fresh 15-minute TTL, so
+four wrong guesses bought over an hour on the one thing standing between a shared view link and a
+year of transactions. The deadline now travels in the value as `issuedAtMs`, since KV cannot carry
+an original expiry across a write. Challenges written before this still work: KV's own TTL bounds
+them, and refusing one would tell someone mid-flow that their fresh code is invalid.
+
 **The accounts page reads as days, and still summarises as a month** (PLAN.md 17.86). The list was
 one long undated run of rows that repeated the date on every line and never said what a day came
 to. Rows are now grouped under a heading per day, newest first, each heading carrying that day's

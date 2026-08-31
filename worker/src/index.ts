@@ -1973,7 +1973,28 @@ async function verifyAndParseWebhookBody(request: Request, env: Env): Promise<Li
 // stripSelfMention's single-span removal — a message repeating the name
 // keeps any later mentions as ordinary text, which no realistic case relies
 // on stripping.
+/**
+ * Below this, a name is a syllable rather than an address (PLAN.md 17.87).
+ *
+ * The plain-substring search below has no word boundary to anchor on — Thai
+ * does not write spaces between words — so a one- or two-character bot name
+ * is inside a large share of ordinary Thai sentences. Naming the bot "ก"
+ * would have it answer nearly every message in the group, spending a Gemini
+ * call on each, with nothing to tell anyone why. The upper bound on the name
+ * was already thought about (see MAX_BOT_NAME); this direction was not, and
+ * it is the one that misbehaves.
+ *
+ * Three is a judgement call, not a derived number: real Thai nicknames start
+ * about there ("จูน", "มะลิ"), and one or two characters is where the search
+ * stops meaning anything.
+ */
+const MIN_NAME_FOR_SUBSTRING_ADDRESSING = 3;
+
 function stripBotNameMention(text: string, botName: string): string | null {
+  // A short name is not refused — it is just not used as *this* signal. A
+  // real @mention still addresses the bot by any name at all, so nothing is
+  // taken away; an unreliable way of guessing is.
+  if (botName.length < MIN_NAME_FOR_SUBSTRING_ADDRESSING) return null;
   const index = text.indexOf(botName);
   if (index === -1) return null;
   return (text.slice(0, index) + text.slice(index + botName.length)).trim();
