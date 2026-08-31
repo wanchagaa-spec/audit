@@ -92,6 +92,7 @@ function nextDriveId(prefix) {
   driveIdSeq += 1;
   return `${prefix}-${driveIdSeq}`;
 }
+let photoProxyContentType = "image/jpeg"; // what Drive reports for the next photo-proxy fetch
 let simulatePhotoFetchFailure = false; // makes the next Drive file-content (alt=media) request fail, to exercise graceful degradation
 let simulateLotteryFailure = false; // one-shot: fails the next lottery request
 let simulateLotteryGarbage = false; // one-shot: returns a "successful" but empty draw, the shape a broken scrape produces
@@ -645,9 +646,11 @@ globalThis.fetch = async (url, init = {}) => {
       }
       const file = driveUploads.find((f) => f.id === idMatch[1]);
       if (!file) return new Response("not found", { status: 404 });
+      // The folder is one the person can also write to directly in Drive, so
+      // what comes back is not guaranteed to be an image (PLAN.md 17.85).
       return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), {
         status: 200,
-        headers: { "content-type": "image/jpeg" },
+        headers: { "content-type": photoProxyContentType },
       });
     }
 
@@ -1336,6 +1339,9 @@ globalThis.fetch = async (url, init = {}) => {
                 groundingChunks: [
                   { web: { uri: "https://example.com/a", title: "แหล่งข่าว ก" } },
                   { web: { uri: "https://example.com/b", title: "แหล่งข่าว <ข>" } },
+                  // Grounding metadata is model-adjacent data, and this file
+                  // used to put it straight into an href (PLAN.md 17.85).
+                  { web: { uri: "javascript:alert(1)", title: "แหล่งข่าว ค" } },
                 ],
                 webSearchQueries: ["นายกรัฐมนตรีไทยคนปัจจุบัน"],
               },
@@ -6358,6 +6364,13 @@ check(
   "it lists every source the answer drew on, as real links",
   searchPageHtml.includes('href="https://example.com/a"') && searchPageHtml.includes('href="https://example.com/b"')
 );
+// Escaping an href stops the attribute being broken out of; it says nothing
+// about the scheme, and a javascript: URI is a script the reader runs by
+// tapping it — on a page carrying a live view token.
+check(
+  "a source with a non-http scheme is shown but never made tappable",
+  searchPageHtml.includes("แหล่งข่าว ค") && !searchPageHtml.includes("javascript:")
+);
 // The compliance requirement this whole two-surface design exists for:
 // Google's Search Suggestions widget arrives as HTML+CSS and has to be
 // rendered as markup, not printed as text.
@@ -6806,6 +6819,18 @@ check(
   "/view/photo/:fileId proxies the actual image bytes with an image content-type, not a Google token",
   photoResponse.status === 200 && (photoResponse.headers.get("content-type") ?? "").startsWith("image/")
 );
+
+// Served from the app's own origin, so the content type decides what the
+// browser will run. Anything that is not an image or a video is handed over
+// as a download instead of being rendered.
+photoProxyContentType = "text/html";
+const htmlPhotoResponse = await worker.fetch(new Request(`${origin}/view/photo/${tripPhotoFileId}?token=${viewToken}`), env, new FakeExecutionContext());
+check(
+  "a file Drive calls text/html is never served as html from this origin",
+  htmlPhotoResponse.headers.get("content-type") === "application/octet-stream" &&
+    htmlPhotoResponse.headers.get("x-content-type-options") === "nosniff"
+);
+photoProxyContentType = "image/jpeg";
 
 simulatePhotoFetchFailure = true;
 const photoFailureResponse = await worker.fetch(new Request(`${origin}/view/photo/${tripPhotoFileId}?token=${viewToken}`), env, new FakeExecutionContext());
@@ -8242,6 +8267,63 @@ check(
     earlyWindowRows.every((r) => r.date >= `${thisMonth}-01`)
 );
 await kv.delete(`tx-month-start:fake-sheet-id:${thisMonth}`);
+
+// PLAN.md 17.85: the hint promises "every row of this month sits at or below
+// this row". Editing an older row's date into this month breaks that promise
+// from above, where neither the window nor the boundary check can see it —
+// the boundary check reads only the single row directly above the window.
+// Found by review, not by a report: the row simply stopped being counted.
+{
+  const { updateTransaction } = await import("../src/sheets.ts");
+  await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin); // warm the hint
+  const movedRow = sheetRows[0]; // two months ago, well above the boundary row
+  const moved = await updateTransaction(
+    "fake-access-token",
+    "fake-sheet-id",
+    movedRow[0],
+    { date: `${thisMonth}-15`, type: "expense", amount: 9999, categoryId: "food", note: "ย้ายมาเดือนนี้" },
+    kv
+  );
+  check("(setup) the row was edited", moved === true);
+  const afterMove = await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+  // 450 already this month, plus the 9,999 that moved in. The moved amount
+  // never appears on its own — it is folded into the totals, which is exactly
+  // why losing it was invisible.
+  check(
+    "a row edited into this month from above the window is still counted",
+    afterMove.includes("รายจ่าย: 10,449") && afterMove.includes("อาหาร/เครื่องดื่ม: 10,329")
+  );
+  // Put it back so the sections below still see the history they were
+  // written against, and rebuild the hint from the corrected sheet.
+  await updateTransaction(
+    "fake-access-token",
+    "fake-sheet-id",
+    movedRow[0],
+    { date: `${twoMonthsAgo}-05`, type: "income", amount: 30000, categoryId: "salary", note: "เงินเดือน" },
+    kv
+  );
+  await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+
+  // An edit that leaves the date alone cannot move a row across a month
+  // boundary, so throwing the hint away for it would spend a full-tab read
+  // on every correction of a typo'd amount.
+  const inMonthRow = sheetRows[sheetRows.length - 1];
+  await updateTransaction(
+    "fake-access-token",
+    "fake-sheet-id",
+    inMonthRow[0],
+    { date: inMonthRow[1], type: "expense", amount: 130, categoryId: "transport", note: "รถเมล์" },
+    kv
+  );
+  sheetRangesRead.length = 0;
+  sheetsValueReadRequests = 0;
+  await handleTextMessage(env, lineUserId, "สรุปเดือนนี้", origin);
+  check(
+    "an edit that keeps the date keeps the remembered row, and stays one windowed read",
+    sheetsValueReadRequests === 1 && !sheetRangesRead.includes("Transactions!A2:J")
+  );
+}
+
 
 // A week beginning on a Monday spends about four days in thirty straddling
 // two months. Forced here rather than waited for: the window has to open on
@@ -9962,6 +10044,57 @@ check(
   "rows are read-only until one is opened for editing",
   !listPage.includes('name="amount"') && !listPage.includes('name="op" value="update"')
 );
+
+// PLAN.md 17.86: the month reads as days. Asked for directly — the flat list
+// repeated the date on every row and never said what a given day came to.
+sheetRows.push(
+  ["tx-yesterday-1", addDaysToDateKey(editToday, -1), "expense", 210, "food", "ข้าวเย็น", "ข้าวเย็น 210", "unknown", "", `${addDaysToDateKey(editToday, -1)}T12:00:00.000Z`],
+  ["tx-yesterday-2", addDaysToDateKey(editToday, -1), "income", 1000, "other-income", "ได้คืน", "ได้คืน 1000", "unknown", "", `${addDaysToDateKey(editToday, -1)}T13:00:00.000Z`]
+);
+const dayGroupedPage = await (await worker.fetch(new Request(accountsUrl), env, new FakeExecutionContext())).text();
+// Read from the headings alone. Today's date also appears in the page
+// subtitle ("ข้อมูลล่าสุด ณ …") and a +1,000 income row prints its own signed
+// amount, so a whole-page search would pass on text that has nothing to do
+// with day grouping — which is exactly what it did on the first attempt.
+const dayHeadings = [...dayGroupedPage.matchAll(/<div class="day-heading">([\s\S]*?)<\/div>/g)].map((m) => m[1]);
+check(
+  "the month's rows are grouped under a heading per day",
+  dayHeadings.length === 2 &&
+    dayHeadings[0].includes(formatThaiDateLabel(editToday)) &&
+    dayHeadings[1].includes(formatThaiDateLabel(addDaysToDateKey(editToday, -1)))
+);
+check(
+  "newest day first, however the rows happen to sit in the sheet",
+  dayHeadings[0].includes(formatThaiDateLabel(editToday))
+);
+// The number someone scrolling a day's rows is adding up in their head.
+check(
+  "each day carries its own totals, both sides of the ledger",
+  dayHeadings[0].includes("-730") &&
+    !dayHeadings[0].includes("+") &&
+    dayHeadings[1].includes("-210") &&
+    dayHeadings[1].includes("+1,000")
+);
+// The month summary above is unchanged — that was the explicit ask.
+check(
+  "and the month totals above are still the month's, not a day's",
+  dayGroupedPage.includes(">940<") || dayGroupedPage.includes("940")
+);
+// The date is said once per day now, not once per row.
+check(
+  "the per-row date column is gone, since the heading says it",
+  (dayGroupedPage.match(new RegExp(`<td>${editToday}</td>`, "g")) ?? []).length === 0
+);
+// Editing still has to be able to move a row to another day — the date
+// input moved in with the note rather than disappearing with the column.
+const dayEditPage = await (await worker.fetch(
+  new Request(`${accountsUrl}&edit=tx-typo`), env, new FakeExecutionContext()
+)).text();
+check(
+  "a row opened for editing can still be moved to another date",
+  dayEditPage.includes('type="date" name="date"') && dayEditPage.includes(`value="${editToday}"`)
+);
+sheetRows.length = 3;
 
 const editingPage = await (await worker.fetch(
   new Request(`${accountsUrl}&edit=tx-typo`), env, new FakeExecutionContext()

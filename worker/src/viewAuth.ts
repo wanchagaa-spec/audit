@@ -195,6 +195,22 @@ export function pageShell(title: string, bodyHtml: string, nav?: { token: string
      Rows are read-only until one is opened for editing, so the common case
      (looking) stays compact and an accidental tap cannot change a figure. */
   .tx-table td, .tx-table th { vertical-align: middle; }
+  /* Day headings (PLAN.md 17.86): the month's rows read as days rather than
+     one long undated list, and each day carries its own total — the number
+     someone scrolling a day's rows is adding up anyway. Sticky so the day
+     stays named while its rows scroll past. */
+  .day-heading {
+    display: flex; justify-content: space-between; align-items: baseline; gap: .5rem;
+    position: sticky; top: 0; z-index: 1; background: #fff;
+    padding: .45rem 0 .3rem; margin-top: .35rem;
+    border-bottom: 1px solid #eceef1; font-size: .82rem; font-weight: 600; color: #40444b;
+  }
+  .day-heading:first-of-type { margin-top: 0; }
+  .day-total { font-weight: 600; font-size: .8rem; white-space: nowrap; }
+  .day-total .expense { margin-right: .4rem; }
+  /* The date input sits with the note when a row is open for editing, since
+     the day heading owns the date column's old space. */
+  .tx-editing .note input[type="date"] { display: block; margin-bottom: .3rem; }
   .tx-actions { white-space: nowrap; text-align: right; }
   .tx-actions a, .tx-actions button {
     display: inline-block; padding: .25rem .5rem; margin-left: .25rem; border-radius: 6px;

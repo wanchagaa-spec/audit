@@ -1178,7 +1178,8 @@ export async function updateTransaction(
   accessToken: string,
   spreadsheetId: string,
   id: string,
-  updates: TransactionEdit
+  updates: TransactionEdit,
+  kv: KVNamespace
 ): Promise<boolean> {
   const rawRows = await readTransactionRawRows(accessToken, spreadsheetId);
   const rawIndex = rawRows.findIndex((r) => r[0] === id);
@@ -1206,6 +1207,22 @@ export async function updateTransaction(
     method: "PUT",
     body: JSON.stringify({ values }),
   });
+  // A changed date is the one edit that can break what the remembered
+  // month-start row means (PLAN.md 17.85). The hint's whole promise is "every
+  // row of month M sits at or below this row"; moving an old row's date into
+  // M leaves it physically above that line, where the window never looks, and
+  // the boundary check cannot see it either — that check only reads the
+  // single row directly above the window. The row then vanishes from the
+  // month summary and from the budget totals, silently.
+  //
+  // Every hint for this book is dropped rather than just the two months
+  // involved. Working out exactly which hints an edit can invalidate is the
+  // reasoning that got this wrong in the first place, and an edit is rare
+  // enough that one extra list plus a few deletes costs nothing worth saving.
+  if ((existing[1] ?? "") !== updates.date) {
+    const stale = await kv.list({ prefix: `tx-month-start:${spreadsheetId}:` });
+    await Promise.all(stale.keys.map((k) => kv.delete(k.name)));
+  }
   return true;
 }
 

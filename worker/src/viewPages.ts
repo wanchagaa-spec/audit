@@ -149,16 +149,30 @@ ${noticeHtml}
     </table></div>
   </div>`;
 
+  const dayGroupsHtml = groupByDate(recent)
+    .map((day) => {
+      const { income: dayIncome, expense: dayExpense } = totals(day.rows);
+      // What the day cost, next to the day itself. The month totals above
+      // answer "how is the month going"; this answers "what did today (or
+      // that Saturday) come to", which is the question someone scrolling a
+      // list of individual rows is actually adding up in their head.
+      const parts: string[] = [];
+      if (dayExpense > 0) parts.push(`<span class="expense">-${formatBaht(dayExpense)}</span>`);
+      if (dayIncome > 0) parts.push(`<span class="income">+${formatBaht(dayIncome)}</span>`);
+      return `<div class="day-heading"><span>${escapeHtml(formatThaiDateLabel(day.date))}</span><span class="day-total">${parts.join(" ")}</span></div>
+    <div class="table-scroll"><table class="data-table tx-table">
+      <tbody>
+        ${day.rows.map((r) => (r.id === editId ? renderEditingRow(token, month, r) : renderReadOnlyRow(token, month, r))).join("\n")}
+      </tbody>
+    </table></div>`;
+    })
+    .join("\n");
+
   const recentHtml = `<div class="card">
     <h2>รายการเดือน ${escapeHtml(month)}</h2>
     <p class="subtitle">${editId ? 'แก้ไขแถวที่เลือกแล้วกด "บันทึก"' : 'กด "แก้" ท้ายแถวเพื่อแก้ไข'}</p>
     ${editId ? `<form id="tx-edit" method="post" action="${accountsUrl(token, month)}"><input type="hidden" name="op" value="update" /><input type="hidden" name="id" value="${escapeHtml(editId)}" /></form>` : ""}
-    <div class="table-scroll"><table class="data-table tx-table">
-      <thead><tr><th>วันที่</th><th>หมวด</th><th>รายการ</th><th class="num">จำนวนเงิน</th><th></th></tr></thead>
-      <tbody>
-        ${recent.map((r) => (r.id === editId ? renderEditingRow(token, month, r) : renderReadOnlyRow(token, month, r))).join("\n")}
-      </tbody>
-    </table></div>
+    ${dayGroupsHtml}
   </div>`;
 
   return pageShell(
@@ -174,6 +188,28 @@ ${recentHtml}
   );
 }
 
+/**
+ * The month's rows split into days, newest day first (PLAN.md 17.86).
+ *
+ * Grouped from the list rather than sorted into it: `rows` arrives in the
+ * order the caller wants entries to read *within* a day (newest first), and
+ * only the days themselves need ordering. Days are sorted by their own key
+ * rather than trusting sheet order, because editing a row's date moves it
+ * between days without moving it in the sheet — the same mismatch that
+ * PLAN.md 17.85 was about.
+ */
+function groupByDate(rows: TransactionRow[]): Array<{ date: string; rows: TransactionRow[] }> {
+  const byDate = new Map<string, TransactionRow[]>();
+  for (const row of rows) {
+    const existing = byDate.get(row.date);
+    if (existing) existing.push(row);
+    else byDate.set(row.date, [row]);
+  }
+  return [...byDate.entries()]
+    .map(([date, dayRows]) => ({ date, rows: dayRows }))
+    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+}
+
 /** A normal row: values, then the two actions at the end of the line.
  *
  * Read-only until "แก้" is pressed, rather than every row being a live input
@@ -187,8 +223,10 @@ function renderReadOnlyRow(token: string, month: string, r: TransactionRow): str
   const cls = r.type === "income" ? "income" : "expense";
   const editUrl = `${accountsUrl(token, month)}&edit=${encodeURIComponent(r.id)}`;
   const confirmUrl = `${accountsUrl(token, month)}&confirmDelete=${encodeURIComponent(r.id)}`;
+  // No date cell: the day heading above the table carries it (PLAN.md
+  // 17.86), and repeating it on every row spent a column that a phone does
+  // not have to spare on saying the same thing twenty times.
   return `<tr>
-    <td>${escapeHtml(r.date)}</td>
     <td>${escapeHtml(categoryLabel(r.categoryId))}</td>
     <td class="note">${label}</td>
     <td class="num ${cls}">${sign}${formatBaht(r.amount)}</td>
@@ -210,10 +248,13 @@ function renderReadOnlyRow(token: string, month: string, r: TransactionRow): str
  */
 function renderEditingRow(token: string, month: string, r: TransactionRow): string {
   const cls = r.type === "income" ? "income" : "expense";
+  // The date input moves in with the note rather than disappearing with the
+  // date column: moving a row to another day is a real correction (a receipt
+  // logged the morning after), and the whole point of the row being editable
+  // is that every field it shows can be wrong.
   return `<tr class="tx-editing">
-    <td><input form="tx-edit" type="date" name="date" value="${escapeHtml(r.date)}" /></td>
     <td><select form="tx-edit" name="categoryId">${categoryOptions(r.categoryId, r.type)}</select></td>
-    <td class="note"><input form="tx-edit" type="text" name="note" value="${escapeHtml(r.note)}" placeholder="รายละเอียด" /></td>
+    <td class="note"><input form="tx-edit" type="date" name="date" value="${escapeHtml(r.date)}" /><input form="tx-edit" type="text" name="note" value="${escapeHtml(r.note)}" placeholder="รายละเอียด" /></td>
     <td class="num"><input form="tx-edit" class="tx-amount ${cls}" type="number" name="amount" step="0.01" min="0" value="${r.amount}" inputmode="decimal" /></td>
     <td class="tx-actions">
       <input form="tx-edit" type="hidden" name="type" value="${escapeHtml(r.type)}" />
@@ -301,13 +342,13 @@ export async function handleViewAccountsRequest(request: Request, env: Env): Pro
           return renderMonth("หมวดไม่ตรงกับประเภทรายการ ยังไม่ได้บันทึกนะ");
         }
 
-        const updated = await updateTransaction(session.accessToken, session.spreadsheetId, id, {
-          date,
-          type,
-          amount,
-          categoryId,
-          note,
-        });
+        const updated = await updateTransaction(
+          session.accessToken,
+          session.spreadsheetId,
+          id,
+          { date, type, amount, categoryId, note },
+          env.ACCOUNTS
+        );
         if (!updated) return renderMonth("ไม่พบรายการนี้แล้ว อาจถูกลบไปก่อนหน้านี้ เลยไม่ได้บันทึก");
         // Changing the date can move a row out of the month being viewed, and
         // it then disappears from this list. Saying where it went beats a

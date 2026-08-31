@@ -38,15 +38,36 @@ function renderAnswerHtml(answer: string): string {
     .join("");
 }
 
+/**
+ * A source link is only rendered as a link when it is http(s) (PLAN.md 17.85).
+ *
+ * These URIs come from Gemini's grounding metadata, which is model-adjacent
+ * data this file was rendering straight into an `href`. Escaping stops the
+ * attribute being broken out of; it does nothing about the *scheme*, and a
+ * `javascript:` URI in an href is a script the reader runs by tapping it —
+ * on a page that holds a live view token. Everywhere else in this codebase
+ * model output is checked rather than trusted (validateIntent, the category
+ * and amount guards); this was the one place it was not.
+ */
+function isHttpUrl(value: string): boolean {
+  try {
+    const scheme = new URL(value).protocol;
+    return scheme === "http:" || scheme === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function renderSourcesHtml(result: StoredSearchResult): string {
   if (result.sources.length === 0) return "";
   const items = result.sources
-    .map(
-      (source) =>
-        `<li><a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(
-          source.title || source.uri
-        )}</a></li>`
-    )
+    .map((source) => {
+      const label = escapeHtml(source.title || source.uri);
+      // Kept visible rather than dropped: the citation is still evidence of
+      // what the answer was built on, it just is not something to tap.
+      if (!isHttpUrl(source.uri)) return `<li>${label}</li>`;
+      return `<li><a href="${escapeHtml(source.uri)}" target="_blank" rel="noopener noreferrer">${label}</a></li>`;
+    })
     .join("");
   return `<div class="card"><h2>แหล่งอ้างอิง</h2><ol class="source-list">${items}</ol></div>`;
 }
