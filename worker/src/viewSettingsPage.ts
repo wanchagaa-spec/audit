@@ -48,6 +48,12 @@ interface WipeChallenge {
   code: string;
   email: string;
   attempts: number;
+  /** When the code was emailed. A wrong guess rewrites this record, and KV
+   * has no way to keep the original expiry across a write — so the deadline
+   * is carried in the value and enforced here (PLAN.md 17.87). Without it,
+   * each wrong guess bought another fifteen minutes, and the page's own
+   * promise of "รหัสใช้ได้ 15 นาที" quietly meant up to an hour. */
+  issuedAtMs?: number;
 }
 
 function wipeKey(subjectId: string): string {
@@ -57,11 +63,18 @@ function wipeKey(subjectId: string): string {
 async function getWipeChallenge(kv: KVNamespace, subjectId: string): Promise<WipeChallenge | null> {
   const raw = await kv.get(wipeKey(subjectId));
   if (!raw) return null;
+  let challenge: WipeChallenge;
   try {
-    return JSON.parse(raw) as WipeChallenge;
+    challenge = JSON.parse(raw) as WipeChallenge;
   } catch {
     return null;
   }
+  // A challenge written before this shipped has no issue time. Treated as
+  // live rather than expired: KV's own TTL still bounds it, and the worst
+  // case is one code that behaves the way it used to for a few more minutes.
+  if (challenge.issuedAtMs === undefined) return challenge;
+  if (Date.now() - challenge.issuedAtMs > WIPE_CODE_TTL_SECONDS * 1000) return null;
+  return challenge;
 }
 
 /** Six digits from crypto.getRandomValues rather than Math.random — this is
@@ -290,7 +303,7 @@ async function handleRequestWipe(
   // no way forward but waiting out the TTL.
   await env.ACCOUNTS.put(
     wipeKey(session.lineUserId),
-    JSON.stringify({ code, email, attempts: 0 } satisfies WipeChallenge),
+    JSON.stringify({ code, email, attempts: 0, issuedAtMs: Date.now() } satisfies WipeChallenge),
     { expirationTtl: WIPE_CODE_TTL_SECONDS }
   );
   return { pendingWipeEmail: email, notice: `ส่งรหัสยืนยันไปที่ ${maskEmail(email)} แล้ว` };

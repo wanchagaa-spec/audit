@@ -3380,6 +3380,89 @@ check(
   !calendarEvents.some((e) => e.summary?.includes("หมอฟัน"))
 );
 
+// PLAN.md 17.88: 17.84 kept a money draft alive so the next message could
+// merge into it, and ended it with a notice when nothing did. It missed the
+// case where a question of a *different* kind takes the slot — the draft is
+// just as gone, and was going quietly, which is the one thing 17.84 existed
+// to stop.
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin).catch(() => undefined);
+sheetRows.length = 0;
+calendarEvents.length = 0;
+await handleTextMessage(env, lineUserId, "ค่าน้ำ 45", origin);
+const replacedByCalendar = await handleTextMessage(env, lineUserId, "นัดหมอ 25/9/2026 10:00", origin);
+check(
+  "a money draft replaced by another kind of question is said out loud",
+  replacedByCalendar.includes("ยกเลิกคำถามก่อนหน้า 1 รายการ")
+);
+// The new question is what the person just asked for, so it stays.
+check("and the new question is still the one waiting", replacedByCalendar.includes("จะสร้างนัด"));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming answers the new question, not the dropped draft",
+  calendarEvents.length === 1 && sheetRows.length === 0
+);
+calendarEvents.length = 0;
+
+// Merging must stay silent — nothing was cancelled, so claiming otherwise
+// would be a second kind of lie.
+await handleTextMessage(env, lineUserId, "ค่าน้ำ 45", origin);
+const mergedQuietly = await handleTextMessage(env, lineUserId, "ค่าไฟ 60", origin);
+check(
+  "a second money entry still merges without claiming anything was cancelled",
+  mergedQuietly.includes("2 รายการ") && !mergedQuietly.includes("ยกเลิกคำถามก่อนหน้า")
+);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+sheetRows.length = 0;
+
+// PLAN.md 17.89: the window counted turns and never looked at their size. A
+// reply can be 5,000 characters, and the whole window is pasted into the
+// interpreter's system instruction on every later message — eight long
+// replies left 24 KB going out on each call, on a free tier this bot has
+// already run out of once.
+{
+  const { appendConversationTurn, getConversationHistory, formatHistoryForPrompt } = await import(
+    "../src/conversationHistory.ts"
+  );
+  const historyProbeId = "Uhistorysizetest";
+  for (let i = 0; i < 8; i++) {
+    // Both sides are clipped: a pasted block or a long voice transcript
+    // arrives on the user side and costs exactly as much in the prompt.
+    await appendConversationTurn(
+      env.ACCOUNTS,
+      historyProbeId,
+      i === 0 ? "ถามยาว " + "ข".repeat(4000) : "หนังใหม่",
+      `เรื่องที่ ${i} ` + "ก".repeat(4000)
+    );
+  }
+  const historyTurns = await getConversationHistory(env.ACCOUNTS, historyProbeId);
+  check(
+    "a long reply is stored clipped, so the window cannot grow without bound",
+    historyTurns.length === 12 && historyTurns.every((t) => t.text.length <= 501)
+  );
+  // What actually matters is the size of the thing sent to Gemini every time.
+  check(
+    "the whole window stays small enough to paste into every prompt",
+    formatHistoryForPrompt(historyTurns).length < 6500
+  );
+  // Clipping must keep the front of the turn — that is where "เพิ่มอีก 20",
+  // a pronoun, or the subject of a follow-up lives.
+  check(
+    "the front of each turn survives, which is the part follow-ups refer to",
+    historyTurns.some((t) => t.text.startsWith("เรื่องที่ 7 ")) &&
+      historyTurns.some((t) => t.text === "หนังใหม่")
+  );
+  // Re-run on its own so the long user turn is still inside the window.
+  const userSideId = "Uhistoryusertest";
+  await appendConversationTurn(env.ACCOUNTS, userSideId, "ถามยาว " + "ข".repeat(4000), "ตอบสั้น");
+  const userSideTurns = await getConversationHistory(env.ACCOUNTS, userSideId);
+  check(
+    "a long message from the user is clipped too, not just the bot's reply",
+    userSideTurns[0].text.length <= 501 && userSideTurns[0].text.startsWith("ถามยาว ")
+  );
+  await env.ACCOUNTS.delete(`history:${userSideId}`);
+  await env.ACCOUNTS.delete(`history:${historyProbeId}`);
+}
+
 // A trip that is open still wins: that is the behaviour people already rely
 // on, and a photo during a trip belongs to the album.
 await handleTextMessage(env, lineUserId, "เริ่มทริป ทดสอบใบเสร็จ", origin);
@@ -7617,6 +7700,90 @@ check(
   replies.length === repliesBeforeStillUnmentioned
 );
 
+// PLAN.md 17.87: the substring search has no word boundary to anchor on —
+// Thai does not write spaces between words — so a one- or two-character bot
+// name sits inside a large share of ordinary sentences. Naming the bot "ก"
+// had it answer nearly every message in the group, a Gemini call each, with
+// nothing to say why.
+const groupSubject = `group:${groupId}`;
+const savedGroupSettings = env.ACCOUNTS.store.get(`settings:${groupSubject}`);
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "ก", botCharacter: "สั้นมาก" }));
+const shortNameBody = JSON.stringify({ events: [groupTextEvent({ text: "พรุ่งนี้ไปกินข้าวกันไหม", replyToken: "reply-group-shortname" })] });
+const repliesBeforeShortName = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(shortNameBody, env.LINE_CHANNEL_SECRET) },
+    body: shortNameBody,
+  }),
+  env
+);
+check(
+  "a one-character bot name does not turn every group message into an address",
+  replies.length === repliesBeforeShortName
+);
+// Two characters is the case that actually bites in Thai: "ไป" is inside a
+// great many ordinary sentences, this one included.
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "ไป", botCharacter: "สั้น" }));
+const twoCharBody = JSON.stringify({ events: [groupTextEvent({ text: "พรุ่งนี้ไปกินข้าวกันไหม", replyToken: "reply-group-twochar" })] });
+const repliesBeforeTwoChar = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(twoCharBody, env.LINE_CHANNEL_SECRET) },
+    body: twoCharBody,
+  }),
+  env
+);
+check(
+  "a two-character name is not an address either",
+  replies.length === repliesBeforeTwoChar
+);
+// Three is where real Thai nicknames start, and it still has to work.
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "จูน", botCharacter: "สั้น" }));
+const threeCharBody = JSON.stringify({ events: [groupTextEvent({ text: "จูน สรุปเดือนนี้", replyToken: "reply-group-threechar" })] });
+const repliesBeforeThreeChar = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(threeCharBody, env.LINE_CHANNEL_SECRET) },
+    body: threeCharBody,
+  }),
+  env
+);
+check(
+  "a three-character nickname still addresses the bot",
+  replies.length === repliesBeforeThreeChar + 1 && replies.at(-1).includes("รายรับ")
+);
+await env.ACCOUNTS.put(`settings:${groupSubject}`, JSON.stringify({ botName: "ก", botCharacter: "สั้นมาก" }));
+
+// Nothing is taken away: a real @mention still reaches the bot under any
+// name at all. Only the guess is declined.
+const shortNameMentionBody = JSON.stringify({
+  events: [
+    groupTextEvent({
+      text: "@ก สรุปเดือนนี้",
+      mention: { mentionees: [{ index: 0, length: 2, type: "user", isSelf: true }] },
+      replyToken: "reply-group-shortname-mention",
+    }),
+  ],
+});
+const repliesBeforeShortMention = replies.length;
+await handleWebhook(
+  new Request("http://localhost:8787/webhook", {
+    method: "POST",
+    headers: { "x-line-signature": await signLineBody(shortNameMentionBody, env.LINE_CHANNEL_SECRET) },
+    body: shortNameMentionBody,
+  }),
+  env
+);
+check(
+  "but an @mention still addresses a short-named bot",
+  replies.length === repliesBeforeShortMention + 1 && replies.at(-1).includes("รายรับ")
+);
+if (savedGroupSettings === undefined) await env.ACCOUNTS.delete(`settings:${groupSubject}`);
+else await env.ACCOUNTS.put(`settings:${groupSubject}`, savedGroupSettings);
+
 // 9. The push fallback (used when the reply token has expired) targets the
 // group itself, not any individual member — pushTargetId's whole reason
 // to exist.
@@ -8332,7 +8499,18 @@ const { bangkokWeekdayIndex } = await import("../src/thaiDate.ts");
 const weekStart = addDaysToDateKey(bangkokDateKey(), -bangkokWeekdayIndex());
 if (weekStart.slice(0, 7) !== thisMonth) {
   const weekSummary = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
-  check("a week that began last month reads from last month's window", weekSummary.includes("450"));
+  // Derived from the sheet, not hardcoded. This branch only runs on about
+  // four days in thirty, so a literal written against one day's fixture rots
+  // unnoticed until a month boundary lands on a test run — which is exactly
+  // what happened (PLAN.md 17.88). The rest of this file already derives its
+  // expected figures for the same reason.
+  const weekExpense = sheetRows
+    .filter((r) => r[2] === "expense" && String(r[1]) >= weekStart && String(r[1]) <= bangkokDateKey())
+    .reduce((sum, r) => sum + Number(r[3]), 0);
+  check(
+    "a week that began last month reads from last month's window",
+    weekExpense > 0 && weekSummary.includes(weekExpense.toLocaleString("th-TH", { maximumFractionDigits: 2 }))
+  );
 } else {
   // Simulate it: put a row on the week's start date, then re-ask with a week
   // that reaches back before the 1st.
@@ -8465,6 +8643,39 @@ check(
 const wipedHtml = await (await postSettings({ action: "confirm-wipe", code: wipeCode })).text();
 check("the right code clears every transaction row", sheetRows.length === 0 && wipedHtml.includes("ล้างรายรับ-รายจ่ายทั้งหมดแล้ว"));
 check("and burns the code so it can't be replayed", (await kv.get(`wipe-code:${lineUserId}`)) === null);
+
+// PLAN.md 17.87: the page promises "รหัสใช้ได้ 15 นาที". Every wrong guess
+// rewrites the record, and KV cannot carry the original expiry across a
+// write — so the deadline lives in the value. Without it, four wrong
+// guesses bought an extra hour on a code that deletes a year of accounts.
+sheetRows.push(["tx-wipe-ttl", bangkokDateKey(), "expense", 30, "food", "ข้าว", "ข้าว 30", "unknown", "", `${bangkokDateKey()}T01:00:00.000Z`]);
+await postSettings({ action: "request-wipe" });
+const ttlChallengeRaw = JSON.parse(await kv.get(`wipe-code:${lineUserId}`));
+check("(setup) the issued code records when it was issued", typeof ttlChallengeRaw.issuedAtMs === "number");
+await kv.put(
+  `wipe-code:${lineUserId}`,
+  JSON.stringify({ ...ttlChallengeRaw, issuedAtMs: Date.now() - 16 * 60 * 1000 })
+);
+const expiredHtml = await (await postSettings({ action: "confirm-wipe", code: ttlChallengeRaw.code })).text();
+check(
+  "a code older than its window is refused even with the right digits, and deletes nothing",
+  expiredHtml.includes("รหัสหมดอายุแล้ว") && sheetRows.length === 1
+);
+// A code emailed just before this shipped has no issue time in it. Treated
+// as live rather than expired: KV's own TTL still bounds it, and refusing it
+// would mean someone mid-flow gets told their fresh code is invalid.
+sheetRows.push(["tx-wipe-legacy", bangkokDateKey(), "expense", 40, "food", "ข้าว", "ข้าว 40", "unknown", "", `${bangkokDateKey()}T01:00:00.000Z`]);
+await kv.put(
+  `wipe-code:${lineUserId}`,
+  JSON.stringify({ code: ttlChallengeRaw.code, email: ttlChallengeRaw.email, attempts: 0 })
+);
+const legacyHtml = await (await postSettings({ action: "confirm-wipe", code: ttlChallengeRaw.code })).text();
+check(
+  "a challenge written before the deadline existed still works",
+  legacyHtml.includes("ล้างรายรับ-รายจ่ายทั้งหมดแล้ว") && sheetRows.length === 0
+);
+sheetRows.length = 0;
+await kv.delete(`wipe-code:${lineUserId}`);
 check(
   "the remembered month-start rows go with it, so nothing points into an emptied sheet",
   (await kv.list({ prefix: "tx-month-start:fake-sheet-id:" })).keys.length === 0
@@ -10047,11 +10258,18 @@ check(
 
 // PLAN.md 17.86: the month reads as days. Asked for directly — the flat list
 // repeated the date on every row and never said what a given day came to.
+// A second day *inside the same month*, since the page shows one month at a
+// time. "Yesterday" is the obvious choice and the wrong one: on the 1st it
+// lands in the previous month and the rows simply are not on this page, so
+// the test failed on one day in thirty (PLAN.md 17.88).
+const otherDay = editToday.endsWith("-01") ? addDaysToDateKey(editToday, 1) : addDaysToDateKey(editToday, -1);
+const [newerDay, olderDay] = otherDay > editToday ? [otherDay, editToday] : [editToday, otherDay];
 sheetRows.push(
-  ["tx-yesterday-1", addDaysToDateKey(editToday, -1), "expense", 210, "food", "ข้าวเย็น", "ข้าวเย็น 210", "unknown", "", `${addDaysToDateKey(editToday, -1)}T12:00:00.000Z`],
-  ["tx-yesterday-2", addDaysToDateKey(editToday, -1), "income", 1000, "other-income", "ได้คืน", "ได้คืน 1000", "unknown", "", `${addDaysToDateKey(editToday, -1)}T13:00:00.000Z`]
+  ["tx-otherday-1", otherDay, "expense", 210, "food", "ข้าวเย็น", "ข้าวเย็น 210", "unknown", "", `${otherDay}T12:00:00.000Z`],
+  ["tx-otherday-2", otherDay, "income", 1000, "other-income", "ได้คืน", "ได้คืน 1000", "unknown", "", `${otherDay}T13:00:00.000Z`]
 );
 const dayGroupedPage = await (await worker.fetch(new Request(accountsUrl), env, new FakeExecutionContext())).text();
+
 // Read from the headings alone. Today's date also appears in the page
 // subtitle ("ข้อมูลล่าสุด ณ …") and a +1,000 income row prints its own signed
 // amount, so a whole-page search would pass on text that has nothing to do
@@ -10060,20 +10278,23 @@ const dayHeadings = [...dayGroupedPage.matchAll(/<div class="day-heading">([\s\S
 check(
   "the month's rows are grouped under a heading per day",
   dayHeadings.length === 2 &&
-    dayHeadings[0].includes(formatThaiDateLabel(editToday)) &&
-    dayHeadings[1].includes(formatThaiDateLabel(addDaysToDateKey(editToday, -1)))
+    dayHeadings[0].includes(formatThaiDateLabel(newerDay)) &&
+    dayHeadings[1].includes(formatThaiDateLabel(olderDay))
 );
 check(
   "newest day first, however the rows happen to sit in the sheet",
-  dayHeadings[0].includes(formatThaiDateLabel(editToday))
+  dayHeadings[0].includes(formatThaiDateLabel(newerDay))
 );
 // The number someone scrolling a day's rows is adding up in their head.
+// Looked up by day rather than by position, so the assertion says what it
+// means whichever way round the two days fall.
+const headingFor = (day) => dayHeadings.find((h) => h.includes(formatThaiDateLabel(day))) ?? "";
 check(
   "each day carries its own totals, both sides of the ledger",
-  dayHeadings[0].includes("-730") &&
-    !dayHeadings[0].includes("+") &&
-    dayHeadings[1].includes("-210") &&
-    dayHeadings[1].includes("+1,000")
+  headingFor(editToday).includes("-730") &&
+    !headingFor(editToday).includes("+") &&
+    headingFor(otherDay).includes("-210") &&
+    headingFor(otherDay).includes("+1,000")
 );
 // The month summary above is unchanged — that was the explicit ask.
 check(

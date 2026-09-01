@@ -456,17 +456,10 @@ async function resolvePendingConfirmation(
   try {
     const pendingConfirmation = await getPendingConfirmation(env.ACCOUNTS, subjectId);
     if (!pendingConfirmation) return null;
-    // Recorded before resolveConfirmation runs, because that is where the
-    // decision to keep a money draft alive is made (PLAN.md 17.84). The
-    // caller has to finish the job: this draft is now outliving the message
-    // that failed to answer it. Which kinds are actually kept is
-    // finalizeDeferredDraft's call alone — a second copy of that rule here
-    // would be one that could drift out of step with it.
-    if (deferred) deferred.pending = pendingConfirmation;
     const reply = await withFreshAccessToken(
       env,
       link.refreshToken,
-      (accessToken) => resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation),
+      (accessToken) => resolveConfirmation(actionCtx(accessToken), text, pendingConfirmation, deferred),
       tokenCache
     );
     // null means "not an affirmative reply" — the pending question is
@@ -1079,9 +1072,22 @@ async function finalizeDeferredDraft(
 ): Promise<string> {
   if (deferred?.kind !== "transactionCreate") return reply;
   const still = await getPendingConfirmation(kv, subjectId);
-  if (!still || JSON.stringify(still) !== JSON.stringify(deferred)) return reply;
-  await setPendingConfirmation(kv, subjectId, null);
-  return `${reply}\n(ยกเลิกคำถามก่อนหน้า ${deferred.drafts.length} รายการนะ)`;
+  const dropped = `${reply}\n(ยกเลิกคำถามก่อนหน้า ${deferred.drafts.length} รายการนะ)`;
+
+  // Untouched: nothing absorbed the draft, so this message ends it.
+  if (still && JSON.stringify(still) === JSON.stringify(deferred)) {
+    await setPendingConfirmation(kv, subjectId, null);
+    return dropped;
+  }
+  // Another money proposal holds the slot. It either merged these drafts in
+  // (17.83) or was another person's and said itself what it replaced —
+  // either way there is nothing left for this to add.
+  if (still?.kind === "transactionCreate") return reply;
+  // A question of a different kind took the slot instead — "ค่าน้ำ 45" then
+  // "นัดหมอ พรุ่งนี้ 10:00" — or something else cleared it. The draft is gone
+  // and 17.84's whole point was that it must not go quietly. The new
+  // question stays: it is what the person just asked for (PLAN.md 17.88).
+  return dropped;
 }
 
 export async function handleTextMessage(
@@ -1973,7 +1979,28 @@ async function verifyAndParseWebhookBody(request: Request, env: Env): Promise<Li
 // stripSelfMention's single-span removal — a message repeating the name
 // keeps any later mentions as ordinary text, which no realistic case relies
 // on stripping.
+/**
+ * Below this, a name is a syllable rather than an address (PLAN.md 17.87).
+ *
+ * The plain-substring search below has no word boundary to anchor on — Thai
+ * does not write spaces between words — so a one- or two-character bot name
+ * is inside a large share of ordinary Thai sentences. Naming the bot "ก"
+ * would have it answer nearly every message in the group, spending a Gemini
+ * call on each, with nothing to tell anyone why. The upper bound on the name
+ * was already thought about (see MAX_BOT_NAME); this direction was not, and
+ * it is the one that misbehaves.
+ *
+ * Three is a judgement call, not a derived number: real Thai nicknames start
+ * about there ("จูน", "มะลิ"), and one or two characters is where the search
+ * stops meaning anything.
+ */
+const MIN_NAME_FOR_SUBSTRING_ADDRESSING = 3;
+
 function stripBotNameMention(text: string, botName: string): string | null {
+  // A short name is not refused — it is just not used as *this* signal. A
+  // real @mention still addresses the bot by any name at all, so nothing is
+  // taken away; an unreliable way of guessing is.
+  if (botName.length < MIN_NAME_FOR_SUBSTRING_ADDRESSING) return null;
   const index = text.indexOf(botName);
   if (index === -1) return null;
   return (text.slice(0, index) + text.slice(index + botName.length)).trim();

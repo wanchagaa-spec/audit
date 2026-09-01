@@ -1511,6 +1511,22 @@ during a trip; outside one they got "ยังไม่ได้เริ่ม�
   treats as impossible. A real category from the *other* side of the ledger is rejected the same
   way: an income reading filed under "food" is as impossible as an invented one.
 
+**A bot name shorter than three characters is not used as a group address** (PLAN.md 17.87). With
+no formal @mention, group mode looks for the bot's name as a plain substring — Thai writes no
+spaces between words, so there is no boundary to anchor on. A one- or two-character name sits
+inside a large share of ordinary sentences, and naming the bot "ก" had it answer nearly every
+message in the group, a Gemini call each, with nothing to explain why. The upper bound on the name
+was already considered; this direction was not, and it is the one that misbehaves. Short names are
+not refused — a real @mention still reaches the bot under any name at all. Only the guess is
+declined.
+
+**The data-wipe code expires when it said it would** (PLAN.md 17.87). The settings page promises
+"รหัสใช้ได้ 15 นาที", but every wrong guess rewrote the KV record with a fresh 15-minute TTL, so
+four wrong guesses bought over an hour on the one thing standing between a shared view link and a
+year of transactions. The deadline now travels in the value as `issuedAtMs`, since KV cannot carry
+an original expiry across a write. Challenges written before this still work: KV's own TTL bounds
+them, and refusing one would tell someone mid-flow that their fresh code is invalid.
+
 **The accounts page reads as days, and still summarises as a month** (PLAN.md 17.86). The list was
 one long undated run of rows that repeated the date on every line and never said what a day came
 to. Rows are now grouped under a heading per day, newest first, each heading carrying that day's
@@ -1544,6 +1560,23 @@ evidence of what the answer drew on, just not tappable.
 content type through, on the app's own origin; the trip folder is one its owner can also write to
 directly in Drive. Anything that is not `image/*` or `video/*` is now handed over as
 `application/octet-stream` with `nosniff`.
+
+**Conversation history is capped by size, not just by turn count** (PLAN.md 17.89). The window kept
+the last 12 entries and never looked at how big they were — a reply can be 5,000 characters, and
+the whole window is pasted into the interpreter's system instruction on every later message.
+Measured: eight long replies left 24 KB going out on every call, thousands of Thai tokens, on a
+free tier this bot has already exhausted once. Each entry is now clipped to 500 characters, taking
+that 24 KB to 3.3 KB. The front of a turn is what survives, because that is where "เพิ่มอีก 20", a
+pronoun, or the subject of a follow-up lives — not the twentieth line of a film list. Both sides
+are clipped: a pasted block or a long transcript arrives on the user side and costs the same.
+
+**A draft replaced by a different question is announced too** (PLAN.md 17.88). 17.84 kept a money
+draft alive so the next message could merge into it, and ended it with a notice when nothing did —
+but returned silently when a question of another kind took the slot ("ค่าน้ำ 45", then "นัดหมอ
+พรุ่งนี้ 10:00"). The draft was just as gone, and going quietly is the one thing 17.84 existed to
+stop. Silence is now correct in exactly one case: the slot still holds a `transactionCreate`, which
+means it merged or the other person's proposal already said what it replaced. The new question is
+never dropped — it is what the person just asked for.
 
 **A money draft outlives a message that was not an answer** (PLAN.md 17.84). The same loss as
 17.83, reached by typing instead of by photo: a second expense is not an answer to "ใช่ไหม?", so

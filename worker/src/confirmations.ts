@@ -87,7 +87,13 @@ export function isAffirmative(text: string): boolean {
 export async function resolveConfirmation(
   ctx: ActionCtx,
   text: string,
-  pending: PendingConfirmation
+  pending: PendingConfirmation,
+  // Filled in with the draft this function chose to leave in place, so the
+  // caller can finish the job. Recorded here rather than by the caller
+  // because this is where the choice is made — a second copy of the rule
+  // there drifted out of step with this one within a single phase
+  // (PLAN.md 17.88).
+  deferred?: { pending: PendingConfirmation | null }
 ): Promise<string | null> {
   if (!isAffirmative(text)) {
     // A money draft is *not* dropped here (PLAN.md 17.84). Two expenses
@@ -105,7 +111,10 @@ export async function resolveConfirmation(
     //
     // An explicit "ยกเลิก" is still a real answer and still clears: the
     // person said no.
-    if (pending.kind === "transactionCreate" && !isExplicitCancel(text)) return null;
+    if (pending.kind === "transactionCreate" && !isExplicitCancel(text)) {
+      if (deferred) deferred.pending = pending;
+      return null;
+    }
     await setPendingConfirmation(ctx.kv, ctx.lineUserId, null);
     return null;
   }
