@@ -3414,6 +3414,55 @@ check(
 await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
 sheetRows.length = 0;
 
+// PLAN.md 17.89: the window counted turns and never looked at their size. A
+// reply can be 5,000 characters, and the whole window is pasted into the
+// interpreter's system instruction on every later message — eight long
+// replies left 24 KB going out on each call, on a free tier this bot has
+// already run out of once.
+{
+  const { appendConversationTurn, getConversationHistory, formatHistoryForPrompt } = await import(
+    "../src/conversationHistory.ts"
+  );
+  const historyProbeId = "Uhistorysizetest";
+  for (let i = 0; i < 8; i++) {
+    // Both sides are clipped: a pasted block or a long voice transcript
+    // arrives on the user side and costs exactly as much in the prompt.
+    await appendConversationTurn(
+      env.ACCOUNTS,
+      historyProbeId,
+      i === 0 ? "ถามยาว " + "ข".repeat(4000) : "หนังใหม่",
+      `เรื่องที่ ${i} ` + "ก".repeat(4000)
+    );
+  }
+  const historyTurns = await getConversationHistory(env.ACCOUNTS, historyProbeId);
+  check(
+    "a long reply is stored clipped, so the window cannot grow without bound",
+    historyTurns.length === 12 && historyTurns.every((t) => t.text.length <= 501)
+  );
+  // What actually matters is the size of the thing sent to Gemini every time.
+  check(
+    "the whole window stays small enough to paste into every prompt",
+    formatHistoryForPrompt(historyTurns).length < 6500
+  );
+  // Clipping must keep the front of the turn — that is where "เพิ่มอีก 20",
+  // a pronoun, or the subject of a follow-up lives.
+  check(
+    "the front of each turn survives, which is the part follow-ups refer to",
+    historyTurns.some((t) => t.text.startsWith("เรื่องที่ 7 ")) &&
+      historyTurns.some((t) => t.text === "หนังใหม่")
+  );
+  // Re-run on its own so the long user turn is still inside the window.
+  const userSideId = "Uhistoryusertest";
+  await appendConversationTurn(env.ACCOUNTS, userSideId, "ถามยาว " + "ข".repeat(4000), "ตอบสั้น");
+  const userSideTurns = await getConversationHistory(env.ACCOUNTS, userSideId);
+  check(
+    "a long message from the user is clipped too, not just the bot's reply",
+    userSideTurns[0].text.length <= 501 && userSideTurns[0].text.startsWith("ถามยาว ")
+  );
+  await env.ACCOUNTS.delete(`history:${userSideId}`);
+  await env.ACCOUNTS.delete(`history:${historyProbeId}`);
+}
+
 // A trip that is open still wins: that is the behaviour people already rely
 // on, and a photo during a trip belongs to the album.
 await handleTextMessage(env, lineUserId, "เริ่มทริป ทดสอบใบเสร็จ", origin);

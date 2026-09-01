@@ -1561,6 +1561,15 @@ content type through, on the app's own origin; the trip folder is one its owner 
 directly in Drive. Anything that is not `image/*` or `video/*` is now handed over as
 `application/octet-stream` with `nosniff`.
 
+**Conversation history is capped by size, not just by turn count** (PLAN.md 17.89). The window kept
+the last 12 entries and never looked at how big they were — a reply can be 5,000 characters, and
+the whole window is pasted into the interpreter's system instruction on every later message.
+Measured: eight long replies left 24 KB going out on every call, thousands of Thai tokens, on a
+free tier this bot has already exhausted once. Each entry is now clipped to 500 characters, taking
+that 24 KB to 3.3 KB. The front of a turn is what survives, because that is where "เพิ่มอีก 20", a
+pronoun, or the subject of a follow-up lives — not the twentieth line of a film list. Both sides
+are clipped: a pasted block or a long transcript arrives on the user side and costs the same.
+
 **A draft replaced by a different question is announced too** (PLAN.md 17.88). 17.84 kept a money
 draft alive so the next message could merge into it, and ended it with a notice when nothing did —
 but returned silently when a question of another kind took the slot ("ค่าน้ำ 45", then "นัดหมอ
