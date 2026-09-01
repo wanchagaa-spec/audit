@@ -1561,6 +1561,14 @@ content type through, on the app's own origin; the trip folder is one its owner 
 directly in Drive. Anything that is not `image/*` or `video/*` is now handed over as
 `application/octet-stream` with `nosniff`.
 
+**A draft replaced by a different question is announced too** (PLAN.md 17.88). 17.84 kept a money
+draft alive so the next message could merge into it, and ended it with a notice when nothing did —
+but returned silently when a question of another kind took the slot ("ค่าน้ำ 45", then "นัดหมอ
+พรุ่งนี้ 10:00"). The draft was just as gone, and going quietly is the one thing 17.84 existed to
+stop. Silence is now correct in exactly one case: the slot still holds a `transactionCreate`, which
+means it merged or the other person's proposal already said what it replaced. The new question is
+never dropped — it is what the person just asked for.
+
 **A money draft outlives a message that was not an answer** (PLAN.md 17.84). The same loss as
 17.83, reached by typing instead of by photo: a second expense is not an answer to "ใช่ไหม?", so
 the draft was cleared before 17.83's merge could see it, and "ใช่" saved only the newer one. Voice

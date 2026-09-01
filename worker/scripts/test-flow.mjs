@@ -3380,6 +3380,40 @@ check(
   !calendarEvents.some((e) => e.summary?.includes("หมอฟัน"))
 );
 
+// PLAN.md 17.88: 17.84 kept a money draft alive so the next message could
+// merge into it, and ended it with a notice when nothing did. It missed the
+// case where a question of a *different* kind takes the slot — the draft is
+// just as gone, and was going quietly, which is the one thing 17.84 existed
+// to stop.
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin).catch(() => undefined);
+sheetRows.length = 0;
+calendarEvents.length = 0;
+await handleTextMessage(env, lineUserId, "ค่าน้ำ 45", origin);
+const replacedByCalendar = await handleTextMessage(env, lineUserId, "นัดหมอ 25/9/2026 10:00", origin);
+check(
+  "a money draft replaced by another kind of question is said out loud",
+  replacedByCalendar.includes("ยกเลิกคำถามก่อนหน้า 1 รายการ")
+);
+// The new question is what the person just asked for, so it stays.
+check("and the new question is still the one waiting", replacedByCalendar.includes("จะสร้างนัด"));
+await handleTextMessage(env, lineUserId, "ใช่", origin);
+check(
+  "confirming answers the new question, not the dropped draft",
+  calendarEvents.length === 1 && sheetRows.length === 0
+);
+calendarEvents.length = 0;
+
+// Merging must stay silent — nothing was cancelled, so claiming otherwise
+// would be a second kind of lie.
+await handleTextMessage(env, lineUserId, "ค่าน้ำ 45", origin);
+const mergedQuietly = await handleTextMessage(env, lineUserId, "ค่าไฟ 60", origin);
+check(
+  "a second money entry still merges without claiming anything was cancelled",
+  mergedQuietly.includes("2 รายการ") && !mergedQuietly.includes("ยกเลิกคำถามก่อนหน้า")
+);
+await handleTextMessage(env, lineUserId, "ยกเลิก", origin);
+sheetRows.length = 0;
+
 // A trip that is open still wins: that is the behaviour people already rely
 // on, and a photo during a trip belongs to the album.
 await handleTextMessage(env, lineUserId, "เริ่มทริป ทดสอบใบเสร็จ", origin);
@@ -8416,7 +8450,18 @@ const { bangkokWeekdayIndex } = await import("../src/thaiDate.ts");
 const weekStart = addDaysToDateKey(bangkokDateKey(), -bangkokWeekdayIndex());
 if (weekStart.slice(0, 7) !== thisMonth) {
   const weekSummary = await handleTextMessage(env, lineUserId, "สรุปสัปดาห์นี้", origin);
-  check("a week that began last month reads from last month's window", weekSummary.includes("450"));
+  // Derived from the sheet, not hardcoded. This branch only runs on about
+  // four days in thirty, so a literal written against one day's fixture rots
+  // unnoticed until a month boundary lands on a test run — which is exactly
+  // what happened (PLAN.md 17.88). The rest of this file already derives its
+  // expected figures for the same reason.
+  const weekExpense = sheetRows
+    .filter((r) => r[2] === "expense" && String(r[1]) >= weekStart && String(r[1]) <= bangkokDateKey())
+    .reduce((sum, r) => sum + Number(r[3]), 0);
+  check(
+    "a week that began last month reads from last month's window",
+    weekExpense > 0 && weekSummary.includes(weekExpense.toLocaleString("th-TH", { maximumFractionDigits: 2 }))
+  );
 } else {
   // Simulate it: put a row on the week's start date, then re-ask with a week
   // that reaches back before the 1st.
@@ -10164,11 +10209,18 @@ check(
 
 // PLAN.md 17.86: the month reads as days. Asked for directly — the flat list
 // repeated the date on every row and never said what a given day came to.
+// A second day *inside the same month*, since the page shows one month at a
+// time. "Yesterday" is the obvious choice and the wrong one: on the 1st it
+// lands in the previous month and the rows simply are not on this page, so
+// the test failed on one day in thirty (PLAN.md 17.88).
+const otherDay = editToday.endsWith("-01") ? addDaysToDateKey(editToday, 1) : addDaysToDateKey(editToday, -1);
+const [newerDay, olderDay] = otherDay > editToday ? [otherDay, editToday] : [editToday, otherDay];
 sheetRows.push(
-  ["tx-yesterday-1", addDaysToDateKey(editToday, -1), "expense", 210, "food", "ข้าวเย็น", "ข้าวเย็น 210", "unknown", "", `${addDaysToDateKey(editToday, -1)}T12:00:00.000Z`],
-  ["tx-yesterday-2", addDaysToDateKey(editToday, -1), "income", 1000, "other-income", "ได้คืน", "ได้คืน 1000", "unknown", "", `${addDaysToDateKey(editToday, -1)}T13:00:00.000Z`]
+  ["tx-otherday-1", otherDay, "expense", 210, "food", "ข้าวเย็น", "ข้าวเย็น 210", "unknown", "", `${otherDay}T12:00:00.000Z`],
+  ["tx-otherday-2", otherDay, "income", 1000, "other-income", "ได้คืน", "ได้คืน 1000", "unknown", "", `${otherDay}T13:00:00.000Z`]
 );
 const dayGroupedPage = await (await worker.fetch(new Request(accountsUrl), env, new FakeExecutionContext())).text();
+
 // Read from the headings alone. Today's date also appears in the page
 // subtitle ("ข้อมูลล่าสุด ณ …") and a +1,000 income row prints its own signed
 // amount, so a whole-page search would pass on text that has nothing to do
@@ -10177,20 +10229,23 @@ const dayHeadings = [...dayGroupedPage.matchAll(/<div class="day-heading">([\s\S
 check(
   "the month's rows are grouped under a heading per day",
   dayHeadings.length === 2 &&
-    dayHeadings[0].includes(formatThaiDateLabel(editToday)) &&
-    dayHeadings[1].includes(formatThaiDateLabel(addDaysToDateKey(editToday, -1)))
+    dayHeadings[0].includes(formatThaiDateLabel(newerDay)) &&
+    dayHeadings[1].includes(formatThaiDateLabel(olderDay))
 );
 check(
   "newest day first, however the rows happen to sit in the sheet",
-  dayHeadings[0].includes(formatThaiDateLabel(editToday))
+  dayHeadings[0].includes(formatThaiDateLabel(newerDay))
 );
 // The number someone scrolling a day's rows is adding up in their head.
+// Looked up by day rather than by position, so the assertion says what it
+// means whichever way round the two days fall.
+const headingFor = (day) => dayHeadings.find((h) => h.includes(formatThaiDateLabel(day))) ?? "";
 check(
   "each day carries its own totals, both sides of the ledger",
-  dayHeadings[0].includes("-730") &&
-    !dayHeadings[0].includes("+") &&
-    dayHeadings[1].includes("-210") &&
-    dayHeadings[1].includes("+1,000")
+  headingFor(editToday).includes("-730") &&
+    !headingFor(editToday).includes("+") &&
+    headingFor(otherDay).includes("-210") &&
+    headingFor(otherDay).includes("+1,000")
 );
 // The month summary above is unchanged — that was the explicit ask.
 check(
